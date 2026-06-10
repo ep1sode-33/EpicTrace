@@ -28,3 +28,18 @@ def test_project_and_ingest_record_persist(tmp_path: Path):
         assert proj.id is not None
         assert rec.id is not None
         assert rec.project_id == proj.id
+
+
+def test_ingest_record_indexed_defaults_false(tmp_path):
+    from epictrace.config import AppConfig
+    from epictrace.db import Database
+    from epictrace.models import IngestRecord, Project
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    with db.session() as s:
+        proj = Project(title="P", folder_path=str(tmp_path / "P")); s.add(proj); s.flush()
+        rec = IngestRecord(
+            project_id=proj.id, original_filename="a.md", stored_path="/x/a.md",
+            content_hash="h", size_bytes=1, mtime=1.0, ingest_method="folder_scan",
+        )
+        s.add(rec); s.flush()
+        assert rec.indexed is False

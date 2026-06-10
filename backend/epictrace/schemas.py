@@ -37,4 +37,5 @@ class IngestRecordOut(BaseModel):
     mtime: float
     ingest_method: str
     description: str
+    indexed: bool
     created_at: datetime

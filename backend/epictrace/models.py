@@ -35,9 +35,10 @@ class IngestRecord(Base):
     content_hash: Mapped[str] = mapped_column(String(64))
     size_bytes: Mapped[int]
     mtime: Mapped[float]
-    ingest_method: Mapped[str] = mapped_column(String(32))  # file_direct / drag / session
+    ingest_method: Mapped[str] = mapped_column(String(32))  # file_direct / drag / session / folder_scan
     description: Mapped[str] = mapped_column(Text, default="")
     extracted_text: Mapped[str] = mapped_column(Text, default="")
+    indexed: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
     project: Mapped["Project"] = relationship(back_populates="ingest_records")
