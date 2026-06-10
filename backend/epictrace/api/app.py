@@ -24,4 +24,13 @@ def create_app(db: Database | None = None) -> FastAPI:
     app.include_router(health.router, prefix="/api")
     app.include_router(projects.router, prefix="/api")
     app.include_router(files.router, prefix="/api")
+
+    import os
+    from pathlib import Path
+    from fastapi.staticfiles import StaticFiles
+
+    dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    if dist.exists():
+        app.mount("/", StaticFiles(directory=str(dist), html=True), name="frontend")
+
     return app
