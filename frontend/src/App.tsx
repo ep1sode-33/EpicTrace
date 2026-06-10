@@ -1,14 +1,20 @@
 import { useState } from "react";
-import { ProjectPanel } from "@/components/ProjectPanel";
-import { IngestPanel } from "@/components/IngestPanel";
-import { type Project } from "@/lib/api";
+import { TopBar, type TabKey } from "@/components/TopBar";
+import { CaptureView } from "@/views/CaptureView";
+import { ProcessIngestView } from "@/views/ProcessIngestView";
+import { ProjectsConversationView } from "@/views/ProjectsConversationView";
 
 export default function App() {
-  const [selected, setSelected] = useState<Project | null>(null);
+  const [activeTab, setActiveTab] = useState<TabKey>("projects");
+
   return (
-    <div className="grid grid-cols-2 gap-8 p-8 max-w-5xl mx-auto">
-      <ProjectPanel selected={selected} onSelect={setSelected} />
-      {selected ? <IngestPanel project={selected} /> : <p className="text-muted-foreground">← 选或建一个 Project</p>}
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
+      <TopBar active={activeTab} onChange={setActiveTab} />
+      <main className="flex-1">
+        {activeTab === "capture" && <CaptureView />}
+        {activeTab === "process" && <ProcessIngestView />}
+        {activeTab === "projects" && <ProjectsConversationView />}
+      </main>
     </div>
   );
 }
