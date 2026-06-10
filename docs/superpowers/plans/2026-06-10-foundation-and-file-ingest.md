@@ -6,7 +6,7 @@
 
 **Architecture:** 后端是本地 FastAPI 服务,SQLAlchemy 2.0 + SQLite 做关系型元数据库;五个抽象接口(`LLMProvider` / `EmbeddingProvider` / `VectorStore` / `Segmenter` / `MediaProcessor`)以 ABC 形式从第一天就立好"接口缝",本计划只实现 `MediaProcessor`(文本)与 `IdentitySegmenter`,其余先放 ABC。前端 React+Vite+shadcn,通过 HTTP 调后端;pywebview 外壳负责启动 uvicorn 并开窗。**不含 embedding/向量库/LLM 调用**(留给后续 Plan 2/3)。
 
-**Tech Stack:** Python 3.11(venv,不用 uv)· FastAPI · uvicorn · SQLAlchemy 2.0 · pydantic v2 · pytest · httpx · React 18 · Vite · TypeScript · TailwindCSS · shadcn/ui · pywebview
+**Tech Stack:** Python 3.11(venv,不用 uv)· FastAPI · uvicorn · SQLAlchemy 2.0 · pydantic v2 · pytest · httpx · React 19 · Vite · TypeScript · TailwindCSS · shadcn/ui · pywebview
 
 **关键约定:** 文档/代码/提交信息中**不出现任何前身原型的产品代号**。
 
@@ -1174,7 +1174,7 @@ from epictrace.db import Database
 from epictrace.schemas import ProjectCreate, ProjectOut
 from epictrace.services.projects import ProjectService
 
-router = APIRouter(prefix="/api/projects", tags=["projects"])
+router = APIRouter(prefix="/projects", tags=["projects"])  # /api 由 app 工厂统一挂载
 
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
@@ -1199,7 +1199,7 @@ from epictrace.db import Database
 from epictrace.schemas import IngestRecordOut, IngestRequest
 from epictrace.services.ingest import IngestService
 
-router = APIRouter(prefix="/api/files", tags=["files"])
+router = APIRouter(prefix="/files", tags=["files"])  # /api 由 app 工厂统一挂载
 
 
 @router.post("/ingest", response_model=IngestRecordOut, status_code=status.HTTP_201_CREATED)
@@ -1249,9 +1249,9 @@ def create_app(db: Database | None = None) -> FastAPI:
         db.create_all()
     app.state.db = db
 
-    app.include_router(health.router)
-    app.include_router(projects.router)
-    app.include_router(files.router)
+    app.include_router(health.router, prefix="/api")
+    app.include_router(projects.router, prefix="/api")
+    app.include_router(files.router, prefix="/api")
     return app
 ```
 
