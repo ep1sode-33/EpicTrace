@@ -1,8 +1,15 @@
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from epictrace.config import AppConfig
 from epictrace.db import Database
+from epictrace.services.errors import (
+    InvalidSourcePath,
+    ProjectNotFound,
+    SourceFileNotFound,
+)
 from epictrace.services.ingest import IngestService
 from epictrace.services.projects import ProjectService
 
@@ -67,3 +74,66 @@ def test_list_for_project(tmp_path: Path):
     svc = IngestService(db)
     svc.ingest_file(project_id=proj.id, source_path=str(src), ingest_method="file_direct", description="")
     assert len(svc.list_for_project(proj.id)) == 1
+
+
+def test_ingest_missing_project_raises(tmp_path: Path):
+    db, _ = _setup(tmp_path)
+    src = tmp_path / "f.txt"
+    src.write_text("x", encoding="utf-8")
+    with pytest.raises(ProjectNotFound):
+        IngestService(db).ingest_file(
+            project_id=99999,
+            source_path=str(src),
+            ingest_method="file_direct",
+            description="",
+        )
+
+
+def test_ingest_missing_source_raises(tmp_path: Path):
+    db, proj = _setup(tmp_path)
+    with pytest.raises(SourceFileNotFound):
+        IngestService(db).ingest_file(
+            project_id=proj.id,
+            source_path=str(tmp_path / "nonexistent.txt"),
+            ingest_method="file_direct",
+            description="",
+        )
+
+
+def test_ingest_source_is_directory_raises(tmp_path: Path):
+    db, proj = _setup(tmp_path)
+    d = tmp_path / "adir"
+    d.mkdir()
+    with pytest.raises(InvalidSourcePath):
+        IngestService(db).ingest_file(
+            project_id=proj.id,
+            source_path=str(d),
+            ingest_method="file_direct",
+            description="",
+        )
+
+
+def test_ingest_cleans_up_orphan_on_extraction_failure(tmp_path: Path, monkeypatch):
+    db, proj = _setup(tmp_path)
+    src = tmp_path / "src" / "data.txt"
+    src.parent.mkdir()
+    src.write_text("hello", encoding="utf-8")
+
+    class _BadProc:
+        def process(self, _path):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("epictrace.services.ingest.get_processor", lambda _: _BadProc())
+
+    folder = Path(proj.folder_path)
+    with pytest.raises(RuntimeError):
+        IngestService(db).ingest_file(
+            project_id=proj.id,
+            source_path=str(src),
+            ingest_method="file_direct",
+            description="",
+        )
+
+    # No orphaned copy should remain in the project folder
+    copied_files = [p for p in folder.iterdir() if p.is_file()]
+    assert copied_files == [], f"Orphan files found: {copied_files}"

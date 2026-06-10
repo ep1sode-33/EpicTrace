@@ -5,6 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from epictrace.api.deps import get_db
 from epictrace.db import Database
 from epictrace.schemas import IngestRecordOut, IngestRequest
+from epictrace.services.errors import (
+    InvalidSourcePath,
+    ProjectNotFound,
+    SourceFileNotFound,
+    SourceUnreadable,
+)
 from epictrace.services.ingest import IngestService
 
 router = APIRouter(prefix="/files", tags=["files"])  # /api 由 app 工厂统一挂载
@@ -19,8 +25,14 @@ def ingest_file(payload: IngestRequest, db: Database = Depends(get_db)) -> Inges
             ingest_method=payload.ingest_method,
             description=payload.description,
         )
-    except (ValueError, FileNotFoundError) as e:
+    except ProjectNotFound as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except SourceFileNotFound as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except InvalidSourcePath as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except SourceUnreadable as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     return IngestRecordOut.model_validate(rec)
 
 
