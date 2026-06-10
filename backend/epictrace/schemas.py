@@ -39,3 +39,8 @@ class IngestRecordOut(BaseModel):
     description: str
     indexed: bool
     created_at: datetime
+
+
+class ScanResultOut(BaseModel):
+    added: int
+    missing: int
