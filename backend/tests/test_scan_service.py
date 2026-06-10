@@ -29,7 +29,7 @@ def test_scan_registers_indexable_files_in_place(tmp_path):
     assert r.stored_path == str(folder / "note.md")   # 就地:指向原路径,未复制
     assert r.ingest_method == "folder_scan"
     assert r.indexed is False
-    assert "virtual memory" in r.extracted_text
+    assert r.extracted_text == ""   # 扫描只登记,不提取(提取统一在索引时做)
 
 
 def test_rescan_only_adds_new_files(tmp_path):
@@ -63,18 +63,14 @@ def test_scan_skips_unreadable_file_and_continues(tmp_path, monkeypatch):
 
     import epictrace.services.scan as scan_mod
 
-    real_get_processor = scan_mod.get_processor
+    real_sha256 = scan_mod._sha256
 
-    class _Failing:
-        def process(self, p):  # noqa: ANN001
-            raise OSError("simulated unreadable file")
-
-    def fake_get_processor(p):  # noqa: ANN001
+    def fake_sha256(p):  # noqa: ANN001
         if p.name == "bad.md":
-            return _Failing()
-        return real_get_processor(p)
+            raise OSError("simulated unreadable file")
+        return real_sha256(p)
 
-    monkeypatch.setattr(scan_mod, "get_processor", fake_get_processor)
+    monkeypatch.setattr(scan_mod, "_sha256", fake_sha256)
 
     svc = ScanService(db)
     result = svc.scan_and_register(proj.id)  # 不应抛异常

@@ -22,4 +22,5 @@ def test_registry_returns_text_processor_for_txt(tmp_path: Path):
 
 
 def test_registry_returns_none_for_unknown(tmp_path: Path):
-    assert get_processor(tmp_path / "a.pdf") is None
+    # 图片/音频本期无 processor(pdf/docx/pptx 现已有 processor)
+    assert get_processor(tmp_path / "a.png") is None
