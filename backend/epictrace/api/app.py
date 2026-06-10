@@ -12,7 +12,12 @@ def create_app(db: Database | None = None) -> FastAPI:
     app = FastAPI(title="EpicTrace")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173"],  # Vite dev server
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:8765",
+            "http://127.0.0.1:8765",
+        ],  # Vite dev server + pywebview
         allow_methods=["*"],
         allow_headers=["*"],
     )

@@ -9,16 +9,31 @@ export function ProjectPanel({
   const [projects, setProjects] = useState<Project[]>([]);
   const [title, setTitle] = useState("");
   const [folder, setFolder] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = () => api.listProjects().then(setProjects).catch(console.error);
-  useEffect(() => { refresh(); }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.listProjects().then((p) => { if (!cancelled) setProjects(p); }).catch(console.error);
+    return () => { cancelled = true; };
+  }, []);
 
   const create = async () => {
     if (!title || !folder) return;
-    const p = await api.createProject(title, folder);
-    setTitle(""); setFolder("");
-    await refresh();
-    onSelect(p);
+    setBusy(true);
+    setError(null);
+    try {
+      const p = await api.createProject(title, folder);
+      setTitle(""); setFolder("");
+      await refresh();
+      onSelect(p);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -27,8 +42,9 @@ export function ProjectPanel({
       <div className="flex gap-2">
         <Input placeholder="title (e.g. CS 2506)" value={title} onChange={(e) => setTitle(e.target.value)} />
         <Input placeholder="folder path (/Users/.../CS 2506)" value={folder} onChange={(e) => setFolder(e.target.value)} />
-        <Button onClick={create}>Create</Button>
+        <Button onClick={create} disabled={busy}>Create</Button>
       </div>
+      {error && <p className="text-sm text-red-500">{error}</p>}
       <ul className="space-y-1">
         {projects.map((p) => (
           <li key={p.id}>

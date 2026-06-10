@@ -1,4 +1,4 @@
-const BASE = "http://localhost:8765";
+const BASE = "";
 
 export interface Project { id: number; title: string; folder_path: string; created_at: string; }
 export interface IngestRecord {
