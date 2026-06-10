@@ -77,47 +77,44 @@ export function FileList({
           / {files.length}
         </span>
       </div>
-      <ul className="divide-y divide-border/60">
+      {/* 紧凑单行:文件名 + 状态徽章 + 大小;入库方式/描述移入悬停 title。 */}
+      <ul className="max-h-[52vh] divide-y divide-border/60 overflow-y-auto">
         {files.map((f) => (
           <li
             key={f.id}
-            className="group flex items-start gap-3 px-4 py-3 transition-colors hover:bg-muted/30"
+            className="group flex items-center gap-2.5 px-4 py-1.5 transition-colors hover:bg-muted/30"
+            title={
+              f.description
+                ? `${ingestMethodLabel(f.ingest_method)} · ${f.description}`
+                : ingestMethodLabel(f.ingest_method)
+            }
           >
-            <span
+            <FileText
               aria-hidden
-              className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border/60"
-            >
-              <FileText className="size-4" strokeWidth={1.75} />
+              className="size-4 shrink-0 text-muted-foreground"
+              strokeWidth={1.75}
+            />
+            <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+              {f.original_filename}
             </span>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="truncate text-sm font-medium text-foreground">
-                  {f.original_filename}
-                </span>
-                <Badge variant={f.indexed ? "success" : "pending"}>
-                  <span
-                    aria-hidden
-                    className={cn(
-                      "size-1.5 rounded-full",
-                      f.indexed
-                        ? "bg-emerald-600 dark:bg-emerald-400"
-                        : "bg-amber-500 dark:bg-amber-400",
-                    )}
-                  />
-                  {f.indexed ? "已索引" : "待索引"}
-                </Badge>
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
-                <span className="tabular-nums">{formatBytes(f.size_bytes)}</span>
-                <span aria-hidden className="text-muted-foreground/40">·</span>
-                <span>{ingestMethodLabel(f.ingest_method)}</span>
-              </div>
-              {f.description && (
-                <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-                  {f.description}
-                </p>
-              )}
-            </div>
+            <Badge
+              variant={f.indexed ? "success" : "pending"}
+              className="shrink-0"
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "size-1.5 rounded-full",
+                  f.indexed
+                    ? "bg-emerald-600 dark:bg-emerald-400"
+                    : "bg-amber-500 dark:bg-amber-400",
+                )}
+              />
+              {f.indexed ? "已索引" : "待索引"}
+            </Badge>
+            <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
+              {formatBytes(f.size_bytes)}
+            </span>
           </li>
         ))}
       </ul>

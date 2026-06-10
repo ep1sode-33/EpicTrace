@@ -19,12 +19,15 @@ export function CreateProjectModal({
   open,
   onClose,
   onCreated,
+  onScanStart,
   onScanComplete,
   onScanError,
 }: {
   open: boolean;
   onClose: () => void;
   onCreated: (project: Project) => void;
+  /** 自动扫描刚发起时调用(早于网络往返),用于立即在页面上显示「正在扫描…」。 */
+  onScanStart?: (project: Project) => void;
   /** 创建后的自动扫描成功完成时调用,用于触发列表刷新(扫描是异步的,完成晚于 onCreated)。 */
   onScanComplete?: (project: Project) => void;
   /** 创建成功后的自动扫描失败时调用(非阻塞告警);创建本身不受影响。 */
@@ -67,6 +70,8 @@ export function CreateProjectModal({
       const p = await api.createProject(title, folderPath); // 接受非空文件夹
       onCreated(p); // 项目立即进入 UI,避免扫描失败时孤立/重复创建
       onClose();
+      // 扫描发起前先通知页面进入「正在扫描…」态(扫描本身仍非阻塞)。
+      onScanStart?.(p);
       // 扫描独立于创建、非阻塞:失败不应阻塞或回滚创建。
       api
         .scanProject(p.id)

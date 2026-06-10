@@ -15,8 +15,13 @@ export function ProcessIngestView() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [rescanning, setRescanning] = useState(false);
+  // 创建后的自动扫描在途时为 true(扫描异步,完成晚于 onCreated);与 rescanning 共用「扫描中」反馈。
+  const [scanning, setScanning] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [rescanFailures, setRescanFailures] = useState(0);
+
+  // 创建扫描或重新扫描任一在途,即视为「正在扫描」。
+  const isScanning = scanning || rescanning;
 
   useEffect(() => {
     let cancelled = false;
@@ -46,7 +51,7 @@ export function ProcessIngestView() {
   };
 
   const rescanAll = async () => {
-    if (rescanning || projects.length === 0) return;
+    if (isScanning || projects.length === 0) return;
     setRescanning(true);
     setRescanFailures(0);
     try {
@@ -84,15 +89,15 @@ export function ProcessIngestView() {
           type="button"
           variant="outline"
           size="lg"
-          disabled={rescanning || projects.length === 0}
+          disabled={isScanning || projects.length === 0}
           onClick={rescanAll}
         >
-          {rescanning ? (
+          {isScanning ? (
             <Loader2 className="size-4 animate-spin" />
           ) : (
             <RefreshCw className="size-4" />
           )}
-          {rescanning ? "正在扫描…" : "重新扫描"}
+          {isScanning ? "正在扫描…" : "重新扫描"}
         </Button>
 
         <div className="ml-auto">
@@ -118,7 +123,19 @@ export function ProcessIngestView() {
       )}
 
       <section className="flex flex-col gap-3">
-        <h2 className="text-sm font-medium text-foreground">待索引</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-medium text-foreground">待索引</h2>
+          {isScanning && (
+            <span
+              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+              role="status"
+              aria-live="polite"
+            >
+              <Loader2 className="size-3.5 animate-spin" />
+              正在扫描文件夹…
+            </span>
+          )}
+        </div>
         <PendingList projects={projects} refreshKey={refreshKey} />
       </section>
 
@@ -126,7 +143,12 @@ export function ProcessIngestView() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={handleCreated}
-        onScanComplete={() => setRefreshKey((k) => k + 1)}
+        onScanStart={() => setScanning(true)}
+        onScanComplete={() => {
+          setScanning(false);
+          setRefreshKey((k) => k + 1);
+        }}
+        onScanError={() => setScanning(false)}
       />
     </div>
   );

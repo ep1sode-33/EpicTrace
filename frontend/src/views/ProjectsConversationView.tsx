@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { FolderGit2, FolderPlus, MessagesSquare, SendHorizontal } from "lucide-react";
+import {
+  FolderGit2,
+  FolderPlus,
+  Loader2,
+  MessagesSquare,
+  SendHorizontal,
+} from "lucide-react";
 
 import { api, type Project } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -13,6 +19,8 @@ export function ProjectsConversationView() {
   const [createOpen, setCreateOpen] = useState(false);
   // 创建后的自动扫描完成时自增,触发当前项目文件列表重新拉取(扫描晚于 onCreated)。
   const [scanTick, setScanTick] = useState(0);
+  // 刚创建项目的自动扫描在途时为 true(扫描异步,完成晚于 onCreated)。
+  const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -56,7 +64,12 @@ export function ProjectsConversationView() {
 
       <section className="flex min-w-0 flex-1 flex-col">
         {selected ? (
-          <Workspace key={selected.id} project={selected} refreshKey={scanTick} />
+          <Workspace
+            key={selected.id}
+            project={selected}
+            refreshKey={scanTick}
+            scanning={scanning}
+          />
         ) : (
           <EmptyState onCreate={() => setCreateOpen(true)} />
         )}
@@ -66,13 +79,26 @@ export function ProjectsConversationView() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={handleCreated}
-        onScanComplete={() => setScanTick((t) => t + 1)}
+        onScanStart={() => setScanning(true)}
+        onScanComplete={() => {
+          setScanning(false);
+          setScanTick((t) => t + 1);
+        }}
+        onScanError={() => setScanning(false)}
       />
     </div>
   );
 }
 
-function Workspace({ project, refreshKey }: { project: Project; refreshKey: number }) {
+function Workspace({
+  project,
+  refreshKey,
+  scanning,
+}: {
+  project: Project;
+  refreshKey: number;
+  scanning: boolean;
+}) {
   return (
     <div className="flex h-full flex-col">
       {/* Workspace header */}
@@ -92,7 +118,19 @@ function Workspace({ project, refreshKey }: { project: Project; refreshKey: numb
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-8 py-7">
           <section className="flex flex-col gap-3">
-            <h2 className="text-sm font-medium text-foreground">项目文件</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-medium text-foreground">项目文件</h2>
+              {scanning && (
+                <span
+                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <Loader2 className="size-3.5 animate-spin" />
+                  正在扫描…
+                </span>
+              )}
+            </div>
             <FileList projectId={project.id} refreshKey={refreshKey} />
           </section>
 
