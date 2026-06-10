@@ -44,3 +44,11 @@ class IngestRecordOut(BaseModel):
 class ScanResultOut(BaseModel):
     added: int
     missing: int
+
+
+class IndexStatusOut(BaseModel):
+    project_id: int
+    total: int
+    done: int
+    status: str
+    errors: list[str] = []
