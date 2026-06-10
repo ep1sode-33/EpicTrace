@@ -106,7 +106,9 @@
 
 - Chunker:字符偏移正确、重叠、空文本、代码按行;`char_end-char_start` 与子串一致。
 - MediaProcessor:pdf/docx/pptx 提取出预期文本;未知类型返回 None。
-- EmbeddingProvider:可用一个**假实现**(返回固定维度向量)单测 IndexService,避免测试下真跑 torch/下模型;另有一个(可选、标记 slow)真 BGE-M3 冒烟。
+- EmbeddingProvider:**假实现**(返回**正确维度=1024** 的确定性向量,遵守真实契约)用于所有管线单测(Chunker/IndexService/Store/API),让测试快、确定、不依赖 torch/模型——单测验的是**我们的编排逻辑**,不是模型本身。
+- **真 BGE-M3 冒烟测试**(标 `slow`,默认跳过/可选跑):不只测"返回 1024 个 float",而是**真嵌入 → 存 Milvus → 查回**一整条,并**断言真实输出维度 == collection 维度(1024)**——专门兜住"假实现抓不到的契约/维度/归一化集成漂移"。
+- **测试边界(写明)**:检索**质量**(语义相近是否被召回)属于**评估(evaluation)**,不在单测范围——用小评估集 / 手测 / 后续 Langfuse 衡量,任何真模型单测都覆盖不了它。
 - MilvusLiteStore:upsert + query 往返;按 project_id 过滤;delete_by_record。
 - IndexService:用假 Embedder + 临时 Milvus,验证 提取→切分→嵌入→入库→`indexed` 翻转;单文件失败被跳过并记 errors;图片/音频被跳过。
 - API:index 启动 + status 进度;未知项目 404。
