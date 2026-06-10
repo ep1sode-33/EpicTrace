@@ -8,10 +8,13 @@ dependencies = [
   "sqlalchemy>=2.0",
   "pydantic>=2",
   "pywebview",
+  "pypdf",
+  "python-docx",
+  "python-pptx",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+dev = ["pytest", "httpx", "reportlab"]
 
 [build-system]
 requires = ["setuptools>=68"]
