@@ -126,6 +126,7 @@ export function ProcessIngestView() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={handleCreated}
+        onScanComplete={() => setRefreshKey((k) => k + 1)}
       />
     </div>
   );

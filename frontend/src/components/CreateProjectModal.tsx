@@ -19,11 +19,14 @@ export function CreateProjectModal({
   open,
   onClose,
   onCreated,
+  onScanComplete,
   onScanError,
 }: {
   open: boolean;
   onClose: () => void;
   onCreated: (project: Project) => void;
+  /** 创建后的自动扫描成功完成时调用,用于触发列表刷新(扫描是异步的,完成晚于 onCreated)。 */
+  onScanComplete?: (project: Project) => void;
   /** 创建成功后的自动扫描失败时调用(非阻塞告警);创建本身不受影响。 */
   onScanError?: (project: Project, error: unknown) => void;
 }) {
@@ -65,11 +68,17 @@ export function CreateProjectModal({
       onCreated(p); // 项目立即进入 UI,避免扫描失败时孤立/重复创建
       onClose();
       // 扫描独立于创建、非阻塞:失败不应阻塞或回滚创建。
-      api.scanProject(p.id).catch((e) => {
-        // 创建已成功且弹窗已关闭,这里只做非阻塞告警。
-        onScanError?.(p, e);
-        console.warn(`项目「${p.title}」创建后自动扫描失败:`, e);
-      });
+      api
+        .scanProject(p.id)
+        .then(() => {
+          // 扫描异步完成(晚于 onCreated),通知页面刷新文件/待索引列表。
+          onScanComplete?.(p);
+        })
+        .catch((e) => {
+          // 创建已成功且弹窗已关闭,这里只做非阻塞告警。
+          onScanError?.(p, e);
+          console.warn(`项目「${p.title}」创建后自动扫描失败:`, e);
+        });
     } catch (e) {
       setError(String(e));
     } finally {

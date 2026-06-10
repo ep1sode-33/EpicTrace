@@ -5,7 +5,13 @@ import { api, type IngestRecord } from "@/lib/api";
 import { cn, formatBytes, ingestMethodLabel } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 
-export function FileList({ projectId }: { projectId: number }) {
+export function FileList({
+  projectId,
+  refreshKey = 0,
+}: {
+  projectId: number;
+  refreshKey?: number;
+}) {
   const [files, setFiles] = useState<IngestRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,7 +30,7 @@ export function FileList({ projectId }: { projectId: number }) {
     return () => {
       cancelled = true;
     };
-  }, [projectId]);
+  }, [projectId, refreshKey]);
 
   if (error) {
     return (
