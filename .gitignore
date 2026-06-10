@@ -1,0 +1,43 @@
+# Brainstorm / superpowers 工作文件(含临时 HTML,不进 git)
+.superpowers/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / 前端
+node_modules/
+dist/
+build/
+.vite/
+*.local
+
+# 本地数据 / 索引 / 向量库(事实来源是 Project 文件夹,这些是可重建的派生物)
+*.db
+*.sqlite
+*.sqlite3
+*.lance/
+/data/
+/models/
+
+# 密钥与环境
+.env
+.env.*
+!.env.example
+*.key
+
+# Claude Code 本地设置(共享的是 .claude/settings.json;.local 是本机的)
+.claude/settings.local.json
+
+# OS / 编辑器
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
