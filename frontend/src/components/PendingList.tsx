@@ -12,18 +12,28 @@ type PendingGroup = {
   files: IngestRecord[];
 };
 
+// 单个项目分组的索引状态:idle 时无;运行中带进度;完成后保留失败数用于提示。
+type IndexState =
+  | { phase: "indexing"; done: number; total: number }
+  | { phase: "failed"; count: number };
+
 export function PendingList({
   projects,
   refreshKey,
+  onIndexed,
 }: {
   projects: Project[];
   /** 变更此值可触发重新聚合(例如重新扫描后)。 */
   refreshKey: number;
+  /** 某个项目索引完成后回调,供父级重新聚合(已索引文件离开待索引队列)。 */
+  onIndexed?: () => void;
 }) {
   const [groups, setGroups] = useState<PendingGroup[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 默认全部折叠:文件多时避免「无尽平铺列表」。按项目 id 记录展开态。
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  // 按项目 id 记录索引状态(运行中进度 / 完成后的失败提示)。
+  const [indexState, setIndexState] = useState<Record<number, IndexState>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -71,6 +81,40 @@ export function PendingList({
       else next.add(projectId);
       return next;
     });
+
+  const runIndex = async (group: PendingGroup) => {
+    const { projectId } = group;
+    // 进入运行态:先按该组的待索引文件数估个进度上限,拿到响应后再校正。
+    setIndexState((prev) => ({
+      ...prev,
+      [projectId]: { phase: "indexing", done: 0, total: group.files.length },
+    }));
+    try {
+      const job = await api.indexProject(projectId);
+      // 同步返回最终 job:done/total 即终态。失败文件用小字提示,成功则清除该组状态。
+      if (job.errors.length > 0) {
+        setIndexState((prev) => ({
+          ...prev,
+          [projectId]: { phase: "failed", count: job.errors.length },
+        }));
+      } else {
+        setIndexState((prev) => {
+          const next = { ...prev };
+          delete next[projectId];
+          return next;
+        });
+      }
+    } catch {
+      // 整体请求失败也归为「失败」提示;具体文件数未知,按该组全部计。
+      setIndexState((prev) => ({
+        ...prev,
+        [projectId]: { phase: "failed", count: group.files.length },
+      }));
+    } finally {
+      // 无论成败都让父级重新聚合:成功的文件翻「已索引」后会离开本队列。
+      onIndexed?.();
+    }
+  };
 
   if (error) {
     return (
@@ -122,32 +166,67 @@ export function PendingList({
       <div className="max-h-[52vh] divide-y divide-border/60 overflow-y-auto">
         {groups.map((g) => {
           const isOpen = expanded.has(g.projectId);
+          const state = indexState[g.projectId];
+          const indexing = state?.phase === "indexing";
           return (
             <div key={g.projectId}>
-              <button
-                type="button"
-                aria-expanded={isOpen}
-                onClick={() => toggle(g.projectId)}
-                className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-              >
-                <ChevronRight
-                  aria-hidden
-                  className={cn(
-                    "size-4 shrink-0 text-muted-foreground transition-transform",
-                    isOpen && "rotate-90",
-                  )}
-                  strokeWidth={2}
-                />
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-                  {g.projectTitle}
-                </span>
-                <span className="shrink-0 text-xs text-muted-foreground">
-                  <span className="font-medium tabular-nums text-foreground">
-                    {g.files.length}
-                  </span>{" "}
-                  个待索引
-                </span>
-              </button>
+              {/* 折叠头:左侧整块是展开/收起的点击区,右侧是该项目的「建立索引」动作。
+                  两者并列、互不嵌套,避免按钮套按钮。 */}
+              <div className="flex items-center gap-2 pr-3">
+                <button
+                  type="button"
+                  aria-expanded={isOpen}
+                  onClick={() => toggle(g.projectId)}
+                  className="flex min-w-0 flex-1 items-center gap-2.5 py-2.5 pl-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <ChevronRight
+                    aria-hidden
+                    className={cn(
+                      "size-4 shrink-0 text-muted-foreground transition-transform",
+                      isOpen && "rotate-90",
+                    )}
+                    strokeWidth={2}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+                    {g.projectTitle}
+                  </span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    <span className="font-medium tabular-nums text-foreground">
+                      {g.files.length}
+                    </span>{" "}
+                    个待索引
+                  </span>
+                </button>
+
+                {indexing ? (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1.5 px-1.5 text-xs text-muted-foreground tabular-nums"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <Loader2 className="size-3.5 animate-spin" />
+                    索引中 {state.done}/{state.total}
+                  </span>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() => runIndex(g)}
+                  >
+                    <Database className="size-3.5" />
+                    建立索引
+                  </Button>
+                )}
+              </div>
+
+              {/* 失败提示:索引完成但有文件失败时,在该组下方留一行小字。 */}
+              {state?.phase === "failed" && (
+                <p className="px-4 pb-2 pl-10 text-xs text-destructive">
+                  {state.count} 个文件索引失败
+                </p>
+              )}
 
               {isOpen && (
                 <ul className="divide-y divide-border/50 border-t border-border/50 bg-muted/15">
@@ -177,21 +256,6 @@ export function PendingList({
             </div>
           );
         })}
-      </div>
-
-      <div className="flex items-center justify-between gap-3 border-t border-border/70 bg-muted/30 px-4 py-3">
-        <span className="text-xs text-muted-foreground">
-          索引功能开发中(Plan 2)
-        </span>
-        <Button
-          type="button"
-          size="lg"
-          disabled
-          title="索引功能开发中(Plan 2)"
-        >
-          <Database className="size-4" />
-          建立索引
-        </Button>
       </div>
     </div>
   );

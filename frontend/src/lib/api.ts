@@ -6,6 +6,9 @@ export interface IngestRecord {
   content_hash: string; size_bytes: number; ingest_method: string; description: string; indexed: boolean; created_at: string;
 }
 export interface ScanResult { added: number; missing: number; }
+export interface IndexStatus {
+  project_id: number; total: number; done: number; status: string; errors: string[];
+}
 
 async function j<T>(r: Response): Promise<T> {
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
@@ -28,4 +31,8 @@ export const api = {
     }).then(j<IngestRecord>),
   scanProject: (projectId: number) =>
     fetch(`${BASE}/api/projects/${projectId}/scan`, { method: "POST" }).then(j<ScanResult>),
+  indexProject: (projectId: number) =>
+    fetch(`${BASE}/api/projects/${projectId}/index`, { method: "POST" }).then(j<IndexStatus>),
+  indexStatus: (projectId: number) =>
+    fetch(`${BASE}/api/projects/${projectId}/index/status`).then(j<IndexStatus>),
 };
