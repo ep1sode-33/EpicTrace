@@ -179,7 +179,7 @@ Python · FastAPI · RAG / Agentic RAG / 混合检索 / Rerank · LangChain/Lang
 
 - **AIGC 检测**(困惑度/风格/词汇多样性):与 EpicTrace 不自然契合,**唯一缺口**;真要吃这个细分,单独做个小检测 demo,**不为它扭曲产品**。
 - **文件系统实时监听 / 自动改名移动同步 / 类 Git 版本追踪 / 团队协作 / 云同步 / 常驻后台监控**(沿用原始 MVP 边界)。
-- **复用已有 Swift/WhisperKit 采集代码**:已决定不复用,跨平台 → 采集层在新栈(Python)重写。早期 Swift 原型的调参/幻觉过滤/系统音频经验见 `docs/reference/asr-streaming-tuning-notes.md`(其中 macOS Core Audio 知识可直接迁移)。
+- **与前身原型的关系**:不整体复用其 app/UI;但 **macOS 系统声音采集会复用其中隔离良好的 `SystemAudioCapture`(抽成独立的原生 helper:零 app 依赖、只 import Core Audio/AVFoundation、直接吐 16kHz mono Float32 PCM,藏在 `CaptureSource` 接口后)**——Python 无成熟的 macOS Core Audio tap 库,抽 helper(约 2h 封装)远优于重写。Win/Linux 各自实现(WASAPI loopback / PipeWire)。调参/过滤/系统音频经验见 `docs/reference/asr-streaming-tuning-notes.md`。
 - **本文不重述完整产品功能 spec**:那是另一份(或多份)需求/实现文档。
 
 ---
@@ -188,7 +188,7 @@ Python · FastAPI · RAG / Agentic RAG / 混合检索 / Rerank · LangChain/Lang
 
 | 项 | 风险 / 待验证 |
 |---|---|
-| 系统声音采集 | 每平台原生且最难:mac=ScreenCaptureKit/Core Audio taps(需屏幕录制权限)、Win=WASAPI loopback、Linux=PipeWire。先用 Python 库(soundcard 等)验证可行性。**macOS 的 Core Audio tap 经验与坑见 `docs/reference/asr-streaming-tuning-notes.md` §5(直接可迁移)** |
+| 系统声音采集 | 每平台机制不同:mac=Core Audio taps(需屏幕录制权限)、Win=WASAPI loopback、Linux=PipeWire。**macOS 走原生 helper(从前身原型 `SystemAudioCapture` 抽取,~2h 封装,已确认零 app 依赖、可独立)**,Win/Linux 用 Python 库(soundcard 等)。经验与坑见 `docs/reference/asr-streaming-tuning-notes.md` §5 |
 | 桌面打包 | 真正的痛点:PyInstaller spec 手写、端口冲突、mac 公证需**付费 Apple 开发者号**。A1 起步可推迟,迁 Tauri 时集中处理 |
 | Milvus Lite 混合/全文 | 见 §8 前提 2,实现时确认 jieba/BM25 通道方案 |
 | DeepSeek V4 Pro SKU | 实现前在官方控制台确认确切型号名与 RMB 价格 |
