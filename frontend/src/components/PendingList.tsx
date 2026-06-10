@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Database, Inbox, Loader2 } from "lucide-react";
 
 import { api, type IngestRecord, type Project } from "@/lib/api";
@@ -34,6 +34,15 @@ export function PendingList({
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
   // 按项目 id 记录索引状态(运行中进度 / 完成后的失败提示)。
   const [indexState, setIndexState] = useState<Record<number, IndexState>>({});
+  // 运行中的轮询定时器(按项目 id),组件卸载时统一清理,避免泄漏 / setState after unmount。
+  const pollTimers = useRef<Record<number, ReturnType<typeof setInterval>>>({});
+
+  useEffect(() => {
+    return () => {
+      for (const id of Object.values(pollTimers.current)) clearInterval(id);
+      pollTimers.current = {};
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,6 +91,29 @@ export function PendingList({
       return next;
     });
 
+  const finishIndex = (projectId: number, errorCount: number) => {
+    const timer = pollTimers.current[projectId];
+    if (timer !== undefined) {
+      clearInterval(timer);
+      delete pollTimers.current[projectId];
+    }
+    if (errorCount > 0) {
+      // 索引完成但有文件失败:用小字提示失败数。
+      setIndexState((prev) => ({
+        ...prev,
+        [projectId]: { phase: "failed", count: errorCount },
+      }));
+    } else {
+      setIndexState((prev) => {
+        const next = { ...prev };
+        delete next[projectId];
+        return next;
+      });
+    }
+    // 让父级重新聚合:成功的文件翻「已索引」后会离开本队列。
+    onIndexed?.();
+  };
+
   const runIndex = async (group: PendingGroup) => {
     const { projectId } = group;
     // 进入运行态:先按该组的待索引文件数估个进度上限,拿到响应后再校正。
@@ -90,29 +122,42 @@ export function PendingList({
       [projectId]: { phase: "indexing", done: 0, total: group.files.length },
     }));
     try {
-      const job = await api.indexProject(projectId);
-      // 同步返回最终 job:done/total 即终态。失败文件用小字提示,成功则清除该组状态。
-      if (job.errors.length > 0) {
-        setIndexState((prev) => ({
-          ...prev,
-          [projectId]: { phase: "failed", count: job.errors.length },
-        }));
-      } else {
-        setIndexState((prev) => {
-          const next = { ...prev };
-          delete next[projectId];
-          return next;
-        });
-      }
-    } catch {
-      // 整体请求失败也归为「失败」提示;具体文件数未知,按该组全部计。
+      // POST 立刻返回 running 的 job(后台线程推进);随后轮询 status 读实时进度。
+      const started = await api.indexProject(projectId);
       setIndexState((prev) => ({
         ...prev,
-        [projectId]: { phase: "failed", count: group.files.length },
+        [projectId]: {
+          phase: "indexing",
+          done: started.done,
+          total: started.total,
+        },
       }));
-    } finally {
-      // 无论成败都让父级重新聚合:成功的文件翻「已索引」后会离开本队列。
-      onIndexed?.();
+      // 已经是终态(例如该项目无可索引文件,total=0):直接收尾。
+      if (started.status !== "running") {
+        finishIndex(projectId, started.errors.length);
+        return;
+      }
+      // 每 ~800ms 轮询一次,直到 status !== "running"。
+      const timer = setInterval(async () => {
+        try {
+          const job = await api.indexStatus(projectId);
+          if (job.status === "running") {
+            setIndexState((prev) => ({
+              ...prev,
+              [projectId]: { phase: "indexing", done: job.done, total: job.total },
+            }));
+          } else {
+            finishIndex(projectId, job.errors.length);
+          }
+        } catch {
+          // 轮询失败:停止并按该组全部计为失败。
+          finishIndex(projectId, group.files.length);
+        }
+      }, 800);
+      pollTimers.current[projectId] = timer;
+    } catch {
+      // POST 整体失败:具体文件数未知,按该组全部计为失败。
+      finishIndex(projectId, group.files.length);
     }
   };
 
