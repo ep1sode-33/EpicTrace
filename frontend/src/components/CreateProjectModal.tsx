@@ -125,7 +125,7 @@ export function CreateProjectModal({
                 className={cn(
                   "flex h-9 min-w-0 flex-1 items-center rounded-lg border border-input bg-muted/40 px-3",
                   "font-mono text-xs",
-                  folderPath ? "text-foreground" : "text-muted-foreground/70",
+                  folderPath ? "text-foreground" : "text-muted-foreground",
                 )}
                 title={folderPath || undefined}
               >

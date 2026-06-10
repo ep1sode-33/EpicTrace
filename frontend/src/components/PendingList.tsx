@@ -71,10 +71,12 @@ export function PendingList({
 
   if (items.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-border/70 bg-muted/15 px-6 py-12 text-center">
-        <Inbox className="size-6 text-muted-foreground/60" strokeWidth={1.5} />
-        <p className="text-sm font-medium text-foreground">没有待索引的文件</p>
-        <p className="text-xs text-muted-foreground">
+      <div className="flex flex-col items-center justify-center gap-1.5 rounded-2xl border border-dashed border-border/70 bg-muted/15 px-6 py-12 text-center">
+        <Inbox className="size-6 text-muted-foreground" strokeWidth={1.5} />
+        <p className="mt-1 text-sm font-medium text-foreground">
+          没有待索引的文件
+        </p>
+        <p className="max-w-xs text-xs leading-relaxed text-muted-foreground">
           创建项目或重新扫描后,新发现的文件会出现在这里。
         </p>
       </div>
@@ -84,8 +86,11 @@ export function PendingList({
   return (
     <div className="overflow-hidden rounded-2xl border border-border/70 bg-card">
       <div className="flex items-center justify-between border-b border-border/70 bg-muted/30 px-4 py-2.5">
-        <span className="text-xs font-medium text-muted-foreground">
-          {items.length} 个文件待索引
+        <span className="text-xs text-muted-foreground">
+          <span className="font-medium tabular-nums text-foreground">
+            {items.length}
+          </span>{" "}
+          个文件待索引
         </span>
       </div>
 
@@ -100,17 +105,23 @@ export function PendingList({
                 <span className="truncate text-sm font-medium text-foreground">
                   {it.original_filename}
                 </span>
-                <Badge variant="pending">待索引</Badge>
+                <Badge variant="pending">
+                  <span
+                    aria-hidden
+                    className="size-1.5 rounded-full bg-amber-500 dark:bg-amber-400"
+                  />
+                  待索引
+                </Badge>
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
-                <span className="rounded bg-muted px-1.5 py-0.5 font-medium text-muted-foreground">
+                <span className="rounded bg-muted px-1.5 py-0.5 font-medium text-foreground">
                   {it.projectTitle}
                 </span>
-                <span aria-hidden className="text-border">·</span>
-                <span>{formatBytes(it.size_bytes)}</span>
+                <span aria-hidden className="text-muted-foreground/40">·</span>
+                <span className="tabular-nums">{formatBytes(it.size_bytes)}</span>
               </div>
               <p
-                className="mt-1 truncate font-mono text-[11px] text-muted-foreground/70"
+                className="mt-1 truncate font-mono text-[11px] text-muted-foreground"
                 title={it.stored_path}
               >
                 {it.stored_path}

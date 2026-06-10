@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FolderGit2, MessagesSquare, SendHorizontal, Sparkles } from "lucide-react";
+import { FolderGit2, FolderPlus, MessagesSquare, SendHorizontal } from "lucide-react";
 
 import { api, type Project } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -118,13 +118,13 @@ function ChatPlaceholder() {
         </p>
       </div>
 
-      <div className="mt-1 flex w-full max-w-xl items-center gap-2 rounded-xl border border-border/70 bg-background/70 px-3 py-2 opacity-70">
+      <div className="mt-1 flex w-full max-w-xl items-center gap-2 rounded-xl border border-border/70 bg-background px-3 py-2">
         <input
           type="text"
           disabled
           placeholder="向项目提问…"
           aria-label="对话输入(开发中)"
-          className="h-7 min-w-0 flex-1 cursor-not-allowed bg-transparent text-sm text-muted-foreground outline-none placeholder:text-muted-foreground/60"
+          className="h-7 min-w-0 flex-1 cursor-not-allowed bg-transparent text-sm text-muted-foreground outline-none placeholder:text-muted-foreground"
         />
         <Button type="button" size="icon-sm" disabled aria-label="发送(开发中)">
           <SendHorizontal className="size-4" />
@@ -141,7 +141,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
         aria-hidden
         className="flex size-14 items-center justify-center rounded-2xl bg-muted text-foreground ring-1 ring-border/70"
       >
-        <Sparkles className="size-6" strokeWidth={1.75} />
+        <FolderPlus className="size-6" strokeWidth={1.5} />
       </span>
       <h1 className="mt-5 text-xl font-semibold tracking-tight text-foreground">
         创建你的第一个项目

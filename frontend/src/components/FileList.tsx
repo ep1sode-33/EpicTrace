@@ -45,10 +45,10 @@ export function FileList({ projectId }: { projectId: number }) {
 
   if (files.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border/70 bg-muted/20 px-6 py-10 text-center">
-        <FileText className="size-5 text-muted-foreground/60" strokeWidth={1.75} />
-        <p className="text-sm font-medium text-foreground">该项目暂无文件</p>
-        <p className="text-xs text-muted-foreground">
+      <div className="flex flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-border/70 bg-muted/20 px-6 py-10 text-center">
+        <FileText className="size-5 text-muted-foreground" strokeWidth={1.5} />
+        <p className="mt-1 text-sm font-medium text-foreground">该项目暂无文件</p>
+        <p className="max-w-xs text-xs leading-relaxed text-muted-foreground">
           在「信息处理和入库」中重新扫描,或向项目文件夹添加文件。
         </p>
       </div>
@@ -60,11 +60,15 @@ export function FileList({ projectId }: { projectId: number }) {
   return (
     <div className="overflow-hidden rounded-xl border border-border/70 bg-card">
       <div className="flex items-center justify-between border-b border-border/70 bg-muted/30 px-4 py-2.5">
-        <span className="text-xs font-medium text-muted-foreground">
+        <span className="text-xs font-medium text-foreground">
           {files.length} 个文件
         </span>
-        <span className="text-xs text-muted-foreground/80">
-          已索引 {indexedCount} / {files.length}
+        <span className="text-xs text-muted-foreground">
+          已索引{" "}
+          <span className="font-medium tabular-nums text-foreground">
+            {indexedCount}
+          </span>{" "}
+          / {files.length}
         </span>
       </div>
       <ul className="divide-y divide-border/60">
@@ -85,20 +89,25 @@ export function FileList({ projectId }: { projectId: number }) {
                   {f.original_filename}
                 </span>
                 <Badge variant={f.indexed ? "success" : "pending"}>
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "size-1.5 rounded-full",
+                      f.indexed
+                        ? "bg-emerald-600 dark:bg-emerald-400"
+                        : "bg-amber-500 dark:bg-amber-400",
+                    )}
+                  />
                   {f.indexed ? "已索引" : "待索引"}
                 </Badge>
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
-                <span>{formatBytes(f.size_bytes)}</span>
-                <span aria-hidden className="text-border">·</span>
+                <span className="tabular-nums">{formatBytes(f.size_bytes)}</span>
+                <span aria-hidden className="text-muted-foreground/40">·</span>
                 <span>{ingestMethodLabel(f.ingest_method)}</span>
               </div>
               {f.description && (
-                <p
-                  className={cn(
-                    "mt-1.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground/90",
-                  )}
-                >
+                <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
                   {f.description}
                 </p>
               )}

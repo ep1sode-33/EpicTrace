@@ -39,7 +39,7 @@ export function TopBar({
           aria-label="主导航"
           className="absolute left-1/2 -translate-x-1/2"
         >
-          <div className="flex items-center gap-1 rounded-xl border border-border/60 bg-muted/50 p-1 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.6)]">
+          <div className="flex items-center gap-1 rounded-xl border border-border/70 bg-muted/60 p-1">
             {TABS.map(({ key, label, icon: Icon }) => {
               const isActive = key === active;
               return (
@@ -50,11 +50,11 @@ export function TopBar({
                   onClick={() => onChange(key)}
                   className={cn(
                     "group relative flex items-center gap-2 rounded-lg px-3.5 py-1.5 text-sm font-medium",
-                    "outline-none transition-all duration-200 ease-out",
+                    "outline-none transition-[color,background-color,box-shadow] duration-200 ease-out",
                     "focus-visible:ring-2 focus-visible:ring-ring/50",
                     isActive
-                      ? "bg-background text-foreground shadow-sm ring-1 ring-black/[0.04]"
-                      : "text-muted-foreground hover:text-foreground",
+                      ? "bg-background text-foreground shadow-sm ring-1 ring-foreground/[0.06]"
+                      : "text-muted-foreground hover:bg-background/50 hover:text-foreground",
                   )}
                 >
                   <Icon
@@ -62,17 +62,11 @@ export function TopBar({
                       "size-4 shrink-0 transition-colors duration-200",
                       isActive
                         ? "text-foreground"
-                        : "text-muted-foreground/80 group-hover:text-foreground",
+                        : "text-muted-foreground group-hover:text-foreground",
                     )}
                     strokeWidth={isActive ? 2.25 : 2}
                   />
                   <span className="whitespace-nowrap">{label}</span>
-                  {isActive && (
-                    <span
-                      aria-hidden
-                      className="absolute -bottom-[5px] left-1/2 h-[3px] w-5 -translate-x-1/2 rounded-full bg-foreground/80"
-                    />
-                  )}
                 </button>
               );
             })}
