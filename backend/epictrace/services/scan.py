@@ -15,10 +15,12 @@ IGNORE_DIRS = {
     "node_modules", ".git", ".venv", "venv", "env", "__pycache__",
     "dist", "build", ".idea", ".vscode", ".pytest_cache", ".mypy_cache",
 }
-# 仅登记这些可索引的文本/文档/代码类型(其余如二进制、媒体先跳过)
+# 仅登记这些可索引的文本/文档/代码类型(其余如二进制、媒体先跳过)。
+# 每个后缀都必须有对应 processor(见 media 注册表),否则会出现永远卡住的文件。
+# 故不收 .doc/.ppt 这类没有 processor 能读的旧版二进制格式。
 INDEXABLE_SUFFIXES = {
     ".md", ".markdown", ".txt", ".text", ".rst",
-    ".pdf", ".ppt", ".pptx", ".doc", ".docx",
+    ".pdf", ".pptx", ".docx",
     ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs",
     ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
     ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".css", ".sql",

@@ -13,13 +13,23 @@ router = APIRouter(prefix="/projects", tags=["projects"])  # /api 由 app 工厂
 
 
 def _job_to_out(job) -> IndexStatusOut:
-    return IndexStatusOut(
-        project_id=job.project_id,
-        total=job.total,
-        done=job.done,
-        status=job.status,
-        errors=job.errors,
-    )
+    # 后台线程会原地更新 job.done/errors/status,读时取锁拍快照。
+    with job._lock:
+        return IndexStatusOut(
+            project_id=job.project_id,
+            total=job.total,
+            done=job.done,
+            status=job.status,
+            errors=list(job.errors),
+        )
+
+
+def _ensure_project(db: Database, project_id: int) -> None:
+    from epictrace.models import Project
+
+    with db.session() as s:
+        if s.get(Project, project_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project not found")
 
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
@@ -44,19 +54,19 @@ def scan_project(project_id: int, db: Database = Depends(get_db)) -> ScanResultO
 
 @router.post("/{project_id}/index", response_model=IndexStatusOut)
 def index_project(project_id: int, request: Request, db: Database = Depends(get_db)) -> IndexStatusOut:
-    from epictrace.models import Project
-
-    with db.session() as s:
-        if s.get(Project, project_id) is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project not found")
+    _ensure_project(db, project_id)
     svc = IndexService(db, get_embedder(request), get_vector_store(request))
+    # 构建 running 的 job 并在守护线程里推进 per-file 工作,立刻返回 running 状态。
+    # (同步等待会在真模型上把请求拖到超时;前端改为轮询 status 读实时进度。)
     job = svc.index_project(project_id)
     request.app.state.index_jobs[project_id] = job
+    svc.run_in_background(job)
     return _job_to_out(job)
 
 
 @router.get("/{project_id}/index/status", response_model=IndexStatusOut)
-def index_status(project_id: int, request: Request) -> IndexStatusOut:
+def index_status(project_id: int, request: Request, db: Database = Depends(get_db)) -> IndexStatusOut:
+    _ensure_project(db, project_id)
     job = request.app.state.index_jobs.get(project_id)
     if job is None:
         return IndexStatusOut(project_id=project_id, total=0, done=0, status="idle")

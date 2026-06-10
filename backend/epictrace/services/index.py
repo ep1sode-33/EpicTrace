@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +21,8 @@ class IndexJob:
     done: int = 0
     status: str = "running"          # running | done | error
     errors: list[str] = field(default_factory=list)
+    # 后台线程逐文件更新 done/errors,API 轮询读取;单用户本地用锁足够。
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
 class IndexService:
@@ -29,6 +32,11 @@ class IndexService:
         self._store = vector_store
 
     def index_project(self, project_id: int) -> IndexJob:
+        """构建一个 running 的 IndexJob(算好 total),不在此处跑活。
+
+        调用方拿到 job 后用 run_in_background / _run 让 per-file 工作在后台推进,
+        从而 API 能立刻返回 running 状态、再由 status 轮询读取实时进度。
+        """
         # 取该项目待索引、且有可用 processor 的文件
         with self._db.session() as s:
             recs = list(
@@ -42,19 +50,32 @@ class IndexService:
             targets = [(r.id, r.stored_path) for r in recs if get_processor(Path(r.stored_path)) is not None]
 
         job = IndexJob(project_id=project_id, total=len(targets))
+        job._targets = targets  # type: ignore[attr-defined]  # 交给 _run 消费
+        return job
+
+    def run_in_background(self, job: IndexJob) -> threading.Thread:
+        """在守护线程里跑 _run(job),立刻返回线程对象;job 会被原地更新。"""
+        t = threading.Thread(target=self._run, args=(job,), daemon=True)
+        t.start()
+        return t
+
+    def _run(self, job: IndexJob) -> None:
+        targets = getattr(job, "_targets", [])
         for rec_id, path_str in targets:
             try:
                 path = Path(path_str)
                 proc = get_processor(path)
                 text = proc.process(path).text
                 chunks = chunk_text(text)
+                # 幂等:提取成功后、入库前无条件清旧块,
+                # 这样「现在提取为空」的文件也能清掉历史向量。
+                self._store.delete_by_record(rec_id)
                 if chunks:
                     vectors = self._embedder.embed([c.text for c in chunks])
-                    self._store.delete_by_record(rec_id)  # 幂等:重索引先清旧块
                     self._store.upsert([
                         {
                             "vector": vec, "text": c.text,
-                            "ingest_record_id": rec_id, "project_id": project_id,
+                            "ingest_record_id": rec_id, "project_id": job.project_id,
                             "char_start": c.char_start, "char_end": c.char_end,
                             "source_type": "folder_scan",
                             "embed_model_id": self._embedder.model_id,
@@ -66,8 +87,10 @@ class IndexService:
                     r = s.get(IngestRecord, rec_id)
                     if r is not None:
                         r.indexed = True
-                job.done += 1
+                with job._lock:
+                    job.done += 1
             except Exception as e:  # 单文件失败:记录并继续
-                job.errors.append(f"{path_str}: {e}")
-        job.status = "done"
-        return job
+                with job._lock:
+                    job.errors.append(f"{path_str}: {e}")
+        with job._lock:
+            job.status = "done"

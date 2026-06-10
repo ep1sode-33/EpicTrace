@@ -4,7 +4,15 @@ from pathlib import Path
 
 from epictrace.interfaces.media import MediaProcessor, MediaResult
 
-TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".text"}
+# 所有可按 UTF-8 直接读出的纯文本/代码/数据后缀。
+# 与 scan 的 INDEXABLE_SUFFIXES 对齐(扣掉走专用 processor 的 pdf/docx/pptx),
+# 避免出现「扫描登记了、却没有 processor 永远卡住」的文件。
+TEXT_SUFFIXES = {
+    ".md", ".markdown", ".txt", ".text", ".rst",
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs",
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
+    ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".css", ".sql",
+}
 
 
 class TextMediaProcessor(MediaProcessor):

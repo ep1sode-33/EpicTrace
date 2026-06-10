@@ -5,6 +5,10 @@ def test_empty_text_yields_no_chunks():
     assert chunk_text("") == []
 
 
+def test_whitespace_only_text_yields_no_chunks():
+    assert chunk_text("   \n\t  \n\n") == []
+
+
 def test_short_text_single_chunk_exact_offsets():
     t = "hello world"
     chunks = chunk_text(t, target=1800, overlap=200)

@@ -24,6 +24,8 @@ def test_index_extracts_chunks_embeds_and_flips_indexed(tmp_path):
     ScanService(db).scan_and_register(proj.id)
 
     job = svc.index_project(proj.id)
+    assert job.total == 1 and job.done == 0 and job.status == "running"
+    svc._run(job)  # 同步跑完后台工作,再断终态
     assert job.total == 1 and job.done == 1 and job.status == "done"
 
     # 文件翻成已索引
@@ -42,6 +44,7 @@ def test_index_skips_image_and_audio(tmp_path):
     (folder / "snd.mp3").write_bytes(b"ID3")
     ScanService(db).scan_and_register(proj.id)  # 注:.png/.mp3 不在 INDEXABLE_SUFFIXES,扫描就不会登记
     job = svc.index_project(proj.id)
+    svc._run(job)
     assert job.total == 0  # 没有可索引文件
 
 
@@ -62,6 +65,7 @@ def test_index_single_file_failure_is_recorded_not_fatal(tmp_path, monkeypatch):
         return real(p)
     monkeypatch.setattr(idx, "get_processor", boom)
     job = svc.index_project(proj.id)
+    svc._run(job)
     assert job.done == 1 and len(job.errors) == 1     # b 成功, a 记错
     assert job.status == "done"
 
@@ -69,4 +73,5 @@ def test_index_single_file_failure_is_recorded_not_fatal(tmp_path, monkeypatch):
 def test_status_for_unknown_project_total_zero(tmp_path):
     db, proj, folder, store, svc = _setup(tmp_path)
     job = svc.index_project(99999)
+    svc._run(job)
     assert job.total == 0

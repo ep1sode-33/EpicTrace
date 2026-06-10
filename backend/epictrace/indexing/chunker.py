@@ -30,7 +30,7 @@ def _find_break(window: str, min_end: int) -> int | None:
 def chunk_text(
     text: str, target: int = DEFAULT_TARGET, overlap: int = DEFAULT_OVERLAP
 ) -> list[Chunk]:
-    if not text:
+    if not text.strip():  # 空 / 仅空白:无可索引内容
         return []
     n = len(text)
     chunks: list[Chunk] = []

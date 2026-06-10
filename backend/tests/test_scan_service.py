@@ -15,6 +15,9 @@ def test_scan_registers_indexable_files_in_place(tmp_path):
     db, proj, folder = _setup(tmp_path)
     (folder / "note.md").write_text("hello virtual memory", encoding="utf-8")
     (folder / "data.bin").write_bytes(b"\x00\x01")          # 非可索引后缀 → 跳过
+    # 旧版二进制 Office 格式无 processor 可读,已移出白名单 → 跳过(否则永远卡住)
+    (folder / "legacy.doc").write_bytes(b"\xd0\xcf\x11\xe0")
+    (folder / "legacy.ppt").write_bytes(b"\xd0\xcf\x11\xe0")
     (folder / "node_modules").mkdir()
     (folder / "node_modules" / "junk.js").write_text("x", encoding="utf-8")  # 忽略目录 → 跳过
 
