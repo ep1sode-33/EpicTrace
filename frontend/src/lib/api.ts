@@ -3,8 +3,9 @@ const BASE = "";
 export interface Project { id: number; title: string; folder_path: string; created_at: string; }
 export interface IngestRecord {
   id: number; project_id: number; original_filename: string; stored_path: string;
-  content_hash: string; size_bytes: number; ingest_method: string; description: string; created_at: string;
+  content_hash: string; size_bytes: number; ingest_method: string; description: string; indexed: boolean; created_at: string;
 }
+export interface ScanResult { added: number; missing: number; }
 
 async function j<T>(r: Response): Promise<T> {
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
@@ -25,4 +26,6 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ project_id, source_path, ingest_method: "file_direct", description }),
     }).then(j<IngestRecord>),
+  scanProject: (projectId: number) =>
+    fetch(`${BASE}/api/projects/${projectId}/scan`, { method: "POST" }).then(j<ScanResult>),
 };
