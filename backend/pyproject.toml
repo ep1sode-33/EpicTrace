@@ -12,6 +12,7 @@ dependencies = [
   "python-docx",
   "python-pptx",
   "pymilvus[milvus_lite]",
+  "FlagEmbedding",
 ]
 
 [project.optional-dependencies]
