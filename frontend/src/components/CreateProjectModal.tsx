@@ -19,10 +19,13 @@ export function CreateProjectModal({
   open,
   onClose,
   onCreated,
+  onScanError,
 }: {
   open: boolean;
   onClose: () => void;
   onCreated: (project: Project) => void;
+  /** 创建成功后的自动扫描失败时调用(非阻塞告警);创建本身不受影响。 */
+  onScanError?: (project: Project, error: unknown) => void;
 }) {
   const [title, setTitle] = useState("");
   const [folderPath, setFolderPath] = useState("");
@@ -57,10 +60,16 @@ export function CreateProjectModal({
     setBusy(true);
     setError(null);
     try {
+      // 仅创建步骤会阻塞并影响 UI:失败则报错并保持弹窗打开。
       const p = await api.createProject(title, folderPath); // 接受非空文件夹
-      await api.scanProject(p.id); // 创建后自动扫描既有内容→待索引
-      onCreated(p);
+      onCreated(p); // 项目立即进入 UI,避免扫描失败时孤立/重复创建
       onClose();
+      // 扫描独立于创建、非阻塞:失败不应阻塞或回滚创建。
+      api.scanProject(p.id).catch((e) => {
+        // 创建已成功且弹窗已关闭,这里只做非阻塞告警。
+        onScanError?.(p, e);
+        console.warn(`项目「${p.title}」创建后自动扫描失败:`, e);
+      });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -163,7 +172,7 @@ export function CreateProjectModal({
             {busy ? (
               <>
                 <Loader2 className="size-4 animate-spin" />
-                正在创建并扫描…
+                正在创建…
               </>
             ) : (
               "创建项目"

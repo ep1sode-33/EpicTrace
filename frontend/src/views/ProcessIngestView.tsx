@@ -16,6 +16,7 @@ export function ProcessIngestView() {
   const [createOpen, setCreateOpen] = useState(false);
   const [rescanning, setRescanning] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [rescanFailures, setRescanFailures] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,19 +33,30 @@ export function ProcessIngestView() {
     };
   }, []);
 
-  const handleCreated = (project: Project) => {
-    setProjects((prev) => [project, ...prev]);
+  const handleCreated = async (project: Project) => {
+    // 重新拉取权威列表,避免较慢的初始 listProjects 响应覆盖乐观插入的新项目。
+    try {
+      const rows = await api.listProjects();
+      setProjects(rows);
+    } catch {
+      // 列表刷新失败时退回乐观插入,至少保证新项目可见。
+      setProjects((prev) => [project, ...prev]);
+    }
     setRefreshKey((k) => k + 1);
   };
 
   const rescanAll = async () => {
     if (rescanning || projects.length === 0) return;
     setRescanning(true);
+    setRescanFailures(0);
     try {
-      await Promise.all(projects.map((p) => api.scanProject(p.id)));
+      const results = await Promise.allSettled(
+        projects.map((p) => api.scanProject(p.id)),
+      );
+      // 无论成败,都刷新待索引列表;成功的项目结果应当立即可见。
       setRefreshKey((k) => k + 1);
-    } catch {
-      /* 单项目扫描失败不阻塞其余;下次刷新仍会重试。 */
+      const failed = results.filter((r) => r.status === "rejected").length;
+      setRescanFailures(failed);
     } finally {
       setRescanning(false);
     }
@@ -98,6 +110,12 @@ export function ProcessIngestView() {
           </Tooltip>
         </div>
       </div>
+
+      {rescanFailures > 0 && (
+        <p className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
+          {rescanFailures} 个项目扫描失败,可稍后重试。
+        </p>
+      )}
 
       <section className="flex flex-col gap-3">
         <h2 className="text-sm font-medium text-foreground">待索引</h2>

@@ -29,9 +29,18 @@ export function ProjectsConversationView() {
     };
   }, []);
 
-  const handleCreated = (project: Project) => {
-    setProjects((prev) => [project, ...prev]);
-    setSelected(project);
+  const handleCreated = async (project: Project) => {
+    // 重新拉取权威列表,避免较慢的初始 listProjects 响应覆盖乐观插入的新项目;
+    // 随后按 id 选中新项目。
+    try {
+      const rows = await api.listProjects();
+      setProjects(rows);
+      setSelected(rows.find((p) => p.id === project.id) ?? project);
+    } catch {
+      // 列表刷新失败时退回乐观插入,至少保证新项目可见且被选中。
+      setProjects((prev) => [project, ...prev]);
+      setSelected(project);
+    }
   };
 
   return (

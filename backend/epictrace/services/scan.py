@@ -75,16 +75,26 @@ class ScanService:
                 sp = str(p)
                 if sp in existing_paths:
                     continue
-                proc = get_processor(p)
-                extracted = proc.process(p).text if proc is not None else ""
+                # 单文件容错:任一文件不可读/消失/处理失败时跳过它并继续,
+                # 不让整次扫描回滚。被跳过的文件不计入 added。
+                try:
+                    content_hash = _sha256(p)
+                    stat = p.stat()
+                    proc = get_processor(p)
+                    extracted = proc.process(p).text if proc is not None else ""
+                except OSError:
+                    continue
+                except Exception:
+                    # 媒体处理器在读到损坏/异常文件时可能抛任意异常 → 跳过该文件。
+                    continue
                 s.add(
                     IngestRecord(
                         project_id=project_id,
                         original_filename=p.name,
                         stored_path=sp,
-                        content_hash=_sha256(p),
-                        size_bytes=p.stat().st_size,
-                        mtime=p.stat().st_mtime,
+                        content_hash=content_hash,
+                        size_bytes=stat.st_size,
+                        mtime=stat.st_mtime,
                         ingest_method="folder_scan",
                         description="",
                         extracted_text=extracted,

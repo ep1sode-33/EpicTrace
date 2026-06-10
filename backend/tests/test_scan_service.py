@@ -54,3 +54,32 @@ def test_rescan_flags_missing(tmp_path):
     f.unlink()
     result = svc.scan_and_register(proj.id)
     assert result.missing == 1
+
+
+def test_scan_skips_unreadable_file_and_continues(tmp_path, monkeypatch):
+    db, proj, folder = _setup(tmp_path)
+    bad = folder / "bad.md"; bad.write_text("boom", encoding="utf-8")
+    good = folder / "good.md"; good.write_text("fine", encoding="utf-8")
+
+    import epictrace.services.scan as scan_mod
+
+    real_get_processor = scan_mod.get_processor
+
+    class _Failing:
+        def process(self, p):  # noqa: ANN001
+            raise OSError("simulated unreadable file")
+
+    def fake_get_processor(p):  # noqa: ANN001
+        if p.name == "bad.md":
+            return _Failing()
+        return real_get_processor(p)
+
+    monkeypatch.setattr(scan_mod, "get_processor", fake_get_processor)
+
+    svc = ScanService(db)
+    result = svc.scan_and_register(proj.id)  # 不应抛异常
+
+    assert result.added == 1
+    recs = svc.list_pending(proj.id)
+    assert len(recs) == 1
+    assert recs[0].original_filename == "good.md"
