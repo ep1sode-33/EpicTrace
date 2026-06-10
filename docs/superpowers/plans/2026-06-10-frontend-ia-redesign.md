@@ -643,7 +643,7 @@ git commit -m "feat(frontend): pickers helper(pywebview 桥+开发回退)+ api s
 1. **后端全绿:** `cd backend && .venv/bin/pytest -q`(含新增 scan 测试)。
 2. **前端构建:** `cd frontend && npm run build` 成功。
 3. **打包态手测**(见 Task F7 Step 3):原生 Finder 选择器弹出、接受非空文件夹、扫描/重新扫描使文件进入待索引、各占位明确。
-4. **代号:** `grep -rn Conflux backend/ frontend/ shell/ docs/` 为空。
+4. **代号:** 全仓库(代码/前端/shell)不出现任何前身原型代号(用 `grep -rni` 对应代号应为空)。
 
 ---
 
