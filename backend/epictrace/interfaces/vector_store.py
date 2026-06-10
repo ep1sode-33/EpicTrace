@@ -11,3 +11,6 @@ class VectorStore(ABC):
 
     @abstractmethod
     def query(self, vector: list[float], filter: dict | None, k: int) -> list[dict]: ...
+
+    @abstractmethod
+    def delete_by_record(self, ingest_record_id: int) -> None: ...
