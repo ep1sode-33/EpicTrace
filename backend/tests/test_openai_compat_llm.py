@@ -36,3 +36,13 @@ def test_stream_yields_token_deltas(monkeypatch):
 
     monkeypatch.setattr(llm._client.chat.completions, "create", fake_create)
     assert "".join(llm.stream([{"role": "user", "content": "hi"}])) == "hello"
+
+
+def test_base_url_strips_trailing_chat_completions():
+    # 用户把整段端点(含 /chat/completions)粘进来也不该双拼(SDK 会自己加 /chat/completions)。
+    llm = OpenAICompatLLM(base_url="https://gw.example.com/v1/chat/completions/", api_key="k", model="m")
+    assert "chat/completions" not in str(llm._client.base_url)
+    assert "/v1" in str(llm._client.base_url)
+    # 粘"根"也照常工作。
+    llm2 = OpenAICompatLLM(base_url="https://gw.example.com/v1", api_key="k", model="m")
+    assert "/v1" in str(llm2._client.base_url)
