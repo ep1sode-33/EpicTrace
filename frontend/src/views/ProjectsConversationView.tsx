@@ -1,22 +1,37 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FolderGit2,
   FolderPlus,
   Loader2,
   PanelRight,
   Sparkles,
-  SendHorizontal,
   X,
 } from "lucide-react";
 
-import { api, type IngestRecord, type Project } from "@/lib/api";
+import {
+  api,
+  type Citation,
+  type Conversation,
+  type IngestRecord,
+  type Project,
+} from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { CreateProjectModal } from "@/components/CreateProjectModal";
 import { DeleteProjectDialog } from "@/components/DeleteProjectDialog";
 import { FileList } from "@/components/FileList";
 import { ProjectSidebar } from "@/components/ProjectSidebar";
+import { ConversationList } from "@/components/ConversationList";
+import { Composer } from "@/components/Composer";
+import { MessageList, type ViewMessage } from "@/components/MessageList";
+import { SourceViewer } from "@/components/SourceViewer";
 
-export function ProjectsConversationView() {
+export function ProjectsConversationView({
+  llmConfigured,
+  onOpenSettings,
+}: {
+  llmConfigured: boolean;
+  onOpenSettings: () => void;
+}) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Project | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -26,6 +41,11 @@ export function ProjectsConversationView() {
   const [scanTick, setScanTick] = useState(0);
   // 刚创建项目的自动扫描在途时为 true(扫描异步,完成晚于 onCreated)。
   const [scanning, setScanning] = useState(false);
+
+  // —— 会话状态(随选中项目切换)——
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [conversationsLoading, setConversationsLoading] = useState(false);
+  const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,6 +63,51 @@ export function ProjectsConversationView() {
       cancelled = true;
     };
   }, []);
+
+  // 选中项目变化:拉取其会话历史,默认选中最近一条(无则留空,空态引导新建)。
+  useEffect(() => {
+    setConversations([]);
+    setActiveConversationId(null);
+    if (!selected) return;
+    let cancelled = false;
+    setConversationsLoading(true);
+    api
+      .listConversations(selected.id)
+      .then((rows) => {
+        if (cancelled) return;
+        setConversations(rows);
+        setActiveConversationId(rows[0]?.id ?? null);
+      })
+      .catch(() => {
+        /* 会话列表拉取失败:留空,用户仍可新建。 */
+      })
+      .finally(() => {
+        if (!cancelled) setConversationsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
+  const handleCreateConversation = useCallback(async () => {
+    if (!selected) return;
+    try {
+      const c = await api.createConversation(selected.id);
+      setConversations((prev) => [c, ...prev]);
+      setActiveConversationId(c.id);
+    } catch {
+      /* 新建失败:静默,用户可重试。 */
+    }
+  }, [selected]);
+
+  // 助手回答完成后,标题可能已更新(后端按首条消息),刷新会话列表保持侧栏标题同步。
+  const refreshConversations = useCallback(() => {
+    if (!selected) return;
+    api
+      .listConversations(selected.id)
+      .then(setConversations)
+      .catch(() => {});
+  }, [selected]);
 
   const handleCreated = async (project: Project) => {
     // 重新拉取权威列表,避免较慢的初始 listProjects 响应覆盖乐观插入的新项目;
@@ -75,6 +140,17 @@ export function ProjectsConversationView() {
         onSelect={setSelected}
         onCreate={() => setCreateOpen(true)}
         onDelete={setPendingDelete}
+        footer={
+          selected && (
+            <ConversationList
+              conversations={conversations}
+              selectedId={activeConversationId}
+              loading={conversationsLoading}
+              onSelect={(c) => setActiveConversationId(c.id)}
+              onCreate={handleCreateConversation}
+            />
+          )
+        }
       />
 
       <section className="flex min-w-0 flex-1 flex-col">
@@ -84,6 +160,11 @@ export function ProjectsConversationView() {
             project={selected}
             refreshKey={scanTick}
             scanning={scanning}
+            llmConfigured={llmConfigured}
+            onOpenSettings={onOpenSettings}
+            activeConversationId={activeConversationId}
+            onCreateConversation={handleCreateConversation}
+            onConversationActivity={refreshConversations}
           />
         ) : (
           <EmptyState onCreate={() => setCreateOpen(true)} />
@@ -115,10 +196,20 @@ function Workspace({
   project,
   refreshKey,
   scanning,
+  llmConfigured,
+  onOpenSettings,
+  activeConversationId,
+  onCreateConversation,
+  onConversationActivity,
 }: {
   project: Project;
   refreshKey: number;
   scanning: boolean;
+  llmConfigured: boolean;
+  onOpenSettings: () => void;
+  activeConversationId: number | null;
+  onCreateConversation: () => void;
+  onConversationActivity: () => void;
 }) {
   // 来源(文件)抽屉默认关闭——对话是中心,文件是安静的次要资料。
   const [sourcesOpen, setSourcesOpen] = useState(false);
@@ -173,8 +264,15 @@ function Workspace({
           />
         </header>
 
-        {/* 对话主体:占据主纵向空间,居中空态 + 底部醒目输入 */}
-        <Conversation projectTitle={project.title} />
+        {/* 对话主体:占据主纵向空间 */}
+        <Conversation
+          projectTitle={project.title}
+          conversationId={activeConversationId}
+          llmConfigured={llmConfigured}
+          onOpenSettings={onOpenSettings}
+          onCreateConversation={onCreateConversation}
+          onConversationActivity={onConversationActivity}
+        />
       </div>
 
       {/* 来源抽屉:默认关闭;开启时贴主区右侧,复用现有 FileList */}
@@ -287,56 +385,204 @@ function SourcesDrawer({
   );
 }
 
+function parseCitations(json: string | null): Citation[] {
+  if (!json) return [];
+  try {
+    const arr = JSON.parse(json);
+    return Array.isArray(arr) ? (arr as Citation[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * 对话主体——本工作区的中心元素(Codex/ChatGPT 式)。
- * 当前为占位:空态居中,底部为醒目但禁用的输入。真正的对话见后续计划。
+ * 选中会话后展示历史消息;Composer 发送走 SSE 流式渲染;assistant 的 [n] 引用可点开来源查看器。
  */
-function Conversation({ projectTitle }: { projectTitle: string }) {
+function Conversation({
+  projectTitle,
+  conversationId,
+  llmConfigured,
+  onOpenSettings,
+  onCreateConversation,
+  onConversationActivity,
+}: {
+  projectTitle: string;
+  conversationId: number | null;
+  llmConfigured: boolean;
+  onOpenSettings: () => void;
+  onCreateConversation: () => void;
+  onConversationActivity: () => void;
+}) {
+  const [messages, setMessages] = useState<ViewMessage[]>([]);
+  const [loading, setLoading] = useState(false);
+  // 流式状态文案(检索中/生成中);null 表示无进行中的请求。
+  const [status, setStatus] = useState<string | null>(null);
+  const [streaming, setStreaming] = useState(false);
+  // 点开来源查看器的当前引用;null 时关闭。
+  const [viewing, setViewing] = useState<Citation | null>(null);
+  // 当前流的 abort 句柄(切换会话 / 停止 / 卸载时调用)。
+  const abortRef = useRef<(() => void) | null>(null);
+
+  // 切换会话:中断在途流、拉取历史消息。
+  useEffect(() => {
+    abortRef.current?.();
+    abortRef.current = null;
+    setStreaming(false);
+    setStatus(null);
+    setMessages([]);
+    if (conversationId == null) return;
+    let cancelled = false;
+    setLoading(true);
+    api
+      .listMessages(conversationId)
+      .then((rows) => {
+        if (cancelled) return;
+        setMessages(
+          rows.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            citations: parseCitations(m.citations_json),
+          })),
+        );
+      })
+      .catch(() => {
+        /* 历史拉取失败:留空,用户仍可继续提问。 */
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId]);
+
+  // 组件卸载时中断在途流,避免回调写入已卸载组件。
+  useEffect(() => () => abortRef.current?.(), []);
+
+  const send = useCallback(
+    (content: string) => {
+      if (conversationId == null || streaming) return;
+      const assistantId = `assistant-${Date.now()}`;
+      // 乐观插入用户消息 + 一条空的流式助手消息。
+      setMessages((prev) => [
+        ...prev,
+        { id: `user-${Date.now()}`, role: "user", content, citations: [] },
+        { id: assistantId, role: "assistant", content: "", citations: [], streaming: true },
+      ]);
+      setStreaming(true);
+      setStatus("检索中");
+
+      const patch = (fn: (m: ViewMessage) => ViewMessage) =>
+        setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
+
+      abortRef.current = api.sendMessage(conversationId, content, {
+        onStatus: (s) => setStatus(s),
+        onToken: (t) => patch((m) => ({ ...m, content: m.content + t })),
+        onCitations: (c) => patch((m) => ({ ...m, citations: c })),
+        onDone: () => {
+          patch((m) => ({ ...m, streaming: false }));
+          setStreaming(false);
+          setStatus(null);
+          abortRef.current = null;
+          onConversationActivity();
+        },
+        onError: (e) => {
+          patch((m) => ({
+            ...m,
+            streaming: false,
+            content: m.content || `生成失败:${e.message}`,
+          }));
+          setStreaming(false);
+          setStatus(null);
+          abortRef.current = null;
+        },
+      });
+    },
+    [conversationId, streaming, onConversationActivity],
+  );
+
+  const stop = useCallback(() => {
+    abortRef.current?.();
+    abortRef.current = null;
+    setStreaming(false);
+    setStatus(null);
+    setMessages((prev) =>
+      prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)),
+    );
+  }, []);
+
+  const hasMessages = messages.length > 0;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 居中空态:占据主纵向空间 */}
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 text-center">
-        <span
-          aria-hidden
-          className="flex size-12 items-center justify-center rounded-2xl bg-muted text-foreground ring-1 ring-border/70"
-        >
-          <Sparkles className="size-5" strokeWidth={1.75} />
-        </span>
-        <h2 className="mt-5 text-lg font-semibold tracking-tight text-balance text-foreground">
-          与「{projectTitle}」对话
-        </h2>
-        <p className="mt-2 max-w-md text-sm leading-relaxed text-pretty text-muted-foreground">
-          为项目文件建立索引后,即可在此基于你的资料提问,
-          并跳回答案引用的原始来源。
-        </p>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {conversationId == null ? (
+          <CenteredEmpty
+            title={`与「${projectTitle}」对话`}
+            body="为项目文件建立索引后,即可在此基于你的资料提问,并跳回答案引用的原始来源。"
+            actionLabel="新建对话"
+            onAction={onCreateConversation}
+          />
+        ) : loading ? (
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            <Loader2 className="mr-2 size-4 animate-spin" />
+            正在加载对话…
+          </div>
+        ) : hasMessages ? (
+          <MessageList messages={messages} status={status} onCitation={setViewing} />
+        ) : (
+          <CenteredEmpty
+            title={`与「${projectTitle}」对话`}
+            body="基于本项目已索引的资料提问。回答会带来源引用,点引用编号可跳回原始片段。"
+          />
+        )}
       </div>
 
-      {/* 底部输入:页面的主操作位,醒目但当前禁用(开发中) */}
-      <div className="shrink-0 px-6 pb-7">
-        <div className="mx-auto w-full max-w-2xl">
-          <div className="flex items-end gap-2 rounded-2xl border border-border bg-background p-2 shadow-sm">
-            <textarea
-              rows={1}
-              disabled
-              placeholder="对话功能开发中(需先建立索引)"
-              aria-label="对话输入(开发中)"
-              className="max-h-40 min-h-9 w-full flex-1 resize-none cursor-not-allowed bg-transparent px-2.5 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground"
-            />
-            <Button
-              type="button"
-              size="icon"
-              disabled
-              aria-label="发送(开发中)"
-              className="mb-px"
-            >
-              <SendHorizontal className="size-4" />
-            </Button>
-          </div>
-          <p className="mt-2 text-center text-xs text-muted-foreground">
-            对话功能开发中——需先在「信息处理和入库」为项目建立索引。
-          </p>
-        </div>
-      </div>
+      <Composer
+        llmConfigured={llmConfigured}
+        streaming={streaming}
+        onSend={send}
+        onStop={stop}
+        onOpenSettings={onOpenSettings}
+      />
+
+      <SourceViewer citation={viewing} onClose={() => setViewing(null)} />
+    </div>
+  );
+}
+
+function CenteredEmpty({
+  title,
+  body,
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  body: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center px-6 text-center">
+      <span
+        aria-hidden
+        className="flex size-12 items-center justify-center rounded-2xl bg-muted text-foreground ring-1 ring-border/70"
+      >
+        <Sparkles className="size-5" strokeWidth={1.75} />
+      </span>
+      <h2 className="mt-5 text-lg font-semibold tracking-tight text-balance text-foreground">
+        {title}
+      </h2>
+      <p className="mt-2 max-w-md text-sm leading-relaxed text-pretty text-muted-foreground">
+        {body}
+      </p>
+      {actionLabel && onAction && (
+        <Button type="button" className="mt-6" onClick={onAction}>
+          {actionLabel}
+        </Button>
+      )}
     </div>
   );
 }

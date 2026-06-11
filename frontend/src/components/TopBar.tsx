@@ -1,4 +1,4 @@
-import { Radio, Inbox, MessagesSquare, type LucideIcon } from "lucide-react";
+import { Radio, Inbox, MessagesSquare, Settings, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type TabKey = "capture" | "process" | "projects";
@@ -14,9 +14,12 @@ const TABS: TabDef[] = [
 export function TopBar({
   active,
   onChange,
+  onOpenSettings,
 }: {
   active: TabKey;
   onChange: (tab: TabKey) => void;
+  /** 点齿轮打开对话模型设置。 */
+  onOpenSettings: () => void;
 }) {
   return (
     <header className="sticky top-0 z-30 border-b border-border/70 bg-background/85 backdrop-blur-xl supports-[backdrop-filter]:bg-background/70">
@@ -73,8 +76,18 @@ export function TopBar({
           </div>
         </nav>
 
-        {/* Right spacer keeps the segmented group optically centered */}
-        <div className="ml-auto w-px" />
+        {/* Right: settings gear (also keeps the segmented group optically centered) */}
+        <div className="ml-auto flex items-center">
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            aria-label="设置"
+            title="设置"
+            className="flex size-8 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+          >
+            <Settings className="size-[18px]" strokeWidth={2} />
+          </button>
+        </div>
       </div>
     </header>
   );
