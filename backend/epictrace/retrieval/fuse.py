@@ -9,7 +9,8 @@ def rrf_fuse(ranked_lists: list[list[RetrievedChunk]], k: int = 20) -> list[Retr
     scores: dict[tuple, float] = {}
     keep: dict[tuple, RetrievedChunk] = {}
     for lst in ranked_lists:
-        for rank, chunk in enumerate(lst):
+        # start=1:排名从 1 起算,故榜首得分 1/(60+1)(规范 RRF;rank 0 会让分母只有 60、偏离公式)。
+        for rank, chunk in enumerate(lst, start=1):
             key = chunk.key()
             scores[key] = scores.get(key, 0.0) + 1.0 / (_K0 + rank)
             keep.setdefault(key, chunk)

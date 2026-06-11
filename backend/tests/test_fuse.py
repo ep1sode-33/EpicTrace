@@ -19,3 +19,9 @@ def test_rrf_rewards_items_ranked_high_in_both_lists():
 def test_rrf_dedups_by_chunk_key():
     fused = rrf_fuse([[_c(1)], [_c(1)]], k=10)
     assert len(fused) == 1
+
+
+def test_rrf_top_item_uses_canonical_rank_base():
+    # 单路单项:榜首得分应为规范 RRF 的 1/(60+1)(rank 从 1 起算)。
+    fused = rrf_fuse([[_c(1)]], k=10)
+    assert fused[0].score == 1.0 / (60 + 1)
