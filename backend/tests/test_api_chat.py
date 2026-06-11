@@ -1,0 +1,53 @@
+import json
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from epictrace.api.app import create_app
+from epictrace.config import AppConfig
+from epictrace.db import Database
+from epictrace.retrieval.pipeline import HybridRetriever
+from epictrace.vectorstore.milvus_lite import MilvusLiteStore
+from tests.fakes import FakeEmbedder, FakeLLM, FakeReranker
+
+
+@pytest.fixture()
+def chat_client(tmp_path):
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    store = MilvusLiteStore(db_path=str(tmp_path / "v.db"), dim=1024)
+    emb = FakeEmbedder()
+    retriever = HybridRetriever(emb, store, FakeReranker())
+    llm = FakeLLM(grade="sufficient", answer="页表用于地址映射[1]。")
+    app = create_app(db=db, embedder=emb, vector_store=store, reranker=FakeReranker(),
+                     llm=llm, retriever=retriever)
+    return TestClient(app), db, store, emb
+
+
+def test_chat_flow_creates_conversation_streams_and_cites(chat_client, tmp_path):
+    client, db, store, emb = chat_client
+    folder = tmp_path / "P"
+    pid = client.post("/api/projects", json={"title": "P", "folder_path": str(folder)}).json()["id"]
+    store.upsert([{ "vector": emb.embed(["页表映射地址"])[0], "text": "页表映射地址", "ingest_record_id": 1,
+                    "project_id": pid, "char_start": 0, "char_end": 6, "source_type": "folder_scan",
+                    "embed_model_id": "fake" }])
+    cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
+
+    with client.stream("POST", f"/api/conversations/{cid}/messages", json={"content": "页表是什么"}) as r:
+        assert r.status_code == 200
+        body = "".join(chunk for chunk in r.iter_text())
+    assert "event: token" in body and "event: citations" in body and "event: done" in body
+
+    msgs = client.get(f"/api/conversations/{cid}/messages").json()
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert json.loads(msgs[1]["citations_json"])[0]["ingest_record_id"] == 1
+
+
+def test_send_message_without_llm_configured_returns_409(tmp_path):
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    app = create_app(db=db)  # llm=None 且 settings 无 key
+    client = TestClient(app)
+    pid = client.post("/api/projects", json={"title": "P", "folder_path": str(tmp_path / "P")}).json()["id"]
+    cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
+    r = client.request("POST", f"/api/conversations/{cid}/messages", json={"content": "x"})
+    assert r.status_code == 409  # 未配置对话模型

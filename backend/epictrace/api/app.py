@@ -5,10 +5,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from epictrace.config import AppConfig
 from epictrace.db import Database
-from epictrace.api.routers import files, health, projects
+from epictrace.api.routers import conversations, files, health, projects, settings, source
 
 
-def create_app(db: Database | None = None, embedder=None, vector_store=None) -> FastAPI:
+def create_app(
+    db: Database | None = None,
+    embedder=None,
+    vector_store=None,
+    reranker=None,
+    llm=None,
+    retriever=None,
+    config: AppConfig | None = None,
+) -> FastAPI:
     app = FastAPI(title="EpicTrace")
     app.add_middleware(
         CORSMiddleware,
@@ -22,21 +30,28 @@ def create_app(db: Database | None = None, embedder=None, vector_store=None) -> 
         allow_headers=["*"],
     )
     if db is None:
-        db = Database(AppConfig())
+        db = Database(config or AppConfig())
         db.create_all()
     app.state.db = db
+    # settings / get_llm 都读 app.state.config(而非新建 AppConfig()),保证 tmp data_dir
+    # 测试隔离:优先用显式 config 参数,否则取构造 db 时的 AppConfig。
+    app.state.config = config or getattr(db, "config", None) or AppConfig()
     # embedder/vector_store 可注入(测试注入假件)。默认延迟构造:不在 create_app 里
     # 急切起 BGE-M3 / Milvus(那样会拖慢/污染 health/projects/files 等无关用例),
     # 而是首次用到索引路由时再建真件(见 deps.get_embedder / get_vector_store)。
     app.state.embedder = embedder
     app.state.vector_store = vector_store
-    app.state.reranker = None  # 延迟构造(见 deps.get_reranker)
-    app.state.llm = None  # 注入或后续由 SettingsService 接线(见 deps.get_llm)
+    app.state.reranker = reranker  # 注入或延迟构造(见 deps.get_reranker)
+    app.state.llm = llm  # 注入或由 SettingsService 接线(见 deps.get_llm)
+    app.state.retriever = retriever  # 注入或延迟构造(见 deps.get_retriever)
     app.state.index_jobs = {}  # project_id -> IndexJob(最近一次)
 
     app.include_router(health.router, prefix="/api")
     app.include_router(projects.router, prefix="/api")
     app.include_router(files.router, prefix="/api")
+    app.include_router(conversations.router, prefix="/api")
+    app.include_router(source.router, prefix="/api")
+    app.include_router(settings.router, prefix="/api")
 
     import os
     from pathlib import Path

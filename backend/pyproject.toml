@@ -17,6 +17,7 @@ dependencies = [
   "jieba",
   "rank_bm25",
   "langgraph",
+  "sse-starlette",
 ]
 
 [project.optional-dependencies]

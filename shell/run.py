@@ -34,6 +34,12 @@ class Api:
         result = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False)
         return result[0] if result else None
 
+    def reveal_in_finder(self, path: str) -> None:
+        """在 Finder 中显示并选中给定文件(来源查看器「在 Finder 中显示」)。"""
+        import subprocess
+
+        subprocess.run(["open", "-R", path])
+
 
 def _serve() -> None:
     try:
