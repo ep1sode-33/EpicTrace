@@ -90,6 +90,7 @@ class ProfileCreate(BaseModel):
     base_url: str = Field(min_length=1)
     api_key: str = ""
     model: str = Field(min_length=1)
+    context_window: int = 32768
 
 
 class ProfileUpdate(BaseModel):
@@ -98,6 +99,7 @@ class ProfileUpdate(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     model: str | None = None
+    context_window: int | None = None
 
 
 class SetActiveIn(BaseModel):
@@ -123,6 +125,7 @@ class ProfileView(BaseModel):
     name: str
     base_url: str
     model: str
+    context_window: int
     api_key_set: bool
 
 

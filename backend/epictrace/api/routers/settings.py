@@ -38,6 +38,7 @@ def create_profile(payload: ProfileCreate, request: Request):
         base_url=payload.base_url,
         api_key=payload.api_key,
         model=payload.model,
+        context_window=payload.context_window,
     )
     _invalidate_llm(request)
     return svc.public_view()
@@ -55,6 +56,7 @@ def update_profile(profile_id: str, payload: ProfileUpdate, request: Request):
         base_url=payload.base_url,
         model=payload.model,
         api_key=api_key,
+        context_window=payload.context_window,
     )
     _invalidate_llm(request)
     return svc.public_view()
