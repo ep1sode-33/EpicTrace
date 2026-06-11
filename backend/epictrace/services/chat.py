@@ -87,7 +87,8 @@ class ChatService:
         路由→(可选)检索→流式→引用→落 assistant 消息 + 首轮自动命名。
         前置条件:本轮 user 消息状态已就绪(stream_answer 先落库;regenerate 复用已存在的)。"""
         is_first_user_turn = not any(m["role"] == "user" for m in history)
-        yield {"event": "status", "data": "检索中"}
+        # 首发用中性「思考中」:此刻还没判 route,direct 直答并不真检索,「检索中」会误导。
+        yield {"event": "status", "data": "思考中"}
         # 检索 + 生成全程兜异常:任一步抛错 → 发 error 事件并中止(不落半截 assistant 消息)。
         try:
             # 跑图到拿到最终 chunks(grade/rewrite 在图里),但生成改为这里流式。
