@@ -21,6 +21,9 @@ def build_rag_graph(llm, retriever, max_iterations: int = 2):
         return {"route": "direct" if direct else "retrieve"}
 
     def after_route(state: AgentState) -> str:
+        # 有聚焦的内部引用 → 一定检索(否则 direct 路由会绕过检索,聚焦引用形同虚设)。
+        if state.get("focus_ids"):
+            return "retrieve"
         return "retrieve" if state.get("route") != "direct" else "end"
 
     def retrieve(state: AgentState) -> AgentState:
