@@ -16,3 +16,11 @@ def get_source(ingest_record_id: int, db: Database = Depends(get_db)):
         return SourceOut(**SourceService(db).get_text(ingest_record_id))
     except ValueError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "source not found")
+
+
+@router.get("/attachment-source/{reference_id}", response_model=SourceOut)
+def get_attachment_source(reference_id: int, db: Database = Depends(get_db)):
+    try:
+        return SourceOut(**SourceService(db).get_attachment_text(reference_id))
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "source not found")
