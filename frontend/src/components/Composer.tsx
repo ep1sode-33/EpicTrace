@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Plus, Settings2, SendHorizontal, Square } from "lucide-react";
+import { FolderInput, Plus, Settings2, SendHorizontal, Square } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,8 @@ export function Composer({
   onStop,
   onOpenSettings,
   onAttachPaths,
+  onAddInternal,
+  onAttachUnsupported,
 }: {
   llmConfigured: boolean;
   streaming: boolean;
@@ -28,6 +30,10 @@ export function Composer({
   onOpenSettings: () => void;
   /** 用户通过「+」/拖拽/粘贴选了外部文件(绝对路径列表)。拖拽/粘贴在浏览器拿不到绝对路径时为空。 */
   onAttachPaths: (paths: string[]) => void;
+  /** 始终可用的「从项目引用文件」入口(打开内部文件选择器)。 */
+  onAddInternal: () => void;
+  /** 拖拽/粘贴带了文件但当前环境拿不到绝对路径时调用(用于提示改用「+」)。 */
+  onAttachUnsupported?: () => void;
 }) {
   const [value, setValue] = useState("");
   const [dragging, setDragging] = useState(false);
@@ -57,6 +63,7 @@ export function Composer({
       .map((f) => (f as File & { path?: string }).path)
       .filter((p): p is string => Boolean(p));
     if (paths.length) onAttachPaths(paths);
+    else if (e.dataTransfer.files.length) onAttachUnsupported?.();
   };
 
   return (
@@ -87,6 +94,10 @@ export function Composer({
             className="mb-px"
           >
             <Plus className="size-4" />
+          </Button>
+          <Button type="button" size="icon" variant="ghost" disabled={!llmConfigured}
+                  onClick={onAddInternal} aria-label="从项目引用文件" className="mb-px">
+            <FolderInput className="size-4" />
           </Button>
           <textarea
             ref={taRef}
@@ -120,6 +131,8 @@ export function Composer({
               if (paths.length) {
                 e.preventDefault();
                 onAttachPaths(paths);
+              } else if (e.clipboardData.files.length) {
+                onAttachUnsupported?.();
               }
             }}
           />

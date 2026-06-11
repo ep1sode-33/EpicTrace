@@ -693,8 +693,12 @@ function Conversation({
   const [references, setReferences] = useState<ConversationReference[]>([]);
   // 「从项目添加内部文件」选择对话框开关。
   const [pickInternalOpen, setPickInternalOpen] = useState(false);
+  // 附加外部文件失败时的可关闭内联提示;null 表示无错误。
+  const [attachError, setAttachError] = useState<string | null>(null);
   // 当前流的 abort 句柄(切换会话 / 停止 / 卸载时调用)。
   const abortRef = useRef<(() => void) | null>(null);
+  // 草稿首次落库的在途去重:并发调用 ensureConversation 时共用同一个创建 promise,避免重复建会话。
+  const creatingRef = useRef<Promise<number> | null>(null);
   // 由本组件在草稿首次发送时落库出来的 cid。父级随后会把 conversationId 切到这个值,
   // 此时不应重置/重拉历史——流就在本实例里跑,内容已在屏。下面的重置 effect 据此跳过这一跳变。
   const selfCreatedCidRef = useRef<number | null>(null);
@@ -799,10 +803,20 @@ function Conversation({
   // 使切换会话的重置 effect 跳过这一跳变,不打断在途流/不清掉刚加的引用。
   const ensureConversation = useCallback(async (): Promise<number> => {
     if (conversationId != null) return conversationId;
-    const c = await onCreateConversation(projectId);
-    selfCreatedCidRef.current = c.id;
-    onConversationCreated(c);
-    return c.id;
+    // 已有在途创建:复用同一个 promise,避免并发(拖文件 + 紧接着发送)各建一段会话。
+    if (creatingRef.current) return creatingRef.current;
+    const create = (async () => {
+      const c = await onCreateConversation(projectId);
+      selfCreatedCidRef.current = c.id;
+      onConversationCreated(c);
+      return c.id;
+    })();
+    creatingRef.current = create;
+    try {
+      return await create;
+    } finally {
+      creatingRef.current = null;
+    }
   }, [conversationId, projectId, onCreateConversation, onConversationCreated]);
 
   const send = useCallback(
@@ -848,14 +862,18 @@ function Conversation({
   const attachExternal = useCallback(
     async (paths: string[]) => {
       const cid = await ensureConversation();
+      const failures: string[] = [];
       for (const p of paths) {
         try {
           await api.addExternalReference(cid, p);
-        } catch {
-          /* 单文件失败不阻塞其余 */
+        } catch (e) {
+          // 单文件失败不阻塞其余;收集后统一以内联提示呈现。
+          const name = p.split("/").pop() || p;
+          failures.push(`${name}(${e instanceof Error ? e.message : String(e)})`);
         }
       }
       await refreshRefs(cid);
+      setAttachError(failures.length ? `部分文件未能添加:${failures.join("；")}` : null);
     },
     [ensureConversation, refreshRefs],
   );
@@ -1015,6 +1033,15 @@ function Conversation({
         )}
       </div>
 
+      {inConversation && attachError && (
+        <div className="mx-auto w-full max-w-2xl px-6">
+          <div role="alert" className="flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
+            <span className="flex-1 break-words">{attachError}</span>
+            <button type="button" onClick={() => setAttachError(null)} aria-label="关闭" className="shrink-0 underline-offset-2 hover:underline">关闭</button>
+          </div>
+        </div>
+      )}
+
       {inConversation && (
         <ReferencePanel
           references={references}
@@ -1031,6 +1058,10 @@ function Conversation({
           onStop={stop}
           onOpenSettings={onOpenSettings}
           onAttachPaths={attachExternal}
+          onAddInternal={() => setPickInternalOpen(true)}
+          onAttachUnsupported={() =>
+            setAttachError("当前环境无法读取拖拽/粘贴的文件路径,请点 + 选择文件。")
+          }
         />
       )}
 
