@@ -85,21 +85,34 @@ class SourceOut(BaseModel):
     text: str
 
 
-class ChatLLMIn(BaseModel):
-    base_url: str
+class ProfileCreate(BaseModel):
+    name: str = Field(min_length=1)
+    base_url: str = Field(min_length=1)
     api_key: str = ""
-    model: str
+    model: str = Field(min_length=1)
 
 
-class SettingsIn(BaseModel):
-    chat_llm: ChatLLMIn
+class ProfileUpdate(BaseModel):
+    """部分更新:None/缺省 → 保留原值;尤其 api_key 缺省/空串视为「保留既有」。"""
+    name: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
 
 
-class ChatLLMView(BaseModel):
+class SetActiveIn(BaseModel):
+    profile_id: str
+
+
+class ProfileView(BaseModel):
+    id: str
+    name: str
     base_url: str
     model: str
     api_key_set: bool
 
 
 class SettingsOut(BaseModel):
-    chat_llm: ChatLLMView
+    configured: bool
+    active_profile_id: str | None
+    profiles: list[ProfileView]

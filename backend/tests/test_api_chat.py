@@ -63,8 +63,8 @@ def test_get_llm_allows_keyless_local_endpoint_when_configured(tmp_path):
 
     db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
     app = create_app(db=db)
-    SettingsService(app.state.config).update_chat_llm(
-        base_url="http://localhost:11434/v1", model="qwen", api_key=""
+    SettingsService(app.state.config).create_profile(
+        name="local", base_url="http://localhost:11434/v1", model="qwen", api_key=""
     )
     req = Request({"type": "http", "app": app})
     llm = get_llm(req)
