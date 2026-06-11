@@ -223,3 +223,95 @@ def test_regenerate_with_no_user_message_yields_error(tmp_path: Path):
     events = list(svc.stream_regenerate(cid))
     assert [e["event"] for e in events][-1] == "error"
     assert _roles(db, cid) == []
+
+
+def _ids_by_role(db, cid, role):
+    with db.session() as s:
+        return [m.id for m in s.execute(
+            select(Message).where(Message.conversation_id == cid, Message.role == role).order_by(Message.id)
+        ).scalars()]
+
+
+def test_edit_updates_user_content_deletes_after_and_regenerates(tmp_path: Path):
+    # 一轮后编辑该 user 消息:内容被改、其后的 assistant 被删、产出新 assistant;无重复 user。
+    db, cid = _setup(tmp_path)
+    svc = ChatService(db, FakeLLM(grade="sufficient", answer="第一次答案[1]。"), _Retriever())
+    list(svc.stream_answer(cid, "页表是什么"))
+    [user_id] = _ids_by_role(db, cid, "user")
+
+    svc2 = ChatService(db, FakeLLM(grade="sufficient", answer="编辑后的答案[1]。"), _Retriever())
+    events = list(svc2.stream_edit(cid, user_id, "改成新问题"))
+    assert [e["event"] for e in events][-1] == "done"
+    contents = _contents(db, cid)
+    assert [r for r, _ in contents] == ["user", "assistant"]
+    assert contents[0] == ("user", "改成新问题")        # 内容已替换
+    assert "编辑后的答案" in contents[1][1]
+    # user 消息仍是同一条(id 未变),没有新增重复 user。
+    assert _ids_by_role(db, cid, "user") == [user_id]
+
+
+def test_edit_middle_user_deletes_everything_after_and_keeps_prior_history(tmp_path: Path):
+    # 两轮后编辑第一轮的 user 消息:第二轮整轮被删,只剩 第一轮user + 新assistant;
+    # 第一轮之前无历史,故 stream 输入里不应含第二轮内容。
+    db, cid = _setup(tmp_path)
+    llm = FakeLLM(grade="sufficient", answer="第一轮答案[1]。")
+    svc = ChatService(db, llm, _Retriever())
+    list(svc.stream_answer(cid, "第一轮问题"))
+    list(svc.stream_answer(cid, "第二轮问题"))
+    assert _roles(db, cid) == ["user", "assistant", "user", "assistant"]
+    first_user_id = _ids_by_role(db, cid, "user")[0]
+
+    llm2 = FakeLLM(grade="sufficient", answer="编辑后的第一轮[1]。")
+    svc2 = ChatService(db, llm2, _Retriever())
+    list(svc2.stream_edit(cid, first_user_id, "编辑后的第一轮问题"))
+    contents = _contents(db, cid)
+    assert [r for r, _ in contents] == ["user", "assistant"]
+    assert contents[0] == ("user", "编辑后的第一轮问题")
+    assert "编辑后的第一轮" in contents[1][1]
+    sent = llm2.stream_messages[-1]
+    joined = " ".join(m["content"] for m in sent)
+    # 编辑第一条 → 它之前无历史:不应带入第二轮问题/答案。
+    assert "第二轮问题" not in joined and "第二轮答案" not in joined
+    assert "编辑后的第一轮问题" in sent[-1]["content"]
+
+
+def test_edit_preserves_history_before_edited_message(tmp_path: Path):
+    # 三条消息(user1/assistant1/user2)后编辑 user2:user1+assistant1 作历史传入。
+    db, cid = _setup(tmp_path)
+    llm = FakeLLM(grade="sufficient", answer="第二轮答案[1]。")
+    svc = ChatService(db, llm, _Retriever())
+    list(svc.stream_answer(cid, "第一轮问题"))
+    list(svc.stream_answer(cid, "第二轮问题"))
+    second_user_id = _ids_by_role(db, cid, "user")[1]
+
+    llm2 = FakeLLM(grade="sufficient", answer="编辑后的第二轮[1]。")
+    svc2 = ChatService(db, llm2, _Retriever())
+    list(svc2.stream_edit(cid, second_user_id, "编辑后的第二轮问题"))
+    assert _roles(db, cid) == ["user", "assistant", "user", "assistant"]
+    sent = llm2.stream_messages[-1]
+    joined = " ".join(m["content"] for m in sent)
+    assert "第一轮问题" in joined                       # 编辑点之前的历史在场
+    assert "编辑后的第二轮问题" in sent[-1]["content"]
+    assert _contents(db, cid)[2] == ("user", "编辑后的第二轮问题")
+
+
+def test_edit_unknown_message_yields_error_and_no_change(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    svc = ChatService(db, FakeLLM(grade="sufficient", answer="答[1]。"), _Retriever())
+    list(svc.stream_answer(cid, "页表是什么"))
+    before = _contents(db, cid)
+    events = list(svc.stream_edit(cid, 999999, "新内容"))
+    assert [e["event"] for e in events][-1] == "error"
+    assert _contents(db, cid) == before               # 未改动任何消息
+
+
+def test_edit_assistant_message_yields_error(tmp_path: Path):
+    # 目标必须是 user 消息;指向 assistant → error,不改动。
+    db, cid = _setup(tmp_path)
+    svc = ChatService(db, FakeLLM(grade="sufficient", answer="答[1]。"), _Retriever())
+    list(svc.stream_answer(cid, "页表是什么"))
+    [assistant_id] = _ids_by_role(db, cid, "assistant")
+    before = _contents(db, cid)
+    events = list(svc.stream_edit(cid, assistant_id, "试图编辑助手消息"))
+    assert [e["event"] for e in events][-1] == "error"
+    assert _contents(db, cid) == before

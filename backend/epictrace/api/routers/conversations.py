@@ -74,6 +74,33 @@ def send_message(cid: int, payload: MessageCreate, request: Request, db: Databas
     return EventSourceResponse(gen())
 
 
+@router.post("/conversations/{cid}/messages/{mid}/edit")
+def edit_message(cid: int, mid: int, payload: MessageCreate, request: Request,
+                 db: Database = Depends(get_db)):
+    # 编辑某条 user 消息 + 就地重生成:改其内容、删它之后的消息、对新内容重跑流水线(不新增 user)。
+    with db.session() as s:
+        if s.get(Conversation, cid) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    llm = get_llm(request)
+    if llm is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "对话模型未配置:请在设置里填写 OpenAI-Compatible 端点",
+        )
+    # 目标须是本会话内的一条 user 消息;否则 404(不存在 / 是 assistant / 属别的会话)。
+    with db.session() as s:
+        m = s.get(Message, mid)
+        if m is None or m.conversation_id != cid or m.role != "user":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "editable user message not found")
+    svc = ChatService(db, llm, get_retriever(request))
+
+    def gen():
+        for e in svc.stream_edit(cid, mid, payload.content):
+            yield {"event": e["event"], "data": e["data"]}
+
+    return EventSourceResponse(gen())
+
+
 @router.post("/conversations/{cid}/regenerate")
 def regenerate_message(cid: int, request: Request, db: Database = Depends(get_db)):
     # 重生成最后一轮:删最后一条 user 消息之后的消息、对同一提问重跑流水线(不新增 user)。

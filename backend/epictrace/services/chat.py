@@ -46,6 +46,26 @@ class ChatService:
         self._delete_messages_after(conversation_id, keep_count=last_user + 1)
         yield from self._run_turn(conversation_id, question, history)
 
+    def stream_edit(self, conversation_id: int, message_id: int, content: str) -> Iterator[dict]:
+        """编辑某条 user 消息并就地重生成:把该消息内容改为 content,删它之后的所有消息,
+        以它之前的消息作历史、对新内容重跑同一条流水线(不新增 user 消息)。
+        泛化自 regenerate——regenerate 是「重跑最后一条 user 的原内容」,这里指定任意 user 消息 + 新内容。"""
+        with self._db.session() as s:
+            rows = s.execute(
+                select(Message).where(Message.conversation_id == conversation_id).order_by(Message.id)
+            ).scalars().all()
+            # 找目标消息的下标,并校验它确是本会话内的一条 user 消息。
+            idx = next((i for i, m in enumerate(rows) if m.id == message_id), None)
+            if idx is None or rows[idx].role != "user":
+                yield {"event": "error", "data": "找不到可编辑的提问"}
+                return
+            rows[idx].content = content                 # 就地改写该 user 消息
+            # 编辑点之前的消息作历史(在会话内取值,出会话后 ORM 对象即失效)。
+            history = [{"role": m.role, "content": m.content} for m in rows[:idx]]
+        # 删该 user 消息之后的全部消息(旧/失败的 assistant 及后续轮次),避免重复累积。
+        self._delete_messages_after(conversation_id, keep_count=idx + 1)
+        yield from self._run_turn(conversation_id, content, history)
+
     def _run_turn(self, conversation_id: int, question: str, history: list[dict]) -> Iterator[dict]:
         """一轮生成的共享核心(stream_answer / stream_regenerate 共用):
         路由→(可选)检索→流式→引用→落 assistant 消息 + 首轮自动命名。
