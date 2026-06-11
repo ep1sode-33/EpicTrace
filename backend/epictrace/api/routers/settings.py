@@ -17,10 +17,13 @@ def get_settings(request: Request):
 @router.put("/settings")
 def put_settings(payload: SettingsIn, request: Request):
     svc = SettingsService(request.app.state.config)
+    # 前端只拿得到打码视图(api_key_set),编辑时若未重填 key 会回传空串;空串视为"不改 key"
+    # → 传 None 让 service 保留已存 key,避免一存设置就把真 key 抹掉。
+    incoming_key = payload.chat_llm.api_key
     svc.update_chat_llm(
         base_url=payload.chat_llm.base_url,
-        api_key=payload.chat_llm.api_key,
         model=payload.chat_llm.model,
+        api_key=incoming_key if incoming_key else None,
     )
     request.app.state.llm = None  # 失效缓存,下次按新设置重建
     return svc.public_view()

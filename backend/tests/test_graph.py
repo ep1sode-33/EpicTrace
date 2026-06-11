@@ -25,13 +25,35 @@ def test_sufficient_retrieval_ends_after_one_retrieve():
 
 
 def test_insufficient_triggers_rewrite_then_retrieves_again():
+    # 首次检索为空 → grade 短路判 insufficient(不消耗 grade_sequence),改写后第二次检到资料
+    # → 此时才真正问 LLM,返回 sufficient 收尾。
     retr = _Retriever({"页表是什么": [], "页表 虚拟内存 分页": _chunks("页表与分页")})
-    llm = FakeLLM(grade_sequence=["insufficient", "sufficient"], rewrite="页表 虚拟内存 分页")
+    llm = FakeLLM(grade="sufficient", rewrite="页表 虚拟内存 分页")
     graph = build_rag_graph(llm, retr)
     out = graph.invoke({"project_id": 7, "question": "页表是什么", "query": "页表是什么",
                         "history": [], "iterations": 0})
     assert retr.calls == ["页表是什么", "页表 虚拟内存 分页"]
     assert out["chunks"][0].text == "页表与分页"
+
+
+def test_empty_chunks_with_garbage_grade_never_exits_sufficient():
+    # 永远检不到 → grade 始终短路 insufficient;即便 LLM 在(理论上)被问到时回垃圾,
+    # 也绝不会判 sufficient。只能靠迭代上限收尾,且终态 chunks 为空(零资料不假装充分)。
+    retr = _Retriever({})
+    graph = build_rag_graph(FakeLLM(grade="马马虎虎也许吧", rewrite="x"), retr, max_iterations=2)
+    out = graph.invoke({"project_id": 7, "question": "q", "query": "q", "history": [], "iterations": 0})
+    assert out["chunks"] == []                         # 零资料,绝不臆造充分
+    assert len(retr.calls) == 3                         # 初次 + 2 次改写后到上限停
+
+
+def test_garbage_grade_on_nonempty_chunks_is_insufficient():
+    # 有资料但 grade 回含糊/垃圾(既非明确 sufficient)→ 严格解析按 insufficient → 继续改写到上限。
+    retr = _Retriever({"q": _chunks("一些资料")})
+    graph = build_rag_graph(FakeLLM(grade="可能 sufficient 但也 insufficient", rewrite="q"),
+                            retr, max_iterations=2)
+    out = graph.invoke({"project_id": 7, "question": "q", "query": "q", "history": [], "iterations": 0})
+    assert out["chunks"][0].text == "一些资料"         # 到上限兜底,仍带回已检到的资料
+    assert len(retr.calls) == 3
 
 
 def test_iteration_cap_stops_retrying():

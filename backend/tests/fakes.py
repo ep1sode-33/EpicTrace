@@ -73,6 +73,7 @@ class FakeLLM:
         self._grade_seq = list(grade_sequence) if grade_sequence else None
         self._rewrite = rewrite
         self._answer = answer
+        self.stream_messages: list[list[dict]] = []   # 记录每次 stream 收到的完整 message 列表(供多轮断言)
 
     def _route(self, messages):
         sys = messages[0]["content"]
@@ -88,5 +89,20 @@ class FakeLLM:
         return self._route(messages)
 
     def stream(self, messages, **kwargs):
+        self.stream_messages.append(list(messages))
         for ch in self._route(messages):
             yield ch
+
+
+class RaisingLLM:
+    """任一调用都抛错;用于验证 ChatService 把故障转成 error 事件且不落 assistant 消息。"""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self._exc = exc or RuntimeError("llm boom")
+
+    def complete(self, messages, **kwargs):
+        raise self._exc
+
+    def stream(self, messages, **kwargs):
+        raise self._exc
+        yield  # pragma: no cover — 让它成为生成器

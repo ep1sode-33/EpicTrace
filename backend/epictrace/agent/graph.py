@@ -16,11 +16,18 @@ def build_rag_graph(llm, retriever, max_iterations: int = 2):
         return {"chunks": chunks}
 
     def grade(state: AgentState) -> AgentState:
+        # 零 chunk 不喂 LLM:既省一次调用,也杜绝"无资料却判 sufficient"的幻觉
+        # (空资料 → 必然 insufficient → 继续改写检索,直到迭代上限才兜底生成)。
+        if not state.get("chunks"):
+            return {"_grade": "insufficient"}
         verdict = llm.complete([
             {"role": "system", "content": GRADE_SYS},
             {"role": "user", "content": f"问题:{state['question']}\n\n资料:\n{format_chunks(state['chunks'])}"},
         ]).strip().lower()
-        return {"_grade": "insufficient" if "insufficient" in verdict else "sufficient"}
+        # 严格解析:必须明确出现 sufficient 且不含 insufficient 才算充分;
+        # 含糊/垃圾输出一律按 insufficient 处理(保守 → 继续重试,而非误判充分)。
+        sufficient = "sufficient" in verdict and "insufficient" not in verdict
+        return {"_grade": "sufficient" if sufficient else "insufficient"}
 
     def decide(state: AgentState) -> str:
         if state.get("_grade") == "sufficient":

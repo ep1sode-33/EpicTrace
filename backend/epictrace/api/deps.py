@@ -61,8 +61,9 @@ def get_vector_store(request: Request):
 
 
 def get_llm(request: Request):
-    """对话 LLM:优先用注入的 app.state.llm;否则按 SettingsService 读 chat_llm 设置——
-    有 api_key 则构造 OpenAICompatLLM 并缓存到 app.state.llm,无 key 返回 None(由路由 409)。
+    """对话 LLM:优先用注入的 app.state.llm;否则按 SettingsService 判断是否「已配置」——
+    用户至少存过一次 chat_llm 设置(is_configured)就构造 OpenAICompatLLM 并缓存,**允许空 api_key**
+    (本地 Ollama 等无 key 端点),仅在「从未配置」时返回 None(由路由 409)。
     用 app.state.config(create_app 注入,测试为 tmp data_dir)而非新建 AppConfig(),保证隔离。"""
     llm = getattr(request.app.state, "llm", None)
     if llm is not None:
@@ -71,9 +72,10 @@ def get_llm(request: Request):
     from epictrace.services.settings import SettingsService
 
     config = getattr(request.app.state, "config", None) or AppConfig()
-    chat = SettingsService(config).get_chat_llm()
-    if not chat.api_key:
+    settings = SettingsService(config)
+    if not settings.is_configured():
         return None
+    chat = settings.get_chat_llm()
     from epictrace.llm.openai_compat import OpenAICompatLLM
 
     llm = OpenAICompatLLM(base_url=chat.base_url, api_key=chat.api_key, model=chat.model)

@@ -45,9 +45,27 @@ def test_chat_flow_creates_conversation_streams_and_cites(chat_client, tmp_path)
 
 def test_send_message_without_llm_configured_returns_409(tmp_path):
     db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
-    app = create_app(db=db)  # llm=None 且 settings 无 key
+    app = create_app(db=db)  # llm=None 且 settings 从未保存(未配置)
     client = TestClient(app)
     pid = client.post("/api/projects", json={"title": "P", "folder_path": str(tmp_path / "P")}).json()["id"]
     cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
     r = client.request("POST", f"/api/conversations/{cid}/messages", json={"content": "x"})
     assert r.status_code == 409  # 未配置对话模型
+
+
+def test_get_llm_allows_keyless_local_endpoint_when_configured(tmp_path):
+    # 已保存设置但 api_key 为空(本地 Ollama 等):应构造出 LLM,而非 None。
+    from fastapi import Request
+
+    from epictrace.api.deps import get_llm
+    from epictrace.llm.openai_compat import OpenAICompatLLM
+    from epictrace.services.settings import SettingsService
+
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    app = create_app(db=db)
+    SettingsService(app.state.config).update_chat_llm(
+        base_url="http://localhost:11434/v1", model="qwen", api_key=""
+    )
+    req = Request({"type": "http", "app": app})
+    llm = get_llm(req)
+    assert isinstance(llm, OpenAICompatLLM)
