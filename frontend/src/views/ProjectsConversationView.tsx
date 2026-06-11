@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  FileText,
   FolderGit2,
   FolderPlus,
   Loader2,
@@ -14,6 +15,7 @@ import {
   api,
   type Citation,
   type Conversation,
+  type ConversationReference,
   type IngestRecord,
   type Project,
   type StreamHandlers,
@@ -33,6 +35,7 @@ import { FileList } from "@/components/FileList";
 import { ProjectSidebar } from "@/components/ProjectSidebar";
 import { Composer } from "@/components/Composer";
 import { MessageList, type ViewMessage } from "@/components/MessageList";
+import { ReferencePanel } from "@/components/ReferencePanel";
 import { SourceViewer } from "@/components/SourceViewer";
 
 export function ProjectsConversationView({
@@ -686,6 +689,10 @@ function Conversation({
   const [streaming, setStreaming] = useState(false);
   // 点开来源查看器的当前引用;null 时关闭。
   const [viewing, setViewing] = useState<Citation | null>(null);
+  // 本对话引用(外部附件 + 内部项目文件)。草稿态为空,落库后随会话拉取。
+  const [references, setReferences] = useState<ConversationReference[]>([]);
+  // 「从项目添加内部文件」选择对话框开关。
+  const [pickInternalOpen, setPickInternalOpen] = useState(false);
   // 当前流的 abort 句柄(切换会话 / 停止 / 卸载时调用)。
   const abortRef = useRef<(() => void) | null>(null);
   // 由本组件在草稿首次发送时落库出来的 cid。父级随后会把 conversationId 切到这个值,
@@ -706,6 +713,8 @@ function Conversation({
     setStreaming(false);
     setStatus(null);
     setMessages([]);
+    // 切到草稿(null)或别的会话:引用先清空,真实会话再拉取。
+    setReferences([]);
     if (conversationId == null) return;
     let cancelled = false;
     setLoading(true);
@@ -727,6 +736,14 @@ function Conversation({
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
+      });
+    api
+      .listReferences(conversationId)
+      .then((rows) => {
+        if (!cancelled) setReferences(rows);
+      })
+      .catch(() => {
+        /* 引用拉取失败:留空,不阻塞对话。 */
       });
     return () => {
       cancelled = true;
@@ -776,6 +793,18 @@ function Conversation({
     [runStream],
   );
 
+  // 确保存在真实会话并返回其 cid:已有则直接返回;否则此刻才 createConversation。
+  // 草稿首次发送、附加外部/内部引用都经此创建,保证只创建一次(不重复建会话)。
+  // 创建成功会通知父级(入缓存、清草稿、设为选中),并记到 selfCreatedCidRef,
+  // 使切换会话的重置 effect 跳过这一跳变,不打断在途流/不清掉刚加的引用。
+  const ensureConversation = useCallback(async (): Promise<number> => {
+    if (conversationId != null) return conversationId;
+    const c = await onCreateConversation(projectId);
+    selfCreatedCidRef.current = c.id;
+    onConversationCreated(c);
+    return c.id;
+  }, [conversationId, projectId, onCreateConversation, onConversationCreated]);
+
   const send = useCallback(
     async (content: string) => {
       // 草稿态需先落库;非草稿则要求已有 cid。两种情况下流式进行中都不接受新发送。
@@ -792,28 +821,67 @@ function Conversation({
       setStreaming(true);
       setStatus("检索中");
 
-      let cid = conversationId;
-      if (cid == null) {
-        // 草稿首次发送:此刻才真正 createConversation。
-        try {
-          const c = await onCreateConversation(projectId);
-          cid = c.id;
-          selfCreatedCidRef.current = c.id;
-          // 通知父级:入缓存、清草稿、设为选中。这会把 conversationId 切到 c.id,
-          // 但上面的重置 effect 会因 selfCreatedCidRef 命中而跳过,不打断本次流。
-          onConversationCreated(c);
-        } catch {
-          // 落库失败:撤回乐观消息、回到草稿就绪态,用户可重试。
-          setMessages((prev) => prev.filter((m) => m.id !== assistantId).slice(0, -1));
-          setStreaming(false);
-          setStatus(null);
-          return;
-        }
+      let cid: number;
+      try {
+        // 草稿首次发送:此刻才真正 createConversation(经 ensureConversation 统一创建)。
+        cid = await ensureConversation();
+      } catch {
+        // 落库失败:撤回乐观消息、回到草稿就绪态,用户可重试。
+        setMessages((prev) => prev.filter((m) => m.id !== assistantId).slice(0, -1));
+        setStreaming(false);
+        setStatus(null);
+        return;
       }
 
       streamTo(cid, content, assistantId);
     },
-    [conversationId, draft, streaming, projectId, onCreateConversation, onConversationCreated, streamTo],
+    [conversationId, draft, streaming, ensureConversation, streamTo],
+  );
+
+  // —— 本对话引用:附加(外部/内部)/解挂 ——
+  // 引用按会话维护;附加任一前先确保会话已落库(ensureConversation,不重复建)。
+  // 单文件失败不阻塞其余;增删后统一以服务端为准重拉。
+  const refreshRefs = useCallback(async (cid: number) => {
+    setReferences(await api.listReferences(cid));
+  }, []);
+
+  const attachExternal = useCallback(
+    async (paths: string[]) => {
+      const cid = await ensureConversation();
+      for (const p of paths) {
+        try {
+          await api.addExternalReference(cid, p);
+        } catch {
+          /* 单文件失败不阻塞其余 */
+        }
+      }
+      await refreshRefs(cid);
+    },
+    [ensureConversation, refreshRefs],
+  );
+
+  const detachRef = useCallback(
+    async (rid: number) => {
+      // 解挂只对已落库会话有意义;草稿态无引用,无可解挂。
+      if (conversationId == null) return;
+      await api.detachReference(conversationId, rid);
+      await refreshRefs(conversationId);
+    },
+    [conversationId, refreshRefs],
+  );
+
+  const addInternal = useCallback(
+    async (ingestRecordId: number) => {
+      const cid = await ensureConversation();
+      try {
+        await api.addInternalReference(cid, ingestRecordId);
+      } catch {
+        /* ignore */
+      }
+      await refreshRefs(cid);
+      setPickInternalOpen(false);
+    },
+    [ensureConversation, refreshRefs],
   );
 
   const stop = useCallback(() => {
@@ -920,12 +988,40 @@ function Conversation({
             onEdit={editMessage}
           />
         ) : (
-          <CenteredEmpty
-            title={`与「${projectTitle}」对话`}
-            body="基于本项目已索引的资料提问。回答会带来源引用,点引用编号可跳回原始片段。"
-          />
+          messages.length === 0 &&
+          !streaming && (
+            <div className="mx-auto flex h-full w-full max-w-2xl flex-col items-center justify-center gap-3 px-6 text-center">
+              <p className="text-sm font-medium text-foreground">开始对话</p>
+              <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+                基于项目资料提问,或用「+」附一个文件一起聊。回答会带可跳回原文的来源引用。
+              </p>
+              <div className="flex flex-wrap justify-center gap-2">
+                {["这个项目主要讲了什么?", "帮我总结关键结论", "列出待办/风险点"].map(
+                  (q) => (
+                    <button
+                      key={q}
+                      type="button"
+                      disabled={!llmConfigured}
+                      onClick={() => send(q)}
+                      className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-foreground outline-none hover:bg-muted/50 disabled:opacity-50"
+                    >
+                      {q}
+                    </button>
+                  ),
+                )}
+              </div>
+            </div>
+          )
         )}
       </div>
+
+      {inConversation && (
+        <ReferencePanel
+          references={references}
+          onDetach={detachRef}
+          onAddInternal={() => setPickInternalOpen(true)}
+        />
+      )}
 
       {inConversation && (
         <Composer
@@ -934,12 +1030,108 @@ function Conversation({
           onSend={send}
           onStop={stop}
           onOpenSettings={onOpenSettings}
-          onAttachPaths={() => {}}
+          onAttachPaths={attachExternal}
         />
       )}
 
+      <InternalFilePicker
+        open={pickInternalOpen}
+        projectId={projectId}
+        onClose={() => setPickInternalOpen(false)}
+        onPick={addInternal}
+      />
+
       <SourceViewer citation={viewing} onClose={() => setViewing(null)} />
     </div>
+  );
+}
+
+/**
+ * 「从项目添加」内部文件选择器。打开时拉取该项目文件清单,以安静的列表行呈现。
+ * 仅已索引文件可点选(聚焦引用需要索引);未索引文件置灰禁用。点选即附加并关闭。
+ */
+function InternalFilePicker({
+  open,
+  projectId,
+  onClose,
+  onPick,
+}: {
+  open: boolean;
+  projectId: number;
+  onClose: () => void;
+  onPick: (ingestRecordId: number) => void;
+}) {
+  const [files, setFiles] = useState<IngestRecord[] | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setFiles(null);
+    api
+      .listFiles(projectId)
+      .then((rows) => {
+        if (!cancelled) setFiles(rows);
+      })
+      .catch(() => {
+        // 拉取失败:落空数组,显示「暂无可添加的文件」。
+        if (!cancelled) setFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, projectId]);
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent
+        showCloseButton
+        className="flex max-h-[min(70vh,40rem)] w-full max-w-md flex-col gap-0 overflow-hidden p-0"
+      >
+        <DialogHeader className="gap-1 border-b border-border/70 px-5 py-4 pr-12">
+          <DialogTitle className="text-sm font-semibold">从项目添加文件</DialogTitle>
+          <DialogDescription className="text-xs">
+            选一个已索引的文件作为本对话的聚焦引用。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          {files == null ? (
+            <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              正在加载文件…
+            </div>
+          ) : files.length === 0 ? (
+            <p className="px-2 py-12 text-center text-xs text-muted-foreground">
+              该项目暂无文件。
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {files.map((f) => (
+                <li key={f.id}>
+                  <button
+                    type="button"
+                    disabled={!f.indexed}
+                    onClick={() => onPick(f.id)}
+                    className="flex w-full items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-left outline-none hover:border-border/60 hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-transparent disabled:hover:bg-transparent"
+                  >
+                    <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span
+                      className="min-w-0 flex-1 truncate text-xs text-foreground"
+                      title={f.original_filename}
+                    >
+                      {f.original_filename}
+                    </span>
+                    <span className="shrink-0 text-[0.65rem] text-muted-foreground">
+                      {f.indexed ? "已索引" : "待索引"}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
