@@ -24,7 +24,9 @@ def build_rag_graph(llm, retriever, max_iterations: int = 2):
         return "retrieve" if state.get("route") != "direct" else "end"
 
     def retrieve(state: AgentState) -> AgentState:
-        chunks = retriever.retrieve(project_id=state["project_id"], query=state["query"])
+        focus = state.get("focus_ids")
+        kwargs = {"ingest_record_ids": focus} if focus else {}
+        chunks = retriever.retrieve(project_id=state["project_id"], query=state["query"], **kwargs)
         return {"chunks": chunks}
 
     def grade(state: AgentState) -> AgentState:
