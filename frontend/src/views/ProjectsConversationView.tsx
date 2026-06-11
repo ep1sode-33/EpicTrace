@@ -489,11 +489,9 @@ function Conversation({
           onConversationActivity();
         },
         onError: (e) => {
-          patch((m) => ({
-            ...m,
-            streaming: false,
-            content: m.content || `生成失败:${e.message}`,
-          }));
+          // SSE 可能发来 error 事件(base_url 错误 / 端点不可达 / 模型报错)。
+          // 把错误挂到当前助手消息上,以安静的内联通知呈现;已流出的部分正文保留。
+          patch((m) => ({ ...m, streaming: false, error: e.message }));
           setStreaming(false);
           setStatus(null);
           abortRef.current = null;

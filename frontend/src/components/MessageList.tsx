@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef } from "react";
-import { Loader2 } from "lucide-react";
+import { AlertCircle, Loader2 } from "lucide-react";
 
 import { type Citation } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -12,6 +12,8 @@ export interface ViewMessage {
   citations: Citation[];
   /** 该助手消息正在流式生成(用于呈现光标/状态而非引用)。 */
   streaming?: boolean;
+  /** 流式出错时的提示文案;有值则该条助手消息以安静的错误通知呈现(替代/附在正文之后)。 */
+  error?: string;
 }
 
 export function MessageList({
@@ -64,7 +66,8 @@ function MessageRow({
   }
 
   // 助手消息:左对齐纯文本流,无气泡(Codex/ChatGPT 式),内联引用 chip。
-  const showStatus = message.streaming && status;
+  // 出错时不再显示「检索中/生成中」状态(否则与错误并存读作仍在进行)。
+  const showStatus = message.streaming && status && !message.error;
   const showCursor = message.streaming && message.content.length > 0;
   return (
     <div className="flex flex-col gap-2">
@@ -93,6 +96,24 @@ function MessageRow({
           )}
         </div>
       )}
+      {message.error && <ErrorNotice message={message.error} />}
+    </div>
+  );
+}
+
+/**
+ * 流式出错时的安静内联通知(左对齐,贴合 assistant 一侧)。
+ * 复用全项目一致的 destructive 轻量样式(border-destructive/20 + bg-destructive/5 + text-destructive),
+ * 不喧哗、不阻断会话——告知出错并引导去检查设置。
+ */
+function ErrorNotice({ message }: { message: string }) {
+  return (
+    <div
+      role="alert"
+      className="flex w-fit max-w-full items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive"
+    >
+      <AlertCircle className="mt-px size-3.5 shrink-0" strokeWidth={2} aria-hidden />
+      <span className="break-words">对话出错:{message},请检查设置。</span>
     </div>
   );
 }

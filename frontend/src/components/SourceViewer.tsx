@@ -60,15 +60,18 @@ export function SourceViewer({
   }, [source]);
 
   // 把整段文本按 [start, end) 切成 前/高亮/后 三段;越界则做安全收敛。
+  // 后端的 char_start/char_end 是 Python 码点偏移;JS 字符串 .slice() 按 UTF-16 码元计数,
+  // 遇到非 BMP 字符(emoji 等)会错位。故先 Array.from 拆成码点数组再按码点切片。
   const segments = useMemo(() => {
     if (!source || !citation) return null;
-    const len = source.text.length;
+    const cp = Array.from(source.text);
+    const len = cp.length;
     const start = Math.max(0, Math.min(citation.char_start, len));
     const end = Math.max(start, Math.min(citation.char_end, len));
     return {
-      before: source.text.slice(0, start),
-      hit: source.text.slice(start, end),
-      after: source.text.slice(end),
+      before: cp.slice(0, start).join(""),
+      hit: cp.slice(start, end).join(""),
+      after: cp.slice(end).join(""),
       empty: start === end,
     };
   }, [source, citation]);

@@ -18,7 +18,7 @@ export interface ChatMessage {
 }
 export interface SourceText { filename: string; path: string; text: string; }
 export interface ChatLLMSettings { base_url: string; model: string; api_key_set: boolean; }
-export interface Settings { chat_llm: ChatLLMSettings; }
+export interface Settings { configured: boolean; chat_llm: ChatLLMSettings; }
 
 /** sendMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
 export interface StreamHandlers {
@@ -72,7 +72,8 @@ export const api = {
   getSource: (recordId: number) =>
     fetch(`${BASE}/api/source/${recordId}`).then(j<SourceText>),
   getSettings: () => fetch(`${BASE}/api/settings`).then(j<Settings>),
-  putSettings: (payload: { chat_llm: { base_url: string; api_key: string; model: string } }) =>
+  // api_key 可选:留空(undefined)时不放进请求体,后端据此保留既有 key,避免「只改模型」误清密钥。
+  putSettings: (payload: { chat_llm: { base_url: string; api_key?: string; model: string } }) =>
     fetch(`${BASE}/api/settings`, {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -117,6 +118,7 @@ export const api = {
             try { h.onCitations?.(JSON.parse(data) as Citation[]); }
             catch { /* 引用解析失败不致命:答案正文已经流式呈现 */ }
             break;
+          case "error": h.onError?.(new Error(data || "服务端错误")); break;
           case "done": h.onDone?.(); break;
         }
       };

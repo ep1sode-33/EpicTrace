@@ -75,13 +75,14 @@ export function SettingsModal({
     setSaving(true);
     setError(null);
     try {
-      // api_key 留空且后端已存有 key 时,保留旧 key(后端按字段覆盖,故回传占位会清空——
-      // 这里若用户没改 key 且后端已配置,沿用一个不会清空的策略:仅当用户填了才覆盖)。
+      // api_key 留空时不放进请求体(omit),后端据此保留既有 key——只改模型/Base URL 不会误清密钥。
+      // 仅当用户填了新 key 才提交并覆盖。
+      const trimmedKey = apiKey.trim();
       const settings = await api.putSettings({
         chat_llm: {
           base_url: baseUrl.trim(),
-          api_key: apiKey,
           model: model.trim(),
+          ...(trimmedKey ? { api_key: trimmedKey } : {}),
         },
       });
       onSaved?.(settings);
@@ -93,8 +94,7 @@ export function SettingsModal({
     }
   };
 
-  // api_key 视为已就绪:用户填了新 key,或后端已存在 key 且用户未清空意图(留空=沿用)。
-  // 注:留空提交会让后端 api_key="",故未填新 key 时给出明确提示,但不阻断保存 base_url/model。
+  // 可提交只需 base_url + model:api_key 留空即「保留既有」(请求体里 omit),无密钥的本地端点也能保存。
   const canSubmit = Boolean(baseUrl.trim() && model.trim()) && !saving && !loading;
 
   return (
@@ -152,14 +152,14 @@ export function SettingsModal({
               type="password"
               value={apiKey}
               disabled={saving || loading}
-              placeholder={keyAlreadySet ? "已配置(留空则覆盖为空)" : "sk-…"}
+              placeholder={keyAlreadySet ? "已配置(留空则保留)" : "sk-…"}
               className="font-mono text-xs"
               autoComplete="off"
               onChange={(e) => setApiKey(e.target.value)}
             />
             {keyAlreadySet && !apiKey && (
               <p className="text-xs text-muted-foreground">
-                已保存过密钥。留空保存会清除它;如需保留,请重新填写。
+                已保存过密钥。留空保存会保留它;如需更换,请填入新密钥。
               </p>
             )}
           </div>
