@@ -9,6 +9,7 @@ class AgentState(TypedDict, total=False):
     project_id: int
     question: str
     query: str
+    route: str           # route 节点写:"retrieve" → 走检索环;"direct" → 直接结束(无 chunk)
     history: list[dict]
     chunks: list[RetrievedChunk]
     iterations: int

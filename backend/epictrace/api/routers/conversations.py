@@ -34,6 +34,15 @@ def list_conversations(project_id: int, db: Database = Depends(get_db)):
         return [ConversationOut.model_validate(c) for c in rows]
 
 
+@router.delete("/conversations/{cid}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_conversation(cid: int, db: Database = Depends(get_db)):
+    with db.session() as s:
+        c = s.get(Conversation, cid)
+        if c is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+        s.delete(c)  # messages 经 cascade="all, delete-orphan" 一并删除
+
+
 @router.get("/conversations/{cid}/messages", response_model=list[MessageOut])
 def list_messages(cid: int, db: Database = Depends(get_db)):
     with db.session() as s:

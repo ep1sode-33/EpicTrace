@@ -66,23 +66,31 @@ class FakeReranker:
 
 
 class FakeLLM:
-    """可编排:grade(固定)或 grade_sequence(逐次)、rewrite、answer。记录收到的 system 提示以分流。"""
+    """可编排:route、grade(固定)或 grade_sequence(逐次)、rewrite、title、answer。
+    记录收到的 system 提示以分流(ROUTE_SYS / GRADE_SYS / REWRITE_SYS / 标题 / GENERATE)。"""
 
-    def __init__(self, *, grade="sufficient", grade_sequence=None, rewrite="改写后的查询", answer="假答案[1]"):
+    def __init__(self, *, route="retrieve", grade="sufficient", grade_sequence=None,
+                 rewrite="改写后的查询", title="自动标题", answer="假答案[1]"):
+        self._route_verdict = route
         self._grade = grade
         self._grade_seq = list(grade_sequence) if grade_sequence else None
         self._rewrite = rewrite
+        self._title = title
         self._answer = answer
         self.stream_messages: list[list[dict]] = []   # 记录每次 stream 收到的完整 message 列表(供多轮断言)
 
     def _route(self, messages):
         sys = messages[0]["content"]
+        if "retrieve 或 direct" in sys:  # ROUTE_SYS
+            return self._route_verdict
         if "sufficient" in sys:  # GRADE_SYS
             if self._grade_seq:
                 return self._grade_seq.pop(0) if self._grade_seq else "sufficient"
             return self._grade
         if "改写" in sys:  # REWRITE_SYS
             return self._rewrite
+        if "标题" in sys:  # title prompt
+            return self._title
         return self._answer  # GENERATE_SYS
 
     def complete(self, messages, **kwargs):

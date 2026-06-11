@@ -22,6 +22,18 @@ class _RaisingRetriever:
         raise RuntimeError("retriever boom")
 
 
+class _RecordingRetriever:
+    """记录是否被调用,用于断言 direct 路由完全不检索。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def retrieve(self, *, project_id, query, k=6):
+        self.calls.append(query)
+        return [RetrievedChunk(text="页表映射地址", ingest_record_id=1, project_id=project_id,
+                               char_start=0, char_end=6, source_type="folder_scan")]
+
+
 def _setup(tmp_path, title="t"):
     db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
     with db.session() as s:
@@ -71,25 +83,59 @@ def test_second_turn_includes_prior_turn_in_llm_messages(tmp_path: Path):
     assert sent[0]["role"] == "system"               # 系统提示仍在最前
 
 
-def test_first_turn_default_title_set_from_question_and_updated_at(tmp_path: Path):
+def test_first_turn_default_title_set_by_llm_and_updated_at(tmp_path: Path):
     db, cid = _setup(tmp_path, title="新对话")
-    svc = ChatService(db, FakeLLM(grade="sufficient", answer="答[1]。"), _Retriever())
+    svc = ChatService(db, FakeLLM(grade="sufficient", title="页表与分页", answer="答[1]。"), _Retriever())
     with db.session() as s:
         before = s.get(Conversation, cid).updated_at
     list(svc.stream_answer(cid, "操作系统的页表是如何工作的请详细说明一下谢谢" * 2))
     with db.session() as s:
         c = s.get(Conversation, cid)
-        assert c.title != "新对话" and len(c.title) <= 30
-        assert c.title.startswith("操作系统的页表")
+        assert c.title == "页表与分页"           # 由 LLM 起的标题(非问题首段)
         assert c.updated_at >= before
 
 
-def test_nondefault_title_preserved(tmp_path: Path):
+def test_title_quotes_stripped(tmp_path: Path):
+    db, cid = _setup(tmp_path, title="新对话")
+    svc = ChatService(db, FakeLLM(grade="sufficient", title="“带引号的标题”", answer="答[1]。"), _Retriever())
+    list(svc.stream_answer(cid, "随便问"))
+    with db.session() as s:
+        assert s.get(Conversation, cid).title == "带引号的标题"
+
+
+def test_title_falls_back_to_question_when_llm_title_empty(tmp_path: Path):
+    db, cid = _setup(tmp_path, title="新对话")
+    svc = ChatService(db, FakeLLM(grade="sufficient", title="   ", answer="答[1]。"), _Retriever())
+    list(svc.stream_answer(cid, "操作系统的页表是如何工作的呢" * 3))
+    with db.session() as s:
+        c = s.get(Conversation, cid)
+        assert c.title.startswith("操作系统的页表") and len(c.title) <= 30
+
+
+def test_nondefault_title_preserved_and_no_title_call(tmp_path: Path):
     db, cid = _setup(tmp_path, title="我的自定义标题")
-    svc = ChatService(db, FakeLLM(grade="sufficient", answer="答[1]。"), _Retriever())
+    svc = ChatService(db, FakeLLM(grade="sufficient", title="不该被用", answer="答[1]。"), _Retriever())
     list(svc.stream_answer(cid, "随便问点什么"))
     with db.session() as s:
         assert s.get(Conversation, cid).title == "我的自定义标题"
+
+
+def test_direct_route_plain_chat_no_citations_and_no_retrieval(tmp_path: Path):
+    # route="direct"(打招呼/常识)→ 不检索、不引用,流式产出普通聊天答案。
+    db, cid = _setup(tmp_path)
+    retr = _RecordingRetriever()
+    svc = ChatService(db, FakeLLM(route="direct", answer="你好,有什么可以帮你?"), retr)
+    events = list(svc.stream_answer(cid, "你好"))
+    assert retr.calls == []                                   # 完全没检索
+    answer = "".join(e["data"] for e in events if e["event"] == "token")
+    assert answer == "你好,有什么可以帮你?"
+    cite_evt = next(e for e in events if e["event"] == "citations")
+    assert json.loads(cite_evt["data"]) == []                 # 直答无引用
+    assert [e["event"] for e in events][-1] == "done"
+    with db.session() as s:
+        m = list(s.execute(select(Message).where(Message.conversation_id == cid)).scalars())
+        assert [x.role for x in m] == ["user", "assistant"]
+        assert m[1].citations_json == "[]"
 
 
 def test_llm_error_yields_error_event_and_no_assistant_message(tmp_path: Path):

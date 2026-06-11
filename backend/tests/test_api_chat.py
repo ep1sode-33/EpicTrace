@@ -43,6 +43,34 @@ def test_chat_flow_creates_conversation_streams_and_cites(chat_client, tmp_path)
     assert json.loads(msgs[1]["citations_json"])[0]["ingest_record_id"] == 1
 
 
+def test_delete_conversation_removes_it_and_its_messages(chat_client, tmp_path):
+    client, db, store, emb = chat_client
+    folder = tmp_path / "P"
+    pid = client.post("/api/projects", json={"title": "P", "folder_path": str(folder)}).json()["id"]
+    store.upsert([{ "vector": emb.embed(["页表映射地址"])[0], "text": "页表映射地址", "ingest_record_id": 1,
+                    "project_id": pid, "char_start": 0, "char_end": 6, "source_type": "folder_scan",
+                    "embed_model_id": "fake" }])
+    cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
+    # 跑一轮,落 user + assistant 两条消息。
+    with client.stream("POST", f"/api/conversations/{cid}/messages", json={"content": "页表是什么"}) as r:
+        assert r.status_code == 200
+        "".join(chunk for chunk in r.iter_text())
+    assert len(client.get(f"/api/conversations/{cid}/messages").json()) == 2
+
+    r = client.delete(f"/api/conversations/{cid}")
+    assert r.status_code in (200, 204)
+
+    # 会话从列表消失,其消息也随级联删除(查消息得 404,会话已不存在)。
+    listed = client.get(f"/api/projects/{pid}/conversations").json()
+    assert all(c["id"] != cid for c in listed)
+    assert client.get(f"/api/conversations/{cid}/messages").status_code == 404
+
+
+def test_delete_unknown_conversation_returns_404(chat_client):
+    client, db, store, emb = chat_client
+    assert client.delete("/api/conversations/999999").status_code == 404
+
+
 def test_send_message_without_llm_configured_returns_409(tmp_path):
     db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
     app = create_app(db=db)  # llm=None 且 settings 从未保存(未配置)

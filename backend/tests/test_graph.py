@@ -61,3 +61,34 @@ def test_iteration_cap_stops_retrying():
     graph = build_rag_graph(FakeLLM(grade="insufficient", rewrite="x"), retr, max_iterations=2)
     out = graph.invoke({"project_id": 7, "question": "q", "query": "q", "history": [], "iterations": 0})
     assert len(retr.calls) <= 3                       # 初次 + 最多 2 次改写后停
+
+
+def test_direct_route_skips_retrieval_and_ends_with_no_chunks():
+    # route="direct"(打招呼/常识)→ 完全不检索,终态无 chunk。
+    retr = _Retriever({"你好": _chunks("不该被检到")})
+    graph = build_rag_graph(FakeLLM(route="direct"), retr)
+    out = graph.invoke({"project_id": 7, "question": "你好", "query": "你好",
+                        "history": [], "iterations": 0})
+    assert retr.calls == []                            # 0 次检索
+    assert out.get("chunks", []) == []                 # 直答路径无资料
+    assert out["route"] == "direct"
+
+
+def test_retrieve_route_runs_existing_flow():
+    # route="retrieve" → 走原检索环(检索 + grade 判 sufficient 收尾)。
+    retr = _Retriever({"页表是什么": _chunks("页表映射地址")})
+    graph = build_rag_graph(FakeLLM(route="retrieve", grade="sufficient"), retr)
+    out = graph.invoke({"project_id": 7, "question": "页表是什么", "query": "页表是什么",
+                        "history": [], "iterations": 0})
+    assert len(retr.calls) == 1
+    assert out["chunks"][0].text == "页表映射地址"
+    assert out["route"] == "retrieve"
+
+
+def test_ambiguous_route_defaults_to_retrieve():
+    # 含糊/垃圾路由结果 → 保守接地,按 retrieve 处理。
+    retr = _Retriever({"q": _chunks("一些资料")})
+    graph = build_rag_graph(FakeLLM(route="也许吧 retrieve 或 direct", grade="sufficient"), retr)
+    out = graph.invoke({"project_id": 7, "question": "q", "query": "q", "history": [], "iterations": 0})
+    assert len(retr.calls) == 1
+    assert out["route"] == "retrieve"
