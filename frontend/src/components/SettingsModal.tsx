@@ -24,8 +24,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
-type FormState = { name: string; base_url: string; api_key: string; model: string };
-const BLANK: FormState = { name: "", base_url: "", api_key: "", model: "" };
+type FormState = { name: string; base_url: string; api_key: string; model: string; context_window: string };
+const BLANK: FormState = { name: "", base_url: "", api_key: "", model: "", context_window: "32768" };
 
 export function SettingsModal({
   open,
@@ -92,7 +92,13 @@ export function SettingsModal({
   const openEdit = (p: LLMProfile) => {
     setError(null);
     // 回填全部字段,含真 key(本地单机,可见可编辑可复制)。
-    setForm({ name: p.name, base_url: p.base_url, api_key: p.api_key, model: p.model });
+    setForm({
+      name: p.name,
+      base_url: p.base_url,
+      api_key: p.api_key,
+      model: p.model,
+      context_window: String(p.context_window ?? 32768),
+    });
     setEditingId(p.id);
   };
 
@@ -119,6 +125,7 @@ export function SettingsModal({
           base_url: form.base_url.trim(),
           model: form.model.trim(),
           api_key: key,
+          context_window: Number(form.context_window) || 32768,
         });
       } else {
         // 新建(editingId === null):api_key 可空(无 key 的本地端点)。
@@ -127,6 +134,7 @@ export function SettingsModal({
           base_url: form.base_url.trim(),
           api_key: key,
           model: form.model.trim(),
+          context_window: Number(form.context_window) || 32768,
         });
       }
       apply(s);
@@ -476,6 +484,15 @@ function ProfileForm({
           onKeyDown={onEnter}
         />
       </Field>
+
+      <Field id="pf-ctx" label="上下文窗口(token)">
+        <Input id="pf-ctx" type="number" inputMode="numeric" value={form.context_window}
+               disabled={saving} placeholder="如 32768 / 128000"
+               className="font-mono text-xs" onChange={set("context_window")} />
+      </Field>
+      <p className="-mt-2 text-[0.7rem] leading-relaxed text-muted-foreground">
+        决定多大的附件能整篇进上下文(超出则留给后续大文件处理)。
+      </p>
 
       {result && <TestNotice result={result} />}
 
