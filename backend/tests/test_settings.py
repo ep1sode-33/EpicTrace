@@ -48,7 +48,8 @@ def test_update_can_change_name_base_url_model(tmp_path: Path):
     assert p["api_key"] == "k"  # 未传 → 保留
 
 
-def test_public_view_shape_no_key(tmp_path: Path):
+def test_public_view_includes_key(tmp_path: Path):
+    # 本地单机:明文回传 api_key,允许前端查看/编辑/复制(不再遮罩)。
     svc = _svc(tmp_path)
     pid = svc.create_profile(name="A", base_url="http://x", api_key="topsecret", model="m")
     v = svc.public_view()
@@ -59,8 +60,8 @@ def test_public_view_shape_no_key(tmp_path: Path):
     assert prof["id"] == pid
     assert prof["name"] == "A" and prof["base_url"] == "http://x" and prof["model"] == "m"
     assert prof["api_key_set"] is True
-    assert "topsecret" not in json.dumps(v, ensure_ascii=False)
-    assert "api_key" not in prof
+    assert prof["api_key"] == "topsecret"
+    assert "topsecret" in json.dumps(v, ensure_ascii=False)
 
 
 def test_public_view_keyless_profile_marks_unset(tmp_path: Path):

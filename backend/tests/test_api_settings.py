@@ -32,9 +32,9 @@ def test_create_profile_appears_and_becomes_active(app_client):
     assert prof["name"] == "A" and prof["model"] == "m"
     assert prof["api_key_set"] is True
     assert body["active_profile_id"] == prof["id"]
-    # GET 同样不泄露 key
+    # GET 回传真 key(本地单机,允许查看/编辑/复制)
     got = app_client.get("/api/settings").json()
-    assert "secret" not in str(got)
+    assert got["profiles"][0]["api_key"] == "secret"
     assert got["active_profile_id"] == prof["id"]
 
 

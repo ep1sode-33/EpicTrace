@@ -177,7 +177,7 @@ class SettingsService:
 
     # ---- 对外视图 ----
     def public_view(self) -> dict:
-        """绝不暴露 api_key:仅给出 api_key_set 布尔。"""
+        """本地单机:明文回传 api_key(允许前端查看/编辑/复制)。保留 api_key_set 便于显示。"""
         data = self._load()
         return {
             "configured": data["active_profile_id"] is not None,
@@ -187,6 +187,7 @@ class SettingsService:
                     "id": p.get("id"),
                     "name": p.get("name", ""),
                     "base_url": p.get("base_url", ""),
+                    "api_key": p.get("api_key", ""),
                     "model": p.get("model", ""),
                     "api_key_set": bool(p.get("api_key")),
                 }

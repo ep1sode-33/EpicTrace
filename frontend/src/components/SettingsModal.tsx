@@ -33,7 +33,6 @@ export function SettingsModal({
   // 表单态:editingId === null 表示「新建」;非空表示编辑该 Profile。null === 表单关闭。
   const [editingId, setEditingId] = useState<string | null | undefined>(undefined);
   const [form, setForm] = useState<FormState>(BLANK);
-  const [editKeyAlreadySet, setEditKeyAlreadySet] = useState(false);
   const [busy, setBusy] = useState<string | null>(null); // "save" | "active:<id>" | "delete:<id>"
   const nameRef = useRef<HTMLInputElement>(null);
 
@@ -76,15 +75,13 @@ export function SettingsModal({
   const openCreate = () => {
     setError(null);
     setForm(BLANK);
-    setEditKeyAlreadySet(false);
     setEditingId(null);
   };
 
   const openEdit = (p: LLMProfile) => {
     setError(null);
-    // 回填除 api_key 外的字段;api_key 始终留空(空=保留既有)。
-    setForm({ name: p.name, base_url: p.base_url, api_key: "", model: p.model });
-    setEditKeyAlreadySet(p.api_key_set);
+    // 回填全部字段,含真 key(本地单机,可见可编辑可复制)。
+    setForm({ name: p.name, base_url: p.base_url, api_key: p.api_key, model: p.model });
     setEditingId(p.id);
   };
 
@@ -105,12 +102,12 @@ export function SettingsModal({
       const key = form.api_key.trim();
       let s: Settings;
       if (typeof editingId === "string") {
-        // 编辑:api_key 留空 → 不放进请求体,后端保留既有 key。
+        // 编辑:总是回传 key(可见可编辑;清空即清空)。
         s = await api.updateProfile(editingId, {
           name: form.name.trim(),
           base_url: form.base_url.trim(),
           model: form.model.trim(),
-          ...(key ? { api_key: key } : {}),
+          api_key: key,
         });
       } else {
         // 新建(editingId === null):api_key 可空(无 key 的本地端点)。
@@ -210,7 +207,6 @@ export function SettingsModal({
                   editing={editingId !== null}
                   form={form}
                   setForm={setForm}
-                  keyAlreadySet={editKeyAlreadySet}
                   saving={busy === "save"}
                   canSubmit={canSubmit}
                   nameRef={nameRef}
@@ -347,7 +343,6 @@ function ProfileForm({
   editing,
   form,
   setForm,
-  keyAlreadySet,
   saving,
   canSubmit,
   nameRef,
@@ -357,7 +352,6 @@ function ProfileForm({
   editing: boolean;
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
-  keyAlreadySet: boolean;
   saving: boolean;
   canSubmit: boolean;
   nameRef: React.RefObject<HTMLInputElement | null>;
@@ -416,20 +410,16 @@ function ProfileForm({
       <Field id="pf-api-key" label="API Key">
         <Input
           id="pf-api-key"
-          type="password"
+          type="text"
           value={form.api_key}
           disabled={saving}
-          placeholder={editing && keyAlreadySet ? "已配置(留空则保留)" : "可留空(本地端点)"}
+          placeholder="sk-…(本地端点可留空)"
           className="font-mono text-xs"
           autoComplete="off"
+          spellCheck={false}
           onChange={set("api_key")}
           onKeyDown={onEnter}
         />
-        {editing && keyAlreadySet && !form.api_key && (
-          <p className="text-xs text-muted-foreground">
-            已保存过密钥。留空保存会保留它;如需更换,请填入新密钥。
-          </p>
-        )}
       </Field>
 
       <Field id="pf-model" label="模型">

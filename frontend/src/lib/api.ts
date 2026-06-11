@@ -17,9 +17,9 @@ export interface ChatMessage {
   id: number; role: "user" | "assistant"; content: string; citations_json: string | null; created_at: string;
 }
 export interface SourceText { filename: string; path: string; text: string; }
-/** 一个命名的 OpenAI-Compatible 端点。api_key 永不回传,仅 api_key_set 标记是否已配置。 */
+/** 一个命名的 OpenAI-Compatible 端点。本地单机:api_key 明文回传,允许查看/编辑/复制。 */
 export interface LLMProfile {
-  id: string; name: string; base_url: string; model: string; api_key_set: boolean;
+  id: string; name: string; base_url: string; model: string; api_key: string; api_key_set: boolean;
 }
 export interface Settings {
   configured: boolean;
