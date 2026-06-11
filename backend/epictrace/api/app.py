@@ -30,6 +30,8 @@ def create_app(db: Database | None = None, embedder=None, vector_store=None) -> 
     # 而是首次用到索引路由时再建真件(见 deps.get_embedder / get_vector_store)。
     app.state.embedder = embedder
     app.state.vector_store = vector_store
+    app.state.reranker = None  # 延迟构造(见 deps.get_reranker)
+    app.state.llm = None  # 注入或后续由 SettingsService 接线(见 deps.get_llm)
     app.state.index_jobs = {}  # project_id -> IndexJob(最近一次)
 
     app.include_router(health.router, prefix="/api")

@@ -64,7 +64,7 @@ def test_get_vector_store_warms_model_before_milvus(tmp_path, monkeypatch):
         AppConfig, "milvus_path", property(lambda self: str(tmp_path / "v.db"))
     )
     req = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(embedder=None, vector_store=None))
+        app=SimpleNamespace(state=SimpleNamespace(embedder=None, reranker=None, vector_store=None))
     )
 
     store = deps.get_vector_store(req)  # 危险顺序:首次就构造 Milvus;fix 应先暖模型
@@ -81,3 +81,22 @@ def test_get_vector_store_warms_model_before_milvus(tmp_path, monkeypatch):
             }
         ]
     )  # 跑到这里进程没崩 = 顺序正确
+
+
+def test_hybrid_retrieve_real_models_no_segfault(tmp_path, monkeypatch):
+    """真 embedder + 真 reranker + 真 Milvus 同进程检索一条,不应段错误。"""
+    from types import SimpleNamespace
+
+    import epictrace.api.deps as deps
+    from epictrace.config import AppConfig
+    from epictrace.retrieval.pipeline import HybridRetriever
+
+    monkeypatch.setattr(AppConfig, "milvus_path", property(lambda self: str(tmp_path / "v.db")))
+    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(embedder=None, reranker=None, vector_store=None)))
+    store = deps.get_vector_store(req)  # 先暖 embedder+reranker 再起 Milvus
+    emb = deps.get_embedder(req)
+    store.upsert([{ "vector": emb.embed(["虚拟内存 页表"])[0], "text": "虚拟内存 页表", "ingest_record_id": 1,
+                    "project_id": 7, "char_start": 0, "char_end": 6, "source_type": "folder_scan",
+                    "embed_model_id": emb.model_id }])
+    out = HybridRetriever(emb, store, deps.get_reranker(req)).retrieve(project_id=7, query="页表", k=3)
+    assert out and out[0].ingest_record_id == 1  # 进程没崩 + 检到
