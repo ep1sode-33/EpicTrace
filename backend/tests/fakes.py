@@ -1,5 +1,6 @@
 from epictrace.interfaces.embedding import EmbeddingProvider
 from epictrace.interfaces.vector_store import VectorStore
+from epictrace.retrieval.types import RetrievedChunk
 
 
 class FakeVectorStore(VectorStore):
@@ -47,3 +48,18 @@ class FakeEmbedder(EmbeddingProvider):
     @property
     def model_id(self) -> str:
         return "fake"
+
+
+class FakeReranker:
+    """按 query 子词在 chunk 文本里的命中次数打分;不依赖 torch。"""
+
+    def warmup(self) -> None:
+        return None
+
+    def rerank(self, query: str, chunks: list[RetrievedChunk], top_k: int = 6) -> list[RetrievedChunk]:
+        terms = [t for t in query.split() if t]
+
+        def score(c: RetrievedChunk) -> int:
+            return sum(c.text.count(t) for t in terms)
+
+        return sorted(chunks, key=score, reverse=True)[:top_k]
