@@ -3,7 +3,6 @@ import { FolderClosed, MoreHorizontal, Plus, Trash2 } from "lucide-react";
 
 import { type Project } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,18 +27,29 @@ export function ProjectSidebar({
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-border/70 bg-sidebar">
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
-        <h2 className="text-sm font-semibold text-foreground">项目</h2>
-        {projects.length > 0 && (
-          <span className="min-w-5 rounded-full bg-muted px-1.5 text-center text-xs leading-5 font-medium tabular-nums text-muted-foreground">
-            {projects.length}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-foreground">项目</h2>
+          {projects.length > 0 && (
+            <span className="min-w-5 rounded-full bg-muted px-1.5 text-center text-xs leading-5 font-medium tabular-nums text-muted-foreground">
+              {projects.length}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onCreate}
+          aria-label="新建项目"
+          title="新建项目"
+          className="flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+        >
+          <Plus className="size-4" />
+        </button>
       </div>
 
       <nav className="flex-1 overflow-y-auto px-2 pb-2">
         {projects.length === 0 ? (
           <p className="px-2 py-6 text-xs leading-relaxed text-muted-foreground">
-            还没有项目。点击下方按钮创建第一个。
+            还没有项目。点右上角的 + 创建第一个。
           </p>
         ) : (
           <ul className="flex flex-col gap-0.5">
@@ -55,19 +65,6 @@ export function ProjectSidebar({
           </ul>
         )}
       </nav>
-
-      <div className="border-t border-border/70 p-2">
-        <Button
-          type="button"
-          variant="ghost"
-          size="lg"
-          className="w-full justify-start text-muted-foreground hover:text-foreground"
-          onClick={onCreate}
-        >
-          <Plus className="size-4" />
-          新建项目
-        </Button>
-      </div>
     </aside>
   );
 }
