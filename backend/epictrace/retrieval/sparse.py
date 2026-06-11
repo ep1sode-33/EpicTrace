@@ -11,8 +11,12 @@ def _tok(text: str) -> list[str]:
     return [t for t in jieba.lcut(text) if t.strip()]
 
 
-def sparse_search(store: VectorStore, *, project_id: int, query: str, k: int = 30) -> list[RetrievedChunk]:
+def sparse_search(store: VectorStore, *, project_id: int, query: str, k: int = 30,
+                  ingest_record_ids: list[int] | None = None) -> list[RetrievedChunk]:
     rows = store.list_by_project(project_id)
+    if ingest_record_ids:
+        idset = set(ingest_record_ids)
+        rows = [r for r in rows if r.get("ingest_record_id") in idset]
     if not rows:
         return []
     corpus = [_tok(r["text"]) for r in rows]
