@@ -695,6 +695,10 @@ function Conversation({
   const [pickInternalOpen, setPickInternalOpen] = useState(false);
   // 附加外部文件失败时的可关闭内联提示;null 表示无错误。
   const [attachError, setAttachError] = useState<string | null>(null);
+  // 右侧「引用」侧栏开关(类 Claude Desktop 的 Context 面板)。默认收起。
+  const [refSidebarOpen, setRefSidebarOpen] = useState(false);
+  // 拖放覆盖层:在整个对话区拖动文件时显示半透明提示。
+  const [dropOverlay, setDropOverlay] = useState(false);
   // 当前流的 abort 句柄(切换会话 / 停止 / 卸载时调用)。
   const abortRef = useRef<(() => void) | null>(null);
   // 草稿首次落库的在途去重:并发调用 ensureConversation 时共用同一个创建 promise,避免重复建会话。
@@ -702,6 +706,8 @@ function Conversation({
   // 由本组件在草稿首次发送时落库出来的 cid。父级随后会把 conversationId 切到这个值,
   // 此时不应重置/重拉历史——流就在本实例里跑,内容已在屏。下面的重置 effect 据此跳过这一跳变。
   const selfCreatedCidRef = useRef<number | null>(null);
+  // 上一次渲染的引用数量,用于「引用新增时自动展开右侧侧栏」(仅在数量上升时触发,避免解挂/切换也强开)。
+  const prevRefCountRef = useRef(0);
 
   // 切换会话:中断在途流、拉取历史消息。
   // 例外:从草稿(null)跳到本组件刚落库的 cid——同一段对话、流仍在跑,跳过重置。
@@ -903,6 +909,26 @@ function Conversation({
     [ensureConversation, refreshRefs],
   );
 
+  // 引用数量上升时自动展开右侧侧栏,让用户看到新引用落位。
+  // 仅在「增加」时触发;解挂、切换会话清空等下降/持平不强开(尊重用户手动收起)。
+  useEffect(() => {
+    const prev = prevRefCountRef.current;
+    if (references.length > prev) setRefSidebarOpen(true);
+    prevRefCountRef.current = references.length;
+  }, [references.length]);
+
+  // 桌面外壳(pywebview)原生拖放:外壳能拿到真实绝对路径,通过该全局回调把路径交回前端。
+  // 浏览器 drop 事件读不到路径(这正是旧 File.path 方案在打包态失效的原因),故路径走这条原生通道。
+  useEffect(() => {
+    (window as unknown as { __onNativeFilesDropped?: (paths: string[]) => void }).__onNativeFilesDropped =
+      (paths: string[]) => {
+        if (paths?.length) attachExternal(paths);
+      };
+    return () => {
+      delete (window as unknown as { __onNativeFilesDropped?: unknown }).__onNativeFilesDropped;
+    };
+  }, [attachExternal]);
+
   const stop = useCallback(() => {
     abortRef.current?.();
     abortRef.current = null;
@@ -982,9 +1008,54 @@ function Conversation({
   // 二者皆无时只展示项目空态与「新建对话」CTA,不挂输入框(发送无处可去)。
   const inConversation = conversationId != null || draft;
 
+  // —— 对话区拖放(类 ChatGPT 网页:整个对话区都是拖放靶区,不只输入框)——
+  // dragover 时显示半透明覆盖层;真正读路径走原生通道(__onNativeFilesDropped)。
+  // 浏览器 drop 拿不到绝对路径,故 onDrop 仅做视觉收尾;开发态浏览器额外给出提示。
+  const dragHasFiles = (e: React.DragEvent) =>
+    Array.from(e.dataTransfer.types).includes("Files");
+
+  const onAreaDragOver = (e: React.DragEvent) => {
+    if (!inConversation || !dragHasFiles(e)) return;
+    e.preventDefault();
+    setDropOverlay(true);
+  };
+  const onAreaDragLeave = (e: React.DragEvent) => {
+    // 仅当指针真正离开对话区(而非进入子元素)时才隐藏,避免覆盖层闪烁。
+    if (e.relatedTarget && e.currentTarget.contains(e.relatedTarget as Node)) return;
+    setDropOverlay(false);
+  };
+  const onAreaDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDropOverlay(false);
+    // 路径由原生外壳经 __onNativeFilesDropped 交付;此处不读 File.path。
+    // 开发态浏览器(无 pywebview)确实拿不到路径,给出与 + 选择文件一致的提示。
+    const hasPywebview = "pywebview" in window;
+    if (!hasPywebview && e.dataTransfer.files.length) {
+      setAttachError("当前为开发态浏览器,无法读取拖放文件路径;请点 + 选择文件。");
+    }
+  };
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto">
+    <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-w-0 flex-1 flex-col">
+        {/* 右上角:引用侧栏开关(类 Claude Desktop Context 面板) */}
+        {inConversation && (
+          <div className="flex shrink-0 justify-end px-6 pt-3">
+            <ReferenceSidebarToggle
+              count={references.length}
+              open={refSidebarOpen}
+              onToggle={() => setRefSidebarOpen((o) => !o)}
+            />
+          </div>
+        )}
+
+        <div
+          className="relative flex min-h-0 flex-1 flex-col"
+          onDragOver={onAreaDragOver}
+          onDragLeave={onAreaDragLeave}
+          onDrop={onAreaDrop}
+        >
+          <div className="min-h-0 flex-1 overflow-y-auto">
         {!inConversation ? (
           <CenteredEmpty
             title={`与「${projectTitle}」对话`}
@@ -1032,38 +1103,80 @@ function Conversation({
             </div>
           )
         )}
+          </div>
+
+          {/* 拖放覆盖层:覆盖整个对话区(含输入框),仅视觉提示。 */}
+          {inConversation && dropOverlay && (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-lg border-2 border-dashed border-ring/60 bg-background/80 backdrop-blur-[1px]"
+            >
+              <span className="rounded-full bg-foreground/90 px-4 py-2 text-sm font-medium text-background shadow-sm">
+                拖放文件到此处添加引用
+              </span>
+            </div>
+          )}
+
+          {inConversation && attachError && (
+            <div className="mx-auto w-full max-w-2xl px-6">
+              <div role="alert" className="flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
+                <span className="flex-1 break-words">{attachError}</span>
+                <button type="button" onClick={() => setAttachError(null)} aria-label="关闭" className="shrink-0 underline-offset-2 hover:underline">关闭</button>
+              </div>
+            </div>
+          )}
+
+          {inConversation && (
+            <Composer
+              llmConfigured={llmConfigured}
+              streaming={streaming}
+              onSend={send}
+              onStop={stop}
+              onOpenSettings={onOpenSettings}
+              onAttachPaths={attachExternal}
+              onAddInternal={() => setPickInternalOpen(true)}
+              onAttachUnsupported={() =>
+                setAttachError("当前环境无法读取拖拽/粘贴的文件路径,请点 + 选择文件。")
+              }
+            />
+          )}
+        </div>
       </div>
 
-      {inConversation && attachError && (
-        <div className="mx-auto w-full max-w-2xl px-6">
-          <div role="alert" className="flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
-            <span className="flex-1 break-words">{attachError}</span>
-            <button type="button" onClick={() => setAttachError(null)} aria-label="关闭" className="shrink-0 underline-offset-2 hover:underline">关闭</button>
+      {/* 右侧「引用」侧栏:可折叠(开启约 260px),收起则不占宽。 */}
+      {inConversation && refSidebarOpen && (
+        <aside
+          aria-label="本对话引用"
+          className="flex h-full w-[260px] shrink-0 flex-col border-l border-border/70 bg-sidebar"
+        >
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/70 px-4 py-3">
+            <h2 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+              引用
+              {references.length > 0 && (
+                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[0.7rem] font-medium tabular-nums text-muted-foreground">
+                  {references.length}
+                </span>
+              )}
+            </h2>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => setRefSidebarOpen(false)}
+              aria-label="关闭引用面板"
+              className="text-muted-foreground"
+            >
+              <X className="size-4" />
+            </Button>
           </div>
-        </div>
-      )}
-
-      {inConversation && (
-        <ReferencePanel
-          references={references}
-          onDetach={detachRef}
-          onAddInternal={() => setPickInternalOpen(true)}
-        />
-      )}
-
-      {inConversation && (
-        <Composer
-          llmConfigured={llmConfigured}
-          streaming={streaming}
-          onSend={send}
-          onStop={stop}
-          onOpenSettings={onOpenSettings}
-          onAttachPaths={attachExternal}
-          onAddInternal={() => setPickInternalOpen(true)}
-          onAttachUnsupported={() =>
-            setAttachError("当前环境无法读取拖拽/粘贴的文件路径,请点 + 选择文件。")
-          }
-        />
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <ReferencePanel
+              references={references}
+              onDetach={detachRef}
+              onAddInternal={() => setPickInternalOpen(true)}
+            />
+          </div>
+        </aside>
       )}
 
       <InternalFilePicker
@@ -1075,6 +1188,45 @@ function Conversation({
 
       <SourceViewer citation={viewing} onClose={() => setViewing(null)} />
     </div>
+  );
+}
+
+/**
+ * 右侧「引用」侧栏的开关:一个安静的面板图标按钮(类 Claude Desktop Context 面板)。
+ * 收起且存在引用时,在图标上叠一个小计数角标,提示「这里有引用」。
+ */
+function ReferenceSidebarToggle({
+  count,
+  open,
+  onToggle,
+}: {
+  count: number;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      onClick={onToggle}
+      aria-expanded={open}
+      aria-pressed={open}
+      aria-label="本对话引用"
+      title="本对话引用"
+      className="relative text-muted-foreground data-[active=true]:text-foreground"
+      data-active={open}
+    >
+      <PanelRight className="size-4" strokeWidth={1.75} aria-hidden />
+      {!open && count > 0 && (
+        <span
+          aria-hidden
+          className="absolute -top-1 -right-1 flex min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[0.6rem] font-semibold leading-none text-primary-foreground tabular-nums"
+        >
+          {count}
+        </span>
+      )}
+    </Button>
   );
 }
 

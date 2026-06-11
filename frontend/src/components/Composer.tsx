@@ -36,7 +36,6 @@ export function Composer({
   onAttachUnsupported?: () => void;
 }) {
   const [value, setValue] = useState("");
-  const [dragging, setDragging] = useState(false);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 
   const grow = (el: HTMLTextAreaElement) => {
@@ -56,32 +55,16 @@ export function Composer({
     const paths = await pickFiles();
     if (paths.length) onAttachPaths(paths);
   };
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragging(false);
-    const paths = Array.from(e.dataTransfer.files)
-      .map((f) => (f as File & { path?: string }).path)
-      .filter((p): p is string => Boolean(p));
-    if (paths.length) onAttachPaths(paths);
-    else if (e.dataTransfer.files.length) onAttachUnsupported?.();
-  };
 
   return (
     <div className="shrink-0 px-6 pb-7">
       <div className="mx-auto w-full max-w-2xl">
         <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            if (llmConfigured) setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={llmConfigured ? onDrop : undefined}
           className={cn(
             "flex items-end gap-2 rounded-2xl border bg-background p-2 shadow-sm transition-colors",
             llmConfigured
               ? "border-border focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/40"
               : "border-border/70 bg-muted/30",
-            dragging && "border-ring ring-3 ring-ring/40",
           )}
         >
           <Button

@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { ChevronDown, ChevronRight, FileText, FolderInput, Paperclip, X } from "lucide-react";
+import { FileText, FolderInput, Paperclip, X } from "lucide-react";
 
 import { type ConversationReference } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -11,7 +10,10 @@ const MODE_LABEL: Record<ConversationReference["mode"], string> = {
   deferred: "待 Plan B(文件较大)",
 };
 
-/** 折叠式「本对话引用」面板:两栏(外部/内部),每条带模式标签 + 解挂。空则不渲染。 */
+/**
+ * 「本对话引用」侧栏内容:两栏(外部/内部),每条带模式标签 + 解挂。
+ * 作为右侧引用侧栏的纵向内容渲染(无折叠外壳/无 max-w 居中)。空态给出拖放/添加提示。
+ */
 export function ReferencePanel({
   references,
   onDetach,
@@ -21,37 +23,25 @@ export function ReferencePanel({
   onDetach: (rid: number) => void;
   onAddInternal: () => void;
 }) {
-  const [open, setOpen] = useState(true);
   const external = references.filter((r) => r.kind === "external");
   const internal = references.filter((r) => r.kind === "internal");
-  if (references.length === 0) return null;
 
   return (
-    <div className="mx-auto w-full max-w-2xl px-6">
-      <div className="rounded-xl border border-border/70 bg-muted/30">
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground outline-none hover:text-foreground"
-        >
-          {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-          <Paperclip className="size-3.5" />
-          本对话引用 ({references.length})
-        </button>
-        {open && (
-          <div className="flex flex-col gap-3 px-3 pb-3">
-            <Zone title="外部文件" icon={<Paperclip className="size-3" />}
-                  rows={external} onDetach={onDetach} />
-            <Zone title="内部文件" icon={<FileText className="size-3" />}
-                  rows={internal} onDetach={onDetach}
-                  action={
-                    <Button type="button" variant="ghost" size="xs" onClick={onAddInternal}>
-                      <FolderInput className="size-3" /> 从项目添加
-                    </Button>
-                  } />
-          </div>
-        )}
-      </div>
+    <div className="flex flex-col gap-3">
+      {references.length === 0 && (
+        <p className="px-1 text-xs leading-relaxed text-muted-foreground/70">
+          拖文件进来,或从项目添加引用。
+        </p>
+      )}
+      <Zone title="外部文件" icon={<Paperclip className="size-3" />}
+            rows={external} onDetach={onDetach} />
+      <Zone title="内部文件" icon={<FileText className="size-3" />}
+            rows={internal} onDetach={onDetach}
+            action={
+              <Button type="button" variant="ghost" size="xs" onClick={onAddInternal}>
+                <FolderInput className="size-3" /> 从项目添加
+              </Button>
+            } />
     </div>
   );
 }
