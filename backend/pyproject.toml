@@ -13,6 +13,7 @@ dependencies = [
   "python-pptx",
   "pymilvus[milvus_lite]",
   "FlagEmbedding",
+  "openai",
 ]
 
 [project.optional-dependencies]
