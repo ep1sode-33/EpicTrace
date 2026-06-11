@@ -1,6 +1,7 @@
 """EpicTrace 桌面外壳:后台起 uvicorn,健康检查就绪后用 pywebview 开窗;暴露原生文件对话框给前端。"""
 from __future__ import annotations
 
+import os
 import threading
 import time
 import urllib.request
@@ -33,6 +34,16 @@ class Api:
             return None
         result = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False)
         return result[0] if result else None
+
+    def reveal_in_finder(self, path: str) -> dict:
+        """在 Finder 中显示并选中给定文件(来源查看器「在 Finder 中显示」)。
+        路径不存在则不动作(避免对脏路径 / 已移动文件误触 open),返回状态供前端提示。"""
+        import subprocess
+
+        if not path or not os.path.exists(path):
+            return {"ok": False, "reason": "not_found"}
+        subprocess.run(["open", "-R", path])  # argv 列表形式,不经 shell,杜绝注入
+        return {"ok": True}
 
 
 def _serve() -> None:
