@@ -20,7 +20,6 @@ import { CreateProjectModal } from "@/components/CreateProjectModal";
 import { DeleteProjectDialog } from "@/components/DeleteProjectDialog";
 import { FileList } from "@/components/FileList";
 import { ProjectSidebar } from "@/components/ProjectSidebar";
-import { ConversationList } from "@/components/ConversationList";
 import { Composer } from "@/components/Composer";
 import { MessageList, type ViewMessage } from "@/components/MessageList";
 import { SourceViewer } from "@/components/SourceViewer";
@@ -42,9 +41,18 @@ export function ProjectsConversationView({
   // 刚创建项目的自动扫描在途时为 true(扫描异步,完成晚于 onCreated)。
   const [scanning, setScanning] = useState(false);
 
-  // —— 会话状态(随选中项目切换)——
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [conversationsLoading, setConversationsLoading] = useState(false);
+  // —— 树状态:展开集合 + 每项目对话缓存 + 选中会话 ——
+  // 展开的项目 id 集合(可多开);默认展开当前选中项目。
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<number>>(new Set());
+  // 已加载的对话缓存:project id → 对话列表。懒加载:首次展开时拉取并缓存。
+  const [conversationsByProject, setConversationsByProject] = useState<
+    Record<number, Conversation[]>
+  >({});
+  // 正在懒加载对话的项目 id 集合(用于树内骨架/新对话按钮的进行态)。
+  const [loadingProjectIds, setLoadingProjectIds] = useState<ReadonlySet<number>>(
+    new Set(),
+  );
+  // 当前选中会话(独立于项目;切换项目不强制清掉,但选项目即清会话以回到项目态)。
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
 
   useEffect(() => {
@@ -64,93 +72,182 @@ export function ProjectsConversationView({
     };
   }, []);
 
-  // 选中项目变化:拉取其会话历史,默认选中最近一条(无则留空,空态引导新建)。
-  useEffect(() => {
-    setConversations([]);
-    setActiveConversationId(null);
-    if (!selected) return;
-    let cancelled = false;
-    setConversationsLoading(true);
-    api
-      .listConversations(selected.id)
-      .then((rows) => {
-        if (cancelled) return;
-        setConversations(rows);
-        setActiveConversationId(rows[0]?.id ?? null);
-      })
-      .catch(() => {
-        /* 会话列表拉取失败:留空,用户仍可新建。 */
-      })
-      .finally(() => {
-        if (!cancelled) setConversationsLoading(false);
+  // 懒加载某项目的对话(若已缓存则跳过)。展开/新建/刷新时调用。
+  const loadConversations = useCallback(
+    (projectId: number, force = false) => {
+      if (!force && conversationsByProject[projectId]) return;
+      setLoadingProjectIds((prev) => {
+        const next = new Set(prev);
+        next.add(projectId);
+        return next;
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [selected]);
+      api
+        .listConversations(projectId)
+        .then((rows) => {
+          setConversationsByProject((prev) => ({ ...prev, [projectId]: rows }));
+        })
+        .catch(() => {
+          // 拉取失败:落一个空数组,树显示「暂无对话」,用户仍可新建。
+          setConversationsByProject((prev) =>
+            prev[projectId] ? prev : { ...prev, [projectId]: [] },
+          );
+        })
+        .finally(() => {
+          setLoadingProjectIds((prev) => {
+            const next = new Set(prev);
+            next.delete(projectId);
+            return next;
+          });
+        });
+    },
+    [conversationsByProject],
+  );
 
-  const handleCreateConversation = useCallback(async () => {
+  // 默认:选中的项目展开,并懒加载其对话(覆盖初始加载、删除回退等程序化选中场景)。
+  useEffect(() => {
     if (!selected) return;
-    try {
-      const c = await api.createConversation(selected.id);
-      setConversations((prev) => [c, ...prev]);
-      setActiveConversationId(c.id);
-    } catch {
-      /* 新建失败:静默,用户可重试。 */
-    }
-  }, [selected]);
+    setExpandedIds((prev) => {
+      if (prev.has(selected.id)) return prev;
+      const next = new Set(prev);
+      next.add(selected.id);
+      return next;
+    });
+    loadConversations(selected.id);
+    // loadConversations 自带缓存去重;依赖只取 selected.id 即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
 
-  // 助手回答完成后,标题可能已更新(后端按首条消息),刷新会话列表保持侧栏标题同步。
+  // 选中项目(点项目名/行):选中、展开、清空会话回到项目态、懒加载其对话。
+  const handleSelectProject = useCallback(
+    (project: Project) => {
+      setSelected(project);
+      setActiveConversationId(null);
+      setExpandedIds((prev) => {
+        if (prev.has(project.id)) return prev;
+        const next = new Set(prev);
+        next.add(project.id);
+        return next;
+      });
+      loadConversations(project.id);
+    },
+    [loadConversations],
+  );
+
+  // chevron:仅切换展开/折叠;首次展开时懒加载对话。
+  const handleToggleExpand = useCallback(
+    (project: Project) => {
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(project.id)) {
+          next.delete(project.id);
+        } else {
+          next.add(project.id);
+          loadConversations(project.id);
+        }
+        return next;
+      });
+    },
+    [loadConversations],
+  );
+
+  const handleSelectConversation = useCallback(
+    (conversation: Conversation) => {
+      const project = projects.find((p) => p.id === conversation.project_id);
+      if (project) setSelected(project);
+      setActiveConversationId(conversation.id);
+    },
+    [projects],
+  );
+
+  // 新建对话(树上的每项目 +):创建 → 选中该项目 → 缓存前插 → 选中新会话 → 确保展开。
+  const handleCreateConversation = useCallback(
+    async (project: Project) => {
+      setSelected(project);
+      setExpandedIds((prev) => {
+        if (prev.has(project.id)) return prev;
+        const next = new Set(prev);
+        next.add(project.id);
+        return next;
+      });
+      try {
+        const c = await api.createConversation(project.id);
+        setConversationsByProject((prev) => ({
+          ...prev,
+          [project.id]: [c, ...(prev[project.id] ?? [])],
+        }));
+        setActiveConversationId(c.id);
+      } catch {
+        /* 新建失败:静默,用户可重试。 */
+      }
+    },
+    [],
+  );
+
+  // Workspace 内空态/Composer 用的「为当前项目新建对话」便捷封装。
+  const handleCreateConversationForSelected = useCallback(() => {
+    if (selected) handleCreateConversation(selected);
+  }, [selected, handleCreateConversation]);
+
+  // 助手回答完成后,标题可能已更新(后端按首条消息),刷新当前项目对话列表保持侧栏标题同步。
   const refreshConversations = useCallback(() => {
-    if (!selected) return;
-    api
-      .listConversations(selected.id)
-      .then(setConversations)
-      .catch(() => {});
-  }, [selected]);
+    if (selected) loadConversations(selected.id, true);
+  }, [selected, loadConversations]);
 
   const handleCreated = async (project: Project) => {
     // 重新拉取权威列表,避免较慢的初始 listProjects 响应覆盖乐观插入的新项目;
-    // 随后按 id 选中新项目。
+    // 随后按 id 选中并展开新项目。
+    let next = project;
     try {
       const rows = await api.listProjects();
       setProjects(rows);
-      setSelected(rows.find((p) => p.id === project.id) ?? project);
+      next = rows.find((p) => p.id === project.id) ?? project;
     } catch {
       // 列表刷新失败时退回乐观插入,至少保证新项目可见且被选中。
       setProjects((prev) => [project, ...prev]);
-      setSelected(project);
     }
+    handleSelectProject(next);
   };
 
   const handleDeleted = (deleted: Project) => {
-    // 删除成功:从列表移除;若删的是当前选中项,退回首个剩余项目(没有则清空)。
+    // 删除成功:从列表移除;清理其展开态与对话缓存;
+    // 若删的是当前选中项,退回首个剩余项目(没有则清空)并清空选中会话。
     const next = projects.filter((p) => p.id !== deleted.id);
     setProjects(next);
-    setSelected((cur) =>
-      cur && cur.id === deleted.id ? (next[0] ?? null) : cur,
-    );
+    setExpandedIds((prev) => {
+      if (!prev.has(deleted.id)) return prev;
+      const s = new Set(prev);
+      s.delete(deleted.id);
+      return s;
+    });
+    setConversationsByProject((prev) => {
+      if (!(deleted.id in prev)) return prev;
+      const { [deleted.id]: _, ...rest } = prev;
+      return rest;
+    });
+    setSelected((cur) => {
+      if (cur && cur.id === deleted.id) {
+        setActiveConversationId(null);
+        return next[0] ?? null;
+      }
+      return cur;
+    });
   };
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)]">
       <ProjectSidebar
         projects={projects}
-        selectedId={selected?.id ?? null}
-        onSelect={setSelected}
-        onCreate={() => setCreateOpen(true)}
-        onDelete={setPendingDelete}
-        footer={
-          selected && (
-            <ConversationList
-              conversations={conversations}
-              selectedId={activeConversationId}
-              loading={conversationsLoading}
-              onSelect={(c) => setActiveConversationId(c.id)}
-              onCreate={handleCreateConversation}
-            />
-          )
-        }
+        selectedProjectId={selected?.id ?? null}
+        selectedConversationId={activeConversationId}
+        expandedIds={expandedIds}
+        conversationsByProject={conversationsByProject}
+        loadingProjectIds={loadingProjectIds}
+        onSelectProject={handleSelectProject}
+        onToggleExpand={handleToggleExpand}
+        onSelectConversation={handleSelectConversation}
+        onCreateConversation={handleCreateConversation}
+        onCreateProject={() => setCreateOpen(true)}
+        onDeleteProject={setPendingDelete}
       />
 
       <section className="flex min-w-0 flex-1 flex-col">
@@ -163,7 +260,7 @@ export function ProjectsConversationView({
             llmConfigured={llmConfigured}
             onOpenSettings={onOpenSettings}
             activeConversationId={activeConversationId}
-            onCreateConversation={handleCreateConversation}
+            onCreateConversation={handleCreateConversationForSelected}
             onConversationActivity={refreshConversations}
           />
         ) : (
