@@ -57,8 +57,12 @@ def delete_project(
     try:
         store = get_vector_store(request)
         store.delete_by_project(project_id)
-    except Exception:  # noqa: BLE001 — 向量清理失败不阻断项目删除
-        pass
+    except Exception as exc:  # noqa: BLE001 — 向量清理失败不阻断项目删除,但要记日志
+        import logging
+
+        logging.getLogger("epictrace").warning(
+            "删除项目 %s 的向量失败(不阻断删除): %s", project_id, exc
+        )
 
     # 删 DB 行(ingest_records 经 cascade 一并删除),可选删盘上文件夹。
     folder_path = ProjectService(db).delete(project_id, delete_folder=delete_folder)
