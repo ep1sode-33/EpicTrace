@@ -1,6 +1,7 @@
 """EpicTrace 桌面外壳:后台起 uvicorn,健康检查就绪后用 pywebview 开窗;暴露原生文件对话框给前端。"""
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -73,6 +74,46 @@ def _wait_until_ready(timeout: float = 15.0) -> bool:
     return False
 
 
+def _register_native_drop(window: "webview.Window") -> None:
+    """在 document.body 上挂原生 drop 处理,把拖入文件的**真实绝对路径**转发给前端。
+
+    背景:浏览器侧的 File.path 在 pywebview 里始终为空;真实路径只在 pywebview 的
+    Python 侧 DOM drop 事件里拿得到——cocoa.py 的 performDragOperation_ 会把拖拽板的
+    file URL 读进 _dnd_state['paths'](仅当注册了 drop 监听,num_listeners>0 才读),
+    随后 util.py 在派发前给每个文件补上 pywebviewFullPath。
+    注意:在 body 上调 .on('drop', ...) 必须等 DOM 就绪(它内部要 evaluate_js),
+    故挂在 events.loaded 回调里;且注册 drop 监听这一步本身让 cocoa 开始采集路径。
+    """
+
+    def _on_drop(event: dict) -> None:
+        # 处理器收到的是原始事件 dict(util.py 以 args=(event,) 起线程回调),
+        # 拖入文件在 event['dataTransfer']['files'],每个文件被补了 pywebviewFullPath。
+        try:
+            files = (event.get("dataTransfer") or {}).get("files") or []
+            paths = [f["pywebviewFullPath"] for f in files if f.get("pywebviewFullPath")]
+        except Exception as e:  # 事件结构异常不应拖垮回调
+            print(f"[EpicTrace] native drop: bad event shape: {e}", flush=True)
+            return
+        if not paths:
+            return
+        # 转发给前端约定的全局钩子(React 侧定义 window.__onNativeFilesDropped)。
+        window.evaluate_js(
+            f"window.__onNativeFilesDropped && window.__onNativeFilesDropped({json.dumps(paths)})"
+        )
+
+    def _bind() -> None:
+        # 此刻 DOM 已就绪;在 body 上注册 drop(会令 _dnd_state['num_listeners'] 自增,
+        # 从而触发 cocoa 侧采集真实文件路径)。
+        try:
+            window.dom.body.on("drop", _on_drop)
+        except Exception as e:
+            # DOM API 形态不符也不让外壳崩溃,只告警一次。
+            print(f"[EpicTrace] native drag-drop unavailable: {e}", flush=True)
+
+    # 等窗口 DOM 加载完再绑定;events.loaded 是 pywebview 的 Event,支持 += 注册回调。
+    window.events.loaded += _bind
+
+
 def main() -> None:
     t = threading.Thread(target=_serve, daemon=True)
     t.start()
@@ -83,6 +124,7 @@ def main() -> None:
         "EpicTrace", f"http://{HOST}:{PORT}", js_api=api, width=1100, height=750
     )
     api.set_window(window)
+    _register_native_drop(window)  # 原生拖拽转发,纯附加,不改动既有逻辑
     webview.start()
 
 
