@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from epictrace.schemas import ProfileCreate, ProfileUpdate, SetActiveIn
+from epictrace.llm.openai_compat import OpenAICompatLLM
+from epictrace.schemas import (
+    ProfileCreate,
+    ProfileUpdate,
+    SetActiveIn,
+    TestProfileIn,
+    TestProfileOut,
+)
 from epictrace.services.settings import SettingsService
 
 router = APIRouter(tags=["settings"])  # /api 由 app 工厂统一挂载
@@ -67,3 +74,15 @@ def set_active(payload: SetActiveIn, request: Request):
     svc.set_active(payload.profile_id)
     _invalidate_llm(request)
     return svc.public_view()
+
+
+@router.post("/settings/test")
+def test_profile(payload: TestProfileIn) -> TestProfileOut:
+    """对「正在编辑的值」发一次真实最小补全:这是唯一能验证 OpenAI-compat 端点的方式。
+    失败是数据而非 HTTP 错误,始终 200,让前端展示网关原始报错。"""
+    try:
+        llm = OpenAICompatLLM(payload.base_url, payload.api_key, payload.model)
+        text = llm.complete([{"role": "user", "content": "ping"}], max_tokens=16)
+        return TestProfileOut(ok=True, sample=(text or "").strip()[:80])
+    except Exception as exc:  # 任何异常(网络/鉴权/4xx/超时…)都回传原始信息
+        return TestProfileOut(ok=False, error=str(exc)[:400])

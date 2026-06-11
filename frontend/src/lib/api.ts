@@ -105,6 +105,12 @@ export const api = {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile_id: id }),
     }).then(j<Settings>),
+  // 测试连接:对正在编辑的值发一次真实最小补全。失败也是 200(ok:false + 原始错误)。
+  testProfile: (payload: { base_url: string; api_key: string; model: string }) =>
+    fetch(`${BASE}/api/settings/test`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(j<{ ok: boolean; sample?: string; error?: string }>),
 
   /**
    * 发消息并流式接收回答。后端是 SSE(events: status/token/citations/done);

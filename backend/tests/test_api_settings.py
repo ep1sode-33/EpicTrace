@@ -87,6 +87,50 @@ def test_set_active_switches(app_client):
     assert body["active_profile_id"] == b
 
 
+def test_test_profile_success(app_client, monkeypatch):
+    calls = {}
+
+    def fake_complete(self, messages, **kwargs):
+        calls["messages"] = messages
+        calls["kwargs"] = kwargs
+        return "pong"
+
+    monkeypatch.setattr(
+        "epictrace.llm.openai_compat.OpenAICompatLLM.complete", fake_complete
+    )
+    r = app_client.post(
+        "/api/settings/test",
+        json={"base_url": "http://x/v1", "api_key": "k", "model": "m"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["sample"] == "pong"
+    assert body["error"] is None
+    # 真实最小调用:带 max_tokens 和一条 user 消息
+    assert calls["kwargs"].get("max_tokens") == 16
+    assert calls["messages"][0]["role"] == "user"
+
+
+def test_test_profile_failure_is_data_not_http_error(app_client, monkeypatch):
+    def boom(self, messages, **kwargs):
+        raise RuntimeError("Chat completion bad format")
+
+    monkeypatch.setattr(
+        "epictrace.llm.openai_compat.OpenAICompatLLM.complete", boom
+    )
+    r = app_client.post(
+        "/api/settings/test",
+        json={"base_url": "http://x/v1", "api_key": "k", "model": "m"},
+    )
+    # 失败也是 200(让前端能展示网关原始错误)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "Chat completion bad format" in body["error"]
+    assert body["sample"] is None
+
+
 def test_chat_409_when_no_profile(app_client):
     pid = app_client.post(
         "/api/projects", json={"title": "P", "folder_path": "/tmp/p_409"}

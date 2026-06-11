@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Loader2, Pencil, Plus, Settings2, Trash2, X } from "lucide-react";
+import {
+  Check,
+  CheckCircle2,
+  Loader2,
+  Pencil,
+  Plug,
+  Plus,
+  Settings2,
+  Trash2,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 
 import { api, type LLMProfile, type Settings } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -339,6 +350,9 @@ function ProfileRow({
   );
 }
 
+/** 测试连接结果:成功(可带样例文本)/ 失败(原始错误)。null === 尚未测试。 */
+type TestResult = { ok: true; sample?: string } | { ok: false; error: string } | null;
+
 function ProfileForm({
   editing,
   form,
@@ -358,10 +372,37 @@ function ProfileForm({
   onSave: () => void;
   onCancel: () => void;
 }) {
-  const set = (k: keyof FormState) => (e: React.ChangeEvent<HTMLInputElement>) =>
+  // 测试连接是表单内的本地态:不阻塞保存,字段一变就清掉旧结果。
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<TestResult>(null);
+
+  const set = (k: keyof FormState) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    setResult(null); // 字段变更 → 旧测试结果作废
     setForm((f) => ({ ...f, [k]: e.target.value }));
+  };
   const onEnter = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && canSubmit) onSave();
+  };
+
+  // 测试当前正在编辑的值(保存前即可验证)。base_url / model 任一为空则禁用。
+  const canTest = Boolean(form.base_url.trim() && form.model.trim()) && !testing && !saving;
+  const runTest = async () => {
+    if (!canTest) return;
+    setTesting(true);
+    setResult(null);
+    try {
+      const r = await api.testProfile({
+        base_url: form.base_url.trim(),
+        api_key: form.api_key.trim(),
+        model: form.model.trim(),
+      });
+      setResult(r.ok ? { ok: true, sample: r.sample } : { ok: false, error: r.error ?? "未知错误" });
+    } catch (e) {
+      // 网络/HTTP 层失败(非 provider 错误)也照常呈现。
+      setResult({ ok: false, error: String(e) });
+    } finally {
+      setTesting(false);
+    }
   };
 
   return (
@@ -434,22 +475,86 @@ function ProfileForm({
         />
       </Field>
 
-      <div className="flex justify-end gap-2 pt-0.5">
-        <Button type="button" variant="ghost" size="sm" disabled={saving} onClick={onCancel}>
-          取消
-        </Button>
-        <Button type="button" size="sm" disabled={!canSubmit} onClick={onSave}>
-          {saving ? (
+      {result && <TestNotice result={result} />}
+
+      <div className="flex items-center gap-2 pt-0.5">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!canTest}
+          onClick={runTest}
+          title={canTest ? "向该端点发一次最小请求以验证连通" : "先填好 Base URL 和模型"}
+        >
+          {testing ? (
             <>
               <Loader2 className="size-3.5 animate-spin" />
-              正在保存…
+              正在测试…
             </>
-          ) : editing ? (
-            "保存修改"
           ) : (
-            "保存"
+            <>
+              <Plug className="size-3.5" />
+              测试连接
+            </>
           )}
         </Button>
+        <div className="ml-auto flex gap-2">
+          <Button type="button" variant="ghost" size="sm" disabled={saving} onClick={onCancel}>
+            取消
+          </Button>
+          <Button type="button" size="sm" disabled={!canSubmit} onClick={onSave}>
+            {saving ? (
+              <>
+                <Loader2 className="size-3.5 animate-spin" />
+                正在保存…
+              </>
+            ) : editing ? (
+              "保存修改"
+            ) : (
+              "保存"
+            )}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 测试连接的内联结果:成功是平静的中性提示 + 正向图标;失败用 destructive 显示原始报错。 */
+function TestNotice({ result }: { result: NonNullable<TestResult> }) {
+  if (result.ok) {
+    return (
+      <div
+        role="status"
+        className={cn(
+          "flex items-start gap-2 rounded-lg border border-border/70 bg-background px-3 py-2",
+          "text-xs leading-relaxed text-foreground",
+        )}
+      >
+        <CheckCircle2 className="mt-px size-3.5 shrink-0 text-primary" strokeWidth={2.25} />
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <span className="font-medium">连接正常</span>
+          {result.sample && (
+            <span className="truncate font-mono text-[0.7rem] text-muted-foreground">
+              {result.sample}
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div
+      role="alert"
+      className={cn(
+        "flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2",
+        "text-xs leading-relaxed text-destructive",
+      )}
+    >
+      <TriangleAlert className="mt-px size-3.5 shrink-0" strokeWidth={2.25} />
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="font-medium">连接失败</span>
+        <span className="break-words font-mono text-[0.7rem] opacity-90">{result.error}</span>
       </div>
     </div>
   );

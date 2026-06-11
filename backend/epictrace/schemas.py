@@ -104,6 +104,20 @@ class SetActiveIn(BaseModel):
     profile_id: str
 
 
+class TestProfileIn(BaseModel):
+    """测试连接:用「正在编辑的值」(尚未保存)做一次真实最小补全调用。"""
+    base_url: str = Field(min_length=1)
+    api_key: str = ""
+    model: str = Field(min_length=1)
+
+
+class TestProfileOut(BaseModel):
+    """测试结果是「数据」而非 HTTP 错误:始终 200,前端据 ok 显示成功/原始错误。"""
+    ok: bool
+    sample: str | None = None
+    error: str | None = None
+
+
 class ProfileView(BaseModel):
     id: str
     name: str
