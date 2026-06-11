@@ -157,6 +157,12 @@ def test_old_shape_migration(tmp_path: Path):
     assert v["active_profile_id"] == prof["id"]
     # 迁移后 get_chat_llm 能取出旧 key
     assert svc.get_chat_llm().api_key == "oldkey"
+    # 回归:迁移立刻落盘、id 稳定 → mutate 能真正改到(否则每次 _load 生成新 id,全部 no-op)
+    on_disk = json.loads(p.read_text(encoding="utf-8"))
+    assert "profiles" in on_disk and on_disk["profiles"][0]["id"] == prof["id"]
+    assert svc.public_view()["profiles"][0]["id"] == prof["id"]
+    svc.update_profile(prof["id"], name="改名了")
+    assert svc.get_active_profile()["name"] == "改名了"
 
 
 def test_unknown_or_corrupt_file_does_not_crash(tmp_path: Path):

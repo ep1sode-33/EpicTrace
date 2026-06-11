@@ -52,7 +52,7 @@ class SettingsService:
             old = data.get("chat_llm")
             if isinstance(old, dict):
                 pid = _short_id()
-                return {
+                migrated = {
                     "profiles": [
                         {
                             "id": pid,
@@ -64,6 +64,11 @@ class SettingsService:
                     ],
                     "active_profile_id": pid,
                 }
+                # 关键:立刻落盘固定 id。否则每次 _load 都生成新随机 id,前端拿到的 id 与
+                # 下次请求迁移出的 id 对不上 → update/delete/set_active 全部静默 no-op
+                # (表现为"保存不下去、删不掉、名称改不动")。
+                self._write(migrated)
+                return migrated
             return {"profiles": [], "active_profile_id": None}
         active = data.get("active_profile_id")
         ids = {p.get("id") for p in profiles if isinstance(p, dict)}
