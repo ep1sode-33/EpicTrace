@@ -23,3 +23,20 @@ def test_create_project_creates_folder_and_row(tmp_path: Path):
 
 def test_list_empty(tmp_path: Path):
     assert ProjectService(_db(tmp_path)).list() == []
+
+
+def test_delete_removes_row_and_returns_path(tmp_path: Path):
+    db = _db(tmp_path)
+    folder = tmp_path / "CS 2506"
+    svc = ProjectService(db)
+    proj = svc.create(title="CS 2506", folder_path=str(folder))
+
+    returned = svc.delete(proj.id, delete_folder=False)
+    assert returned == str(folder)        # 返回 folder_path 供路由决定是否删盘
+    assert svc.list() == []               # DB 行已删
+    assert folder.exists()                # 默认不删盘
+
+
+def test_delete_unknown_returns_none(tmp_path: Path):
+    svc = ProjectService(_db(tmp_path))
+    assert svc.delete(99999, delete_folder=False) is None

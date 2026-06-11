@@ -21,5 +21,17 @@ def test_registry_returns_text_processor_for_txt(tmp_path: Path):
     assert isinstance(proc, TextMediaProcessor)
 
 
+def test_text_processor_covers_code_and_data_suffixes(tmp_path: Path):
+    # 代码/数据类纯文本现在也走 TextMediaProcessor:与 scan 白名单对齐,
+    # 不再出现「扫描登记了、却没有 processor 永远卡住」的文件。
+    for name, body in [("mod.py", "print('hi')\n"), ("data.json", '{"k": 1}')]:
+        f = tmp_path / name
+        f.write_text(body, encoding="utf-8")
+        proc = get_processor(f)
+        assert isinstance(proc, TextMediaProcessor)
+        assert body in proc.process(f).text
+
+
 def test_registry_returns_none_for_unknown(tmp_path: Path):
-    assert get_processor(tmp_path / "a.pdf") is None
+    # 图片/音频本期无 processor(pdf/docx/pptx 现已有 processor)
+    assert get_processor(tmp_path / "a.png") is None

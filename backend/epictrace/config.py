@@ -32,3 +32,7 @@ class AppConfig:
     @property
     def sqlalchemy_url(self) -> str:
         return f"sqlite:///{self.db_path}"
+
+    @property
+    def milvus_path(self) -> str:
+        return str(self.data_dir / "epictrace_vectors.db")

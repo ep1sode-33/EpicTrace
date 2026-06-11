@@ -136,7 +136,11 @@ export function ProcessIngestView() {
             </span>
           )}
         </div>
-        <PendingList projects={projects} refreshKey={refreshKey} />
+        <PendingList
+          projects={projects}
+          refreshKey={refreshKey}
+          onIndexed={() => setRefreshKey((k) => k + 1)}
+        />
       </section>
 
       <CreateProjectModal

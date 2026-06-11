@@ -8,7 +8,6 @@ from pathlib import Path
 from sqlalchemy import select
 
 from epictrace.db import Database
-from epictrace.media import get_processor
 from epictrace.models import IngestRecord, Project
 
 # 硬跳过的目录(代码仓常见噪音)+ 所有点开头隐藏目录
@@ -16,10 +15,12 @@ IGNORE_DIRS = {
     "node_modules", ".git", ".venv", "venv", "env", "__pycache__",
     "dist", "build", ".idea", ".vscode", ".pytest_cache", ".mypy_cache",
 }
-# 仅登记这些可索引的文本/文档/代码类型(其余如二进制、媒体先跳过)
+# 仅登记这些可索引的文本/文档/代码类型(其余如二进制、媒体先跳过)。
+# 每个后缀都必须有对应 processor(见 media 注册表),否则会出现永远卡住的文件。
+# 故不收 .doc/.ppt 这类没有 processor 能读的旧版二进制格式。
 INDEXABLE_SUFFIXES = {
     ".md", ".markdown", ".txt", ".text", ".rst",
-    ".pdf", ".ppt", ".pptx", ".doc", ".docx",
+    ".pdf", ".pptx", ".docx",
     ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs",
     ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
     ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".css", ".sql",
@@ -75,17 +76,13 @@ class ScanService:
                 sp = str(p)
                 if sp in existing_paths:
                     continue
-                # 单文件容错:任一文件不可读/消失/处理失败时跳过它并继续,
+                # 单文件容错:任一文件不可读/消失时跳过它并继续,
                 # 不让整次扫描回滚。被跳过的文件不计入 added。
+                # 扫描只登记,不提取文本(提取统一在索引时做)。
                 try:
                     content_hash = _sha256(p)
                     stat = p.stat()
-                    proc = get_processor(p)
-                    extracted = proc.process(p).text if proc is not None else ""
                 except OSError:
-                    continue
-                except Exception:
-                    # 媒体处理器在读到损坏/异常文件时可能抛任意异常 → 跳过该文件。
                     continue
                 s.add(
                     IngestRecord(
@@ -97,7 +94,7 @@ class ScanService:
                         mtime=stat.st_mtime,
                         ingest_method="folder_scan",
                         description="",
-                        extracted_text=extracted,
+                        extracted_text="",
                         indexed=False,
                     )
                 )

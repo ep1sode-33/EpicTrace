@@ -15,6 +15,9 @@ def test_scan_registers_indexable_files_in_place(tmp_path):
     db, proj, folder = _setup(tmp_path)
     (folder / "note.md").write_text("hello virtual memory", encoding="utf-8")
     (folder / "data.bin").write_bytes(b"\x00\x01")          # 非可索引后缀 → 跳过
+    # 旧版二进制 Office 格式无 processor 可读,已移出白名单 → 跳过(否则永远卡住)
+    (folder / "legacy.doc").write_bytes(b"\xd0\xcf\x11\xe0")
+    (folder / "legacy.ppt").write_bytes(b"\xd0\xcf\x11\xe0")
     (folder / "node_modules").mkdir()
     (folder / "node_modules" / "junk.js").write_text("x", encoding="utf-8")  # 忽略目录 → 跳过
 
@@ -29,7 +32,7 @@ def test_scan_registers_indexable_files_in_place(tmp_path):
     assert r.stored_path == str(folder / "note.md")   # 就地:指向原路径,未复制
     assert r.ingest_method == "folder_scan"
     assert r.indexed is False
-    assert "virtual memory" in r.extracted_text
+    assert r.extracted_text == ""   # 扫描只登记,不提取(提取统一在索引时做)
 
 
 def test_rescan_only_adds_new_files(tmp_path):
@@ -63,18 +66,14 @@ def test_scan_skips_unreadable_file_and_continues(tmp_path, monkeypatch):
 
     import epictrace.services.scan as scan_mod
 
-    real_get_processor = scan_mod.get_processor
+    real_sha256 = scan_mod._sha256
 
-    class _Failing:
-        def process(self, p):  # noqa: ANN001
-            raise OSError("simulated unreadable file")
-
-    def fake_get_processor(p):  # noqa: ANN001
+    def fake_sha256(p):  # noqa: ANN001
         if p.name == "bad.md":
-            return _Failing()
-        return real_get_processor(p)
+            raise OSError("simulated unreadable file")
+        return real_sha256(p)
 
-    monkeypatch.setattr(scan_mod, "get_processor", fake_get_processor)
+    monkeypatch.setattr(scan_mod, "_sha256", fake_sha256)
 
     svc = ScanService(db)
     result = svc.scan_and_register(proj.id)  # 不应抛异常

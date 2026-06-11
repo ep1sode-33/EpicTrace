@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Database, Inbox, Loader2 } from "lucide-react";
 
 import { api, type IngestRecord, type Project } from "@/lib/api";
@@ -12,18 +12,42 @@ type PendingGroup = {
   files: IngestRecord[];
 };
 
+// 单个项目分组的索引状态:idle 时无;运行中带进度;完成后保留失败数用于提示。
+type IndexState =
+  | { phase: "indexing"; done: number; total: number }
+  | { phase: "failed"; count: number };
+
 export function PendingList({
   projects,
   refreshKey,
+  onIndexed,
 }: {
   projects: Project[];
   /** 变更此值可触发重新聚合(例如重新扫描后)。 */
   refreshKey: number;
+  /** 某个项目索引完成后回调,供父级重新聚合(已索引文件离开待索引队列)。 */
+  onIndexed?: () => void;
 }) {
   const [groups, setGroups] = useState<PendingGroup[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 默认全部折叠:文件多时避免「无尽平铺列表」。按项目 id 记录展开态。
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  // 按项目 id 记录索引状态(运行中进度 / 完成后的失败提示)。
+  const [indexState, setIndexState] = useState<Record<number, IndexState>>({});
+  // 运行中的轮询定时器(按项目 id),组件卸载时统一清理,避免泄漏 / setState after unmount。
+  const pollTimers = useRef<Record<number, ReturnType<typeof setInterval>>>({});
+  // 始终指向最新的 onIndexed,供轮询闭包调用,避免把它塞进 effect 依赖。
+  const onIndexedRef = useRef(onIndexed);
+  useEffect(() => {
+    onIndexedRef.current = onIndexed;
+  }, [onIndexed]);
+
+  useEffect(() => {
+    return () => {
+      for (const id of Object.values(pollTimers.current)) clearInterval(id);
+      pollTimers.current = {};
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,6 +95,113 @@ export function PendingList({
       else next.add(projectId);
       return next;
     });
+
+  const finishIndex = (projectId: number, errorCount: number) => {
+    const timer = pollTimers.current[projectId];
+    if (timer !== undefined) {
+      clearInterval(timer);
+      delete pollTimers.current[projectId];
+    }
+    if (errorCount > 0) {
+      // 索引完成但有文件失败:用小字提示失败数。
+      setIndexState((prev) => ({
+        ...prev,
+        [projectId]: { phase: "failed", count: errorCount },
+      }));
+    } else {
+      setIndexState((prev) => {
+        const next = { ...prev };
+        delete next[projectId];
+        return next;
+      });
+    }
+    // 让父级重新聚合:成功的文件翻「已索引」后会离开本队列。
+    onIndexedRef.current?.();
+  };
+
+  // 每 ~800ms 轮询一次 status,直到 status !== "running" 再收尾。
+  // fallbackTotal 用于轮询整体失败时把进度数兜底为「全部失败」。
+  // runIndex(用户主动点)与挂载时的恢复(切回 tab)共用这一段,避免逻辑重复。
+  const startPolling = (projectId: number, fallbackTotal: number) => {
+    // 已有该项目的定时器在跑(例如 onIndexed 触发的重聚合再次进入恢复):不重复起。
+    if (pollTimers.current[projectId] !== undefined) return;
+    const timer = setInterval(async () => {
+      try {
+        const job = await api.indexStatus(projectId);
+        if (job.status === "running") {
+          setIndexState((prev) => ({
+            ...prev,
+            [projectId]: { phase: "indexing", done: job.done, total: job.total },
+          }));
+        } else {
+          finishIndex(projectId, job.errors.length);
+        }
+      } catch {
+        // 轮询失败:停止并按兜底数计为失败。
+        finishIndex(projectId, fallbackTotal);
+      }
+    }, 800);
+    pollTimers.current[projectId] = timer;
+  };
+
+  // 切回本 tab(组件重挂)时,组件内的进度状态已丢,但后台 job 仍在跑。
+  // 对每个项目查一次 status:仍在 running 的,恢复进度显示并恢复轮询。
+  useEffect(() => {
+    let cancelled = false;
+    for (const p of projects) {
+      // 已经在显示进度 / 已有定时器的项目跳过,避免重复轮询。
+      if (pollTimers.current[p.id] !== undefined) continue;
+      api
+        .indexStatus(p.id)
+        .then((job) => {
+          if (cancelled || job.status !== "running") return;
+          if (pollTimers.current[p.id] !== undefined) return;
+          setIndexState((prev) => ({
+            ...prev,
+            [p.id]: { phase: "indexing", done: job.done, total: job.total },
+          }));
+          startPolling(p.id, job.total);
+        })
+        .catch(() => {
+          /* status 查询失败:不恢复进度,保持静默。 */
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // 仅依赖 projects:projects 变化(切回 tab 重挂 / 列表更新)时重查。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects]);
+
+  const runIndex = async (group: PendingGroup) => {
+    const { projectId } = group;
+    // 进入运行态:先按该组的待索引文件数估个进度上限,拿到响应后再校正。
+    setIndexState((prev) => ({
+      ...prev,
+      [projectId]: { phase: "indexing", done: 0, total: group.files.length },
+    }));
+    try {
+      // POST 立刻返回 running 的 job(后台线程推进);随后轮询 status 读实时进度。
+      const started = await api.indexProject(projectId);
+      setIndexState((prev) => ({
+        ...prev,
+        [projectId]: {
+          phase: "indexing",
+          done: started.done,
+          total: started.total,
+        },
+      }));
+      // 已经是终态(例如该项目无可索引文件,total=0):直接收尾。
+      if (started.status !== "running") {
+        finishIndex(projectId, started.errors.length);
+        return;
+      }
+      startPolling(projectId, group.files.length);
+    } catch {
+      // POST 整体失败:具体文件数未知,按该组全部计为失败。
+      finishIndex(projectId, group.files.length);
+    }
+  };
 
   if (error) {
     return (
@@ -122,32 +253,67 @@ export function PendingList({
       <div className="max-h-[52vh] divide-y divide-border/60 overflow-y-auto">
         {groups.map((g) => {
           const isOpen = expanded.has(g.projectId);
+          const state = indexState[g.projectId];
+          const indexing = state?.phase === "indexing";
           return (
             <div key={g.projectId}>
-              <button
-                type="button"
-                aria-expanded={isOpen}
-                onClick={() => toggle(g.projectId)}
-                className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-              >
-                <ChevronRight
-                  aria-hidden
-                  className={cn(
-                    "size-4 shrink-0 text-muted-foreground transition-transform",
-                    isOpen && "rotate-90",
-                  )}
-                  strokeWidth={2}
-                />
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-                  {g.projectTitle}
-                </span>
-                <span className="shrink-0 text-xs text-muted-foreground">
-                  <span className="font-medium tabular-nums text-foreground">
-                    {g.files.length}
-                  </span>{" "}
-                  个待索引
-                </span>
-              </button>
+              {/* 折叠头:左侧整块是展开/收起的点击区,右侧是该项目的「建立索引」动作。
+                  两者并列、互不嵌套,避免按钮套按钮。 */}
+              <div className="flex items-center gap-2 pr-3">
+                <button
+                  type="button"
+                  aria-expanded={isOpen}
+                  onClick={() => toggle(g.projectId)}
+                  className="flex min-w-0 flex-1 items-center gap-2.5 py-2.5 pl-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <ChevronRight
+                    aria-hidden
+                    className={cn(
+                      "size-4 shrink-0 text-muted-foreground transition-transform",
+                      isOpen && "rotate-90",
+                    )}
+                    strokeWidth={2}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+                    {g.projectTitle}
+                  </span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    <span className="font-medium tabular-nums text-foreground">
+                      {g.files.length}
+                    </span>{" "}
+                    个待索引
+                  </span>
+                </button>
+
+                {indexing ? (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1.5 px-1.5 text-xs text-muted-foreground tabular-nums"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <Loader2 className="size-3.5 animate-spin" />
+                    索引中 {state.done}/{state.total}
+                  </span>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() => runIndex(g)}
+                  >
+                    <Database className="size-3.5" />
+                    建立索引
+                  </Button>
+                )}
+              </div>
+
+              {/* 失败提示:索引完成但有文件失败时,在该组下方留一行小字。 */}
+              {state?.phase === "failed" && (
+                <p className="px-4 pb-2 pl-10 text-xs text-destructive">
+                  {state.count} 个文件索引失败
+                </p>
+              )}
 
               {isOpen && (
                 <ul className="divide-y divide-border/50 border-t border-border/50 bg-muted/15">
@@ -177,21 +343,6 @@ export function PendingList({
             </div>
           );
         })}
-      </div>
-
-      <div className="flex items-center justify-between gap-3 border-t border-border/70 bg-muted/30 px-4 py-3">
-        <span className="text-xs text-muted-foreground">
-          索引功能开发中(Plan 2)
-        </span>
-        <Button
-          type="button"
-          size="lg"
-          disabled
-          title="索引功能开发中(Plan 2)"
-        >
-          <Database className="size-4" />
-          建立索引
-        </Button>
       </div>
     </div>
   );
