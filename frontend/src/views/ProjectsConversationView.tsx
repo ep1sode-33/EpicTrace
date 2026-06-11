@@ -872,8 +872,9 @@ function Conversation({
           failures.push(`${name}(${e instanceof Error ? e.message : String(e)})`);
         }
       }
-      await refreshRefs(cid);
+      // 先呈现失败提示,再刷新引用列表——这样即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
       setAttachError(failures.length ? `部分文件未能添加:${failures.join("；")}` : null);
+      await refreshRefs(cid);
     },
     [ensureConversation, refreshRefs],
   );
