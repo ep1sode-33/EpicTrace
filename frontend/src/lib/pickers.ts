@@ -5,6 +5,7 @@ declare global {
       api: {
         pick_folder(): Promise<string | null>;
         pick_file(): Promise<string | null>;
+        pick_files(): Promise<string[]>;
         reveal_in_finder(path: string): Promise<void>;
       };
     };
@@ -26,6 +27,13 @@ export async function pickFolder(): Promise<string | null> {
 export async function pickFile(): Promise<string | null> {
   if (window.pywebview?.api) return window.pywebview.api.pick_file();
   return window.prompt("(开发态)输入文件绝对路径:")?.trim() || null;
+}
+
+/** 多选文件(对话附件)。打包态走 pywebview;开发态回退 prompt 单条路径。 */
+export async function pickFiles(): Promise<string[]> {
+  if (window.pywebview?.api) return window.pywebview.api.pick_files();
+  const one = window.prompt("(开发态)输入文件绝对路径:")?.trim();
+  return one ? [one] : [];
 }
 
 export {};

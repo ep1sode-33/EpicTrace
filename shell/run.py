@@ -35,6 +35,13 @@ class Api:
         result = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False)
         return result[0] if result else None
 
+    def pick_files(self) -> list[str]:
+        """多选文件(对话附件用)。返回绝对路径列表;取消则空列表。"""
+        if self._window is None:
+            return []
+        result = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True)
+        return list(result) if result else []
+
     def reveal_in_finder(self, path: str) -> dict:
         """在 Finder 中显示并选中给定文件(来源查看器「在 Finder 中显示」)。
         路径不存在则不动作(避免对脏路径 / 已移动文件误触 open),返回状态供前端提示。"""
