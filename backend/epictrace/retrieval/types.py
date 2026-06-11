@@ -12,6 +12,8 @@ class RetrievedChunk:
     char_end: int
     source_type: str
     score: float = 0.0
+    source_kind: str = "project"          # project | attachment
+    reference_id: int | None = None
 
     @classmethod
     def from_row(cls, row: dict, score: float = 0.0) -> "RetrievedChunk":
