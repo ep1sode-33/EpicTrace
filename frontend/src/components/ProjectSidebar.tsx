@@ -2,9 +2,8 @@ import { useState } from "react";
 import {
   ChevronRight,
   FolderClosed,
-  Loader2,
-  MessageSquarePlus,
   MoreHorizontal,
+  PenLine,
   Plus,
   Trash2,
 } from "lucide-react";
@@ -23,8 +22,9 @@ import {
  * 一行一个项目;展开后其对话缩进列在下方,折叠则隐藏。
  *
  * 视觉约定(贯穿全树):
- * - 平时平铺:无常驻边框/卡片;边框只在 hover / 键盘聚焦时出现。
- * - 选中:仅以淡色背景表示(不画边框——边框留给 hover)。
+ * - 平铺为默认态:行无常驻背景/边框;灰底+细环只在 hover / 键盘聚焦时出现。
+ *   选中项目本身不留任何常驻背景——「我在哪」交给主区标题。
+ * - 唯一的常驻底纹留给「当前打开的对话」(active),作为安静的位置指示。
  * - 缩进表达层级:对话相对项目左缩进,并有一条安静的引导竖线。
  * - 行内操作(新对话 +、… 菜单)平时隐形,hover / 聚焦 / 菜单打开时显现。
  */
@@ -32,6 +32,7 @@ export function ProjectSidebar({
   projects,
   selectedProjectId,
   selectedConversationId,
+  draftProjectId,
   expandedIds,
   conversationsByProject,
   loadingProjectIds,
@@ -39,12 +40,15 @@ export function ProjectSidebar({
   onToggleExpand,
   onSelectConversation,
   onCreateConversation,
+  onDeleteConversation,
   onCreateProject,
   onDeleteProject,
 }: {
   projects: Project[];
   selectedProjectId: number | null;
   selectedConversationId: number | null;
+  /** 正在撰写草稿(尚未落库的新对话)的项目 id;用于在树内显示一个瞬态指示。 */
+  draftProjectId: number | null;
   /** 当前展开的项目 id 集合。 */
   expandedIds: ReadonlySet<number>;
   /** 已加载的对话缓存:project id → 该项目的对话列表。 */
@@ -56,7 +60,10 @@ export function ProjectSidebar({
   /** 点 chevron:仅切换展开/折叠(不改变选中)。 */
   onToggleExpand: (project: Project) => void;
   onSelectConversation: (conversation: Conversation) => void;
+  /** 新建对话:开一段草稿(不调后端);首次发送时才落库。 */
   onCreateConversation: (project: Project) => void;
+  /** 用户在某个对话行选择「删除」时调用,由父级打开确认对话框。 */
+  onDeleteConversation: (conversation: Conversation) => void;
   onCreateProject: () => void;
   /** 用户在某个项目行选择「删除项目」时调用,由父级打开确认对话框。 */
   onDeleteProject: (project: Project) => void;
@@ -99,6 +106,7 @@ export function ProjectSidebar({
                 project={p}
                 selected={p.id === selectedProjectId}
                 expanded={expandedIds.has(p.id)}
+                hasDraft={p.id === draftProjectId}
                 conversations={conversationsByProject[p.id]}
                 conversationsLoading={loadingProjectIds.has(p.id)}
                 selectedConversationId={selectedConversationId}
@@ -106,6 +114,7 @@ export function ProjectSidebar({
                 onToggleExpand={onToggleExpand}
                 onSelectConversation={onSelectConversation}
                 onCreateConversation={onCreateConversation}
+                onDeleteConversation={onDeleteConversation}
                 onDeleteProject={onDeleteProject}
               />
             ))}
@@ -116,13 +125,28 @@ export function ProjectSidebar({
   );
 }
 
-/** 平铺 → hover 才显边框;选中只用淡背景的共享行样式。 */
-function rowClass(selected: boolean) {
+/**
+ * 项目行样式:始终平铺。无论是否选中都不留常驻背景——
+ * 灰底 + 细环只在 hover / 键盘聚焦时出现(灰背景是「正悬停的目标」而非「当前选中项」)。
+ */
+const PROJECT_ROW_CLASS = cn(
+  "w-full rounded-lg text-left text-sm text-muted-foreground outline-none transition-colors",
+  "ring-1 ring-transparent",
+  "hover:bg-background hover:text-foreground hover:ring-border/70",
+  "focus-within:bg-background focus-within:text-foreground focus-within:ring-2 focus-within:ring-ring/50",
+);
+
+/**
+ * 对话行样式:平时平铺、hover 显灰底+细环;
+ * active(当前打开的对话)保留一层安静的常驻底纹,作为「我在哪」的唯一常驻指示。
+ */
+function conversationRowClass(active: boolean) {
   return cn(
     "w-full rounded-lg text-left text-sm outline-none transition-colors",
-    "ring-1 ring-transparent hover:bg-background hover:text-foreground hover:ring-border/70",
-    "focus-visible:bg-background focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50",
-    selected ? "bg-muted text-foreground" : "text-muted-foreground",
+    "ring-1 ring-transparent",
+    "hover:bg-background hover:text-foreground hover:ring-border/70",
+    "focus-within:bg-background focus-within:text-foreground focus-within:ring-2 focus-within:ring-ring/50",
+    active ? "bg-muted text-foreground" : "text-muted-foreground",
   );
 }
 
@@ -130,6 +154,7 @@ function ProjectNode({
   project,
   selected,
   expanded,
+  hasDraft,
   conversations,
   conversationsLoading,
   selectedConversationId,
@@ -137,11 +162,13 @@ function ProjectNode({
   onToggleExpand,
   onSelectConversation,
   onCreateConversation,
+  onDeleteConversation,
   onDeleteProject,
 }: {
   project: Project;
   selected: boolean;
   expanded: boolean;
+  hasDraft: boolean;
   conversations: Conversation[] | undefined;
   conversationsLoading: boolean;
   selectedConversationId: number | null;
@@ -149,6 +176,7 @@ function ProjectNode({
   onToggleExpand: (project: Project) => void;
   onSelectConversation: (conversation: Conversation) => void;
   onCreateConversation: (project: Project) => void;
+  onDeleteConversation: (conversation: Conversation) => void;
   onDeleteProject: (project: Project) => void;
 }) {
   // 菜单打开时让行内操作保持可见(否则鼠标移开行后会随 hover 消失)。
@@ -157,7 +185,7 @@ function ProjectNode({
   return (
     <li>
       {/* 项目行:[chevron] [文件夹图标] [名称] …(hover: 新对话 + 与 … 菜单) */}
-      <div className={cn("group/row relative flex items-center", rowClass(selected))}>
+      <div className={cn("group/row relative flex items-center", PROJECT_ROW_CLASS)}>
         {/* chevron:独立切换展开/折叠,不改变选中。 */}
         <button
           type="button"
@@ -191,7 +219,14 @@ function ProjectNode({
             )}
             strokeWidth={selected ? 2.25 : 2}
           />
-          <span className="truncate font-medium">{project.title}</span>
+          <span
+            className={cn(
+              "truncate font-medium",
+              selected && "text-foreground",
+            )}
+          >
+            {project.title}
+          </span>
         </button>
 
         {/* 行内操作:与主按钮并列(绝对定位、不嵌套)。默认隐形,hover/聚焦/菜单打开时显现。 */}
@@ -210,7 +245,7 @@ function ProjectNode({
             title="新对话"
             className="flex size-6 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/50"
           >
-            <MessageSquarePlus className="size-4" />
+            <PenLine className="size-4" />
           </button>
 
           <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
@@ -244,12 +279,12 @@ function ProjectNode({
       {expanded && (
         <div className="mt-0.5 mb-1 ml-[1.4375rem] border-l border-border/60 pl-1.5">
           <ChatChildren
-            project={project}
             conversations={conversations}
             loading={conversationsLoading}
+            hasDraft={hasDraft}
             selectedConversationId={selectedConversationId}
             onSelectConversation={onSelectConversation}
-            onCreateConversation={onCreateConversation}
+            onDeleteConversation={onDeleteConversation}
           />
         </div>
       )}
@@ -257,21 +292,25 @@ function ProjectNode({
   );
 }
 
-/** 展开后的对话子列表:加载骨架 / 空态「暂无对话」/ 对话行 + 「新对话」入口。 */
+/**
+ * 展开后的对话子列表:加载骨架 / 空态「暂无对话」/ 对话行(每行带 hover 删除菜单)。
+ * 顶部可能出现一个瞬态的「新对话」草稿指示(未落库,纯前端状态)。
+ * 不再提供底部「+ 新对话」入口——新建对话只走项目行 hover 的 + 按钮。
+ */
 function ChatChildren({
-  project,
   conversations,
   loading,
+  hasDraft,
   selectedConversationId,
   onSelectConversation,
-  onCreateConversation,
+  onDeleteConversation,
 }: {
-  project: Project;
   conversations: Conversation[] | undefined;
   loading: boolean;
+  hasDraft: boolean;
   selectedConversationId: number | null;
   onSelectConversation: (conversation: Conversation) => void;
-  onCreateConversation: (project: Project) => void;
+  onDeleteConversation: (conversation: Conversation) => void;
 }) {
   // 首次展开尚未拉到数据(且在加载):骨架。
   if (loading && conversations === undefined) {
@@ -290,44 +329,93 @@ function ChatChildren({
 
   return (
     <ul className="flex flex-col gap-0.5">
-      {items.length === 0 ? (
-        <li className="px-2.5 py-1.5 text-xs text-muted-foreground">暂无对话</li>
-      ) : (
-        items.map((c) => {
-          const active = c.id === selectedConversationId;
-          return (
-            <li key={c.id}>
-              <button
-                type="button"
-                aria-current={active ? "true" : undefined}
-                onClick={() => onSelectConversation(c)}
-                className={cn(
-                  "flex w-full items-center px-2.5 py-1.5",
-                  rowClass(active),
-                )}
-              >
-                <span className="truncate">{c.title}</span>
-              </button>
-            </li>
-          );
-        })
+      {/* 瞬态草稿指示:正在为该项目撰写一段尚未落库的新对话。 */}
+      {hasDraft && (
+        <li
+          className="flex items-center gap-1.5 rounded-lg bg-muted px-2.5 py-1.5 text-sm text-foreground"
+          aria-current="true"
+        >
+          <PenLine className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate italic text-muted-foreground">新对话…</span>
+        </li>
       )}
 
-      {/* 每项目一个「+ 新对话」入口(行内 + 也可)。 */}
-      <li>
+      {items.length === 0 && !hasDraft ? (
+        <li className="px-2.5 py-1.5 text-xs text-muted-foreground">暂无对话</li>
+      ) : (
+        items.map((c) => (
+          <ChatRow
+            key={c.id}
+            conversation={c}
+            active={c.id === selectedConversationId}
+            onSelect={onSelectConversation}
+            onDelete={onDeleteConversation}
+          />
+        ))
+      )}
+    </ul>
+  );
+}
+
+/** 单个对话行:主点击区选中;hover/聚焦/菜单打开时右侧显现 … 菜单(删除)。 */
+function ChatRow({
+  conversation,
+  active,
+  onSelect,
+  onDelete,
+}: {
+  conversation: Conversation;
+  active: boolean;
+  onSelect: (conversation: Conversation) => void;
+  onDelete: (conversation: Conversation) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  return (
+    <li>
+      <div
+        className={cn(
+          "group/chat relative flex items-center",
+          conversationRowClass(active),
+        )}
+      >
         <button
           type="button"
-          onClick={() => onCreateConversation(project)}
-          className="flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-xs text-muted-foreground outline-none transition-colors ring-1 ring-transparent hover:bg-background hover:text-foreground hover:ring-border/70 focus-visible:bg-background focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+          aria-current={active ? "true" : undefined}
+          onClick={() => onSelect(conversation)}
+          className="flex min-w-0 flex-1 items-center px-2.5 py-1.5 pr-8 text-left outline-none"
         >
-          {loading && conversations !== undefined ? (
-            <Loader2 className="size-3.5 shrink-0 animate-spin" />
-          ) : (
-            <Plus className="size-3.5 shrink-0" />
-          )}
-          新对话
+          <span className="truncate">{conversation.title}</span>
         </button>
-      </li>
-    </ul>
+
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label={`对话「${conversation.title}」的操作`}
+              className={cn(
+                "absolute top-1/2 right-1 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground outline-none transition-[opacity,color,background-color]",
+                "hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50",
+                "aria-expanded:bg-muted aria-expanded:text-foreground",
+                menuOpen
+                  ? "opacity-100"
+                  : "opacity-0 group-hover/chat:opacity-100 group-focus-within/chat:opacity-100 focus-visible:opacity-100",
+              )}
+            >
+              <MoreHorizontal className="size-3.5" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" sideOffset={4}>
+            <DropdownMenuItem
+              variant="destructive"
+              onSelect={() => onDelete(conversation)}
+            >
+              <Trash2 />
+              删除
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </li>
   );
 }

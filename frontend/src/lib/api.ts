@@ -74,6 +74,11 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: title ?? null }),
     }).then(j<Conversation>),
+  deleteConversation: (cid: number) =>
+    fetch(`${BASE}/api/conversations/${cid}`, { method: "DELETE" }).then((r) => {
+      // 后端在缺失时返回 404;视为「已不在」,与删除成功同样处理。
+      if (!r.ok && r.status !== 404) throw new Error(`${r.status}: ${r.statusText}`);
+    }),
   listMessages: (cid: number) =>
     fetch(`${BASE}/api/conversations/${cid}/messages`).then(j<ChatMessage[]>),
   getSource: (recordId: number) =>

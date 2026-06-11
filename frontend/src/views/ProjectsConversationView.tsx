@@ -5,6 +5,8 @@ import {
   Loader2,
   PanelRight,
   Sparkles,
+  Trash2,
+  TriangleAlert,
   X,
 } from "lucide-react";
 
@@ -16,6 +18,14 @@ import {
   type Project,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { CreateProjectModal } from "@/components/CreateProjectModal";
 import { DeleteProjectDialog } from "@/components/DeleteProjectDialog";
 import { FileList } from "@/components/FileList";
@@ -36,6 +46,9 @@ export function ProjectsConversationView({
   const [createOpen, setCreateOpen] = useState(false);
   // 待删除确认的项目;为 null 时确认对话框关闭。
   const [pendingDelete, setPendingDelete] = useState<Project | null>(null);
+  // 待删除确认的对话;为 null 时确认对话框关闭。
+  const [pendingDeleteConversation, setPendingDeleteConversation] =
+    useState<Conversation | null>(null);
   // 创建后的自动扫描完成时自增,触发当前项目文件列表重新拉取(扫描晚于 onCreated)。
   const [scanTick, setScanTick] = useState(0);
   // 刚创建项目的自动扫描在途时为 true(扫描异步,完成晚于 onCreated)。
@@ -54,6 +67,10 @@ export function ProjectsConversationView({
   );
   // 当前选中会话(独立于项目;切换项目不强制清掉,但选项目即清会话以回到项目态)。
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
+  // 草稿态:正在为该项目撰写一段尚未落库的新对话(点 + 进入)。
+  // 与 activeConversationId 互斥:有草稿时主区显示空线程 + 就绪输入框,后端无任何记录。
+  // 首次发送时才 createConversation;切换项目/会话/顶栏页签会丢弃草稿(纯前端瞬态)。
+  const [draftProjectId, setDraftProjectId] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -118,10 +135,12 @@ export function ProjectsConversationView({
   }, [selected?.id]);
 
   // 选中项目(点项目名/行):选中、展开、清空会话回到项目态、懒加载其对话。
+  // 同时丢弃任何在途草稿——切换导航即视为放弃未发送的草稿。
   const handleSelectProject = useCallback(
     (project: Project) => {
       setSelected(project);
       setActiveConversationId(null);
+      setDraftProjectId(null);
       setExpandedIds((prev) => {
         if (prev.has(project.id)) return prev;
         const next = new Set(prev);
@@ -155,43 +174,76 @@ export function ProjectsConversationView({
       const project = projects.find((p) => p.id === conversation.project_id);
       if (project) setSelected(project);
       setActiveConversationId(conversation.id);
+      // 选中已有会话也丢弃草稿(导航离开 = 放弃未发送的草稿)。
+      setDraftProjectId(null);
     },
     [projects],
   );
 
-  // 新建对话(树上的每项目 +):创建 → 选中该项目 → 缓存前插 → 选中新会话 → 确保展开。
+  // 新建对话(树上的每项目 +):不调后端、不建 DB 行——只在主区开一段草稿。
+  // 选中并展开该项目、清空选中会话、把草稿挂到该项目。真正的 createConversation 推迟到首次发送。
+  const handleStartDraft = useCallback((project: Project) => {
+    setSelected(project);
+    setActiveConversationId(null);
+    setDraftProjectId(project.id);
+    setExpandedIds((prev) => {
+      if (prev.has(project.id)) return prev;
+      const next = new Set(prev);
+      next.add(project.id);
+      return next;
+    });
+  }, []);
+
+  // Workspace 内空态/Composer 用的「为当前项目开草稿」便捷封装。
+  const handleStartDraftForSelected = useCallback(() => {
+    if (selected) handleStartDraft(selected);
+  }, [selected, handleStartDraft]);
+
+  // 草稿首次发送时由 Conversation 调用:落库新建一段对话并返回 cid。
+  // 这里只创建,不改 activeConversationId——流仍在同一个 Conversation 实例里跑,
+  // 提前切 activeConversationId 会触发其重置 effect、打断在途流。
   const handleCreateConversation = useCallback(
-    async (project: Project) => {
-      setSelected(project);
-      setExpandedIds((prev) => {
-        if (prev.has(project.id)) return prev;
-        const next = new Set(prev);
-        next.add(project.id);
-        return next;
-      });
-      try {
-        const c = await api.createConversation(project.id);
-        setConversationsByProject((prev) => ({
-          ...prev,
-          [project.id]: [c, ...(prev[project.id] ?? [])],
-        }));
-        setActiveConversationId(c.id);
-      } catch {
-        /* 新建失败:静默,用户可重试。 */
-      }
-    },
+    (projectId: number) => api.createConversation(projectId),
     [],
   );
 
-  // Workspace 内空态/Composer 用的「为当前项目新建对话」便捷封装。
-  const handleCreateConversationForSelected = useCallback(() => {
-    if (selected) handleCreateConversation(selected);
-  }, [selected, handleCreateConversation]);
+  // Conversation 通知:草稿已落库为真实会话(已拿到首条回答的 cid)。
+  // 缓存前插、清掉草稿态、把它设为选中会话——此时流早已结束,可安全切换。
+  const handleConversationCreated = useCallback((c: Conversation) => {
+    setConversationsByProject((prev) => ({
+      ...prev,
+      [c.project_id]: [c, ...(prev[c.project_id] ?? [])],
+    }));
+    setDraftProjectId((cur) => (cur === c.project_id ? null : cur));
+    setActiveConversationId(c.id);
+  }, []);
 
   // 助手回答完成后,标题可能已更新(后端按首条消息),刷新当前项目对话列表保持侧栏标题同步。
   const refreshConversations = useCallback(() => {
     if (selected) loadConversations(selected.id, true);
   }, [selected, loadConversations]);
+
+  // 删除对话:调后端 → 从缓存移除;若删的是当前选中会话,清空主区回到项目态。
+  const handleDeleteConversation = useCallback(
+    async (conversation: Conversation) => {
+      try {
+        await api.deleteConversation(conversation.id);
+      } catch {
+        /* 删除失败(非 404):静默,用户可重试。 */
+        return;
+      }
+      setConversationsByProject((prev) => {
+        const list = prev[conversation.project_id];
+        if (!list) return prev;
+        return {
+          ...prev,
+          [conversation.project_id]: list.filter((c) => c.id !== conversation.id),
+        };
+      });
+      setActiveConversationId((cur) => (cur === conversation.id ? null : cur));
+    },
+    [],
+  );
 
   const handleCreated = async (project: Project) => {
     // 重新拉取权威列表,避免较慢的初始 listProjects 响应覆盖乐观插入的新项目;
@@ -224,6 +276,7 @@ export function ProjectsConversationView({
       const { [deleted.id]: _, ...rest } = prev;
       return rest;
     });
+    setDraftProjectId((cur) => (cur === deleted.id ? null : cur));
     setSelected((cur) => {
       if (cur && cur.id === deleted.id) {
         setActiveConversationId(null);
@@ -239,13 +292,15 @@ export function ProjectsConversationView({
         projects={projects}
         selectedProjectId={selected?.id ?? null}
         selectedConversationId={activeConversationId}
+        draftProjectId={draftProjectId}
         expandedIds={expandedIds}
         conversationsByProject={conversationsByProject}
         loadingProjectIds={loadingProjectIds}
         onSelectProject={handleSelectProject}
         onToggleExpand={handleToggleExpand}
         onSelectConversation={handleSelectConversation}
-        onCreateConversation={handleCreateConversation}
+        onCreateConversation={handleStartDraft}
+        onDeleteConversation={(c) => setPendingDeleteConversation(c)}
         onCreateProject={() => setCreateOpen(true)}
         onDeleteProject={setPendingDelete}
       />
@@ -260,7 +315,10 @@ export function ProjectsConversationView({
             llmConfigured={llmConfigured}
             onOpenSettings={onOpenSettings}
             activeConversationId={activeConversationId}
-            onCreateConversation={handleCreateConversationForSelected}
+            draft={draftProjectId === selected.id}
+            onStartDraft={handleStartDraftForSelected}
+            onCreateConversation={handleCreateConversation}
+            onConversationCreated={handleConversationCreated}
             onConversationActivity={refreshConversations}
           />
         ) : (
@@ -285,7 +343,94 @@ export function ProjectsConversationView({
         onClose={() => setPendingDelete(null)}
         onDeleted={handleDeleted}
       />
+
+      <DeleteConversationDialog
+        conversation={pendingDeleteConversation}
+        onClose={() => setPendingDeleteConversation(null)}
+        onConfirm={handleDeleteConversation}
+      />
     </div>
+  );
+}
+
+/**
+ * 删除对话的轻量确认。沿用项目删除对话框的视觉语言(破坏性图标 + 标题 + 底部双按钮),
+ * 但更简单——对话只是一段问答记录,删除只清库内记录,不涉及磁盘文件。
+ */
+function DeleteConversationDialog({
+  conversation,
+  onClose,
+  onConfirm,
+}: {
+  /** 待删除的对话;为 null 时对话框关闭。 */
+  conversation: Conversation | null;
+  onClose: () => void;
+  /** 用户确认后调用;父级负责实际删除与列表/选中态清理。 */
+  onConfirm: (conversation: Conversation) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const open = conversation !== null;
+
+  useEffect(() => {
+    if (open) setBusy(false);
+  }, [open]);
+
+  const confirm = async () => {
+    if (!conversation) return;
+    setBusy(true);
+    await onConfirm(conversation);
+    setBusy(false);
+    onClose();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && !busy && onClose()}>
+      <DialogContent showCloseButton={!busy} className="gap-0 p-0">
+        <DialogHeader className="gap-2 px-6 pt-6">
+          <span
+            aria-hidden
+            className="flex size-9 items-center justify-center rounded-xl bg-destructive/10 text-destructive ring-1 ring-destructive/15"
+          >
+            <TriangleAlert className="size-[18px]" strokeWidth={2} />
+          </span>
+          <DialogTitle>删除对话「{conversation?.title}」?</DialogTitle>
+          <DialogDescription>
+            将从该项目移除这段对话及其全部消息。此操作不可撤销。
+          </DialogDescription>
+        </DialogHeader>
+
+        <DialogFooter className="gap-2 border-t border-border/70 bg-muted/30 px-6 py-4">
+          <Button
+            type="button"
+            variant="ghost"
+            size="lg"
+            disabled={busy}
+            onClick={onClose}
+          >
+            取消
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            size="lg"
+            disabled={busy}
+            onClick={confirm}
+          >
+            {busy ? (
+              <>
+                <Loader2 className="size-4 animate-spin" />
+                正在删除…
+              </>
+            ) : (
+              <>
+                <Trash2 className="size-4" />
+                删除
+              </>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -296,7 +441,10 @@ function Workspace({
   llmConfigured,
   onOpenSettings,
   activeConversationId,
+  draft,
+  onStartDraft,
   onCreateConversation,
+  onConversationCreated,
   onConversationActivity,
 }: {
   project: Project;
@@ -305,7 +453,14 @@ function Workspace({
   llmConfigured: boolean;
   onOpenSettings: () => void;
   activeConversationId: number | null;
-  onCreateConversation: () => void;
+  /** 本项目当前是否处于草稿态(主区显示空线程 + 就绪输入框)。 */
+  draft: boolean;
+  /** 开启一段新草稿(空态/“新建对话”按钮)。 */
+  onStartDraft: () => void;
+  /** 草稿首次发送:落库新建对话并返回其记录(含 cid)。 */
+  onCreateConversation: (projectId: number) => Promise<Conversation>;
+  /** 草稿已落库为真实会话后通知父级(入缓存、清草稿、设为选中)。 */
+  onConversationCreated: (conversation: Conversation) => void;
   onConversationActivity: () => void;
 }) {
   // 来源(文件)抽屉默认关闭——对话是中心,文件是安静的次要资料。
@@ -363,11 +518,15 @@ function Workspace({
 
         {/* 对话主体:占据主纵向空间 */}
         <Conversation
+          projectId={project.id}
           projectTitle={project.title}
           conversationId={activeConversationId}
+          draft={draft}
           llmConfigured={llmConfigured}
           onOpenSettings={onOpenSettings}
+          onStartDraft={onStartDraft}
           onCreateConversation={onCreateConversation}
+          onConversationCreated={onConversationCreated}
           onConversationActivity={onConversationActivity}
         />
       </div>
@@ -497,18 +656,26 @@ function parseCitations(json: string | null): Citation[] {
  * 选中会话后展示历史消息;Composer 发送走 SSE 流式渲染;assistant 的 [n] 引用可点开来源查看器。
  */
 function Conversation({
+  projectId,
   projectTitle,
   conversationId,
+  draft,
   llmConfigured,
   onOpenSettings,
+  onStartDraft,
   onCreateConversation,
+  onConversationCreated,
   onConversationActivity,
 }: {
+  projectId: number;
   projectTitle: string;
   conversationId: number | null;
+  draft: boolean;
   llmConfigured: boolean;
   onOpenSettings: () => void;
-  onCreateConversation: () => void;
+  onStartDraft: () => void;
+  onCreateConversation: (projectId: number) => Promise<Conversation>;
+  onConversationCreated: (conversation: Conversation) => void;
   onConversationActivity: () => void;
 }) {
   const [messages, setMessages] = useState<ViewMessage[]>([]);
@@ -520,11 +687,21 @@ function Conversation({
   const [viewing, setViewing] = useState<Citation | null>(null);
   // 当前流的 abort 句柄(切换会话 / 停止 / 卸载时调用)。
   const abortRef = useRef<(() => void) | null>(null);
+  // 由本组件在草稿首次发送时落库出来的 cid。父级随后会把 conversationId 切到这个值,
+  // 此时不应重置/重拉历史——流就在本实例里跑,内容已在屏。下面的重置 effect 据此跳过这一跳变。
+  const selfCreatedCidRef = useRef<number | null>(null);
 
   // 切换会话:中断在途流、拉取历史消息。
+  // 例外:从草稿(null)跳到本组件刚落库的 cid——同一段对话、流仍在跑,跳过重置。
   useEffect(() => {
+    if (conversationId != null && conversationId === selfCreatedCidRef.current) {
+      // 草稿已被父级提升为选中会话;消化掉这一跳,后续若再切走才真正重置。
+      selfCreatedCidRef.current = null;
+      return;
+    }
     abortRef.current?.();
     abortRef.current = null;
+    selfCreatedCidRef.current = null;
     setStreaming(false);
     setStatus(null);
     setMessages([]);
@@ -558,23 +735,13 @@ function Conversation({
   // 组件卸载时中断在途流,避免回调写入已卸载组件。
   useEffect(() => () => abortRef.current?.(), []);
 
-  const send = useCallback(
-    (content: string) => {
-      if (conversationId == null || streaming) return;
-      const assistantId = `assistant-${Date.now()}`;
-      // 乐观插入用户消息 + 一条空的流式助手消息。
-      setMessages((prev) => [
-        ...prev,
-        { id: `user-${Date.now()}`, role: "user", content, citations: [] },
-        { id: assistantId, role: "assistant", content: "", citations: [], streaming: true },
-      ]);
-      setStreaming(true);
-      setStatus("检索中");
-
+  // 真正打开 SSE 流。content 已经过乐观插入(用户消息 + 空助手消息)。
+  const streamTo = useCallback(
+    (cid: number, content: string, assistantId: string) => {
       const patch = (fn: (m: ViewMessage) => ViewMessage) =>
         setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
 
-      abortRef.current = api.sendMessage(conversationId, content, {
+      abortRef.current = api.sendMessage(cid, content, {
         onStatus: (s) => setStatus(s),
         onToken: (t) => patch((m) => ({ ...m, content: m.content + t })),
         onCitations: (c) => patch((m) => ({ ...m, citations: c })),
@@ -583,6 +750,7 @@ function Conversation({
           setStreaming(false);
           setStatus(null);
           abortRef.current = null;
+          // 后端在首轮按 LLM 自动命名:刷新当前项目对话列表,让已命名的会话出现在侧栏。
           onConversationActivity();
         },
         onError: (e) => {
@@ -595,7 +763,47 @@ function Conversation({
         },
       });
     },
-    [conversationId, streaming, onConversationActivity],
+    [onConversationActivity],
+  );
+
+  const send = useCallback(
+    async (content: string) => {
+      // 草稿态需先落库;非草稿则要求已有 cid。两种情况下流式进行中都不接受新发送。
+      if (streaming) return;
+      if (conversationId == null && !draft) return;
+
+      const assistantId = `assistant-${Date.now()}`;
+      // 乐观插入用户消息 + 一条空的流式助手消息。
+      setMessages((prev) => [
+        ...prev,
+        { id: `user-${Date.now()}`, role: "user", content, citations: [] },
+        { id: assistantId, role: "assistant", content: "", citations: [], streaming: true },
+      ]);
+      setStreaming(true);
+      setStatus("检索中");
+
+      let cid = conversationId;
+      if (cid == null) {
+        // 草稿首次发送:此刻才真正 createConversation。
+        try {
+          const c = await onCreateConversation(projectId);
+          cid = c.id;
+          selfCreatedCidRef.current = c.id;
+          // 通知父级:入缓存、清草稿、设为选中。这会把 conversationId 切到 c.id,
+          // 但上面的重置 effect 会因 selfCreatedCidRef 命中而跳过,不打断本次流。
+          onConversationCreated(c);
+        } catch {
+          // 落库失败:撤回乐观消息、回到草稿就绪态,用户可重试。
+          setMessages((prev) => prev.filter((m) => m.id !== assistantId).slice(0, -1));
+          setStreaming(false);
+          setStatus(null);
+          return;
+        }
+      }
+
+      streamTo(cid, content, assistantId);
+    },
+    [conversationId, draft, streaming, projectId, onCreateConversation, onConversationCreated, streamTo],
   );
 
   const stop = useCallback(() => {
@@ -609,16 +817,19 @@ function Conversation({
   }, []);
 
   const hasMessages = messages.length > 0;
+  // 主区有「正在对话」上下文:已有选中会话,或正在撰写一段草稿。
+  // 二者皆无时只展示项目空态与「新建对话」CTA,不挂输入框(发送无处可去)。
+  const inConversation = conversationId != null || draft;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {conversationId == null ? (
+        {!inConversation ? (
           <CenteredEmpty
             title={`与「${projectTitle}」对话`}
             body="为项目文件建立索引后,即可在此基于你的资料提问,并跳回答案引用的原始来源。"
             actionLabel="新建对话"
-            onAction={onCreateConversation}
+            onAction={onStartDraft}
           />
         ) : loading ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -635,13 +846,15 @@ function Conversation({
         )}
       </div>
 
-      <Composer
-        llmConfigured={llmConfigured}
-        streaming={streaming}
-        onSend={send}
-        onStop={stop}
-        onOpenSettings={onOpenSettings}
-      />
+      {inConversation && (
+        <Composer
+          llmConfigured={llmConfigured}
+          streaming={streaming}
+          onSend={send}
+          onStop={stop}
+          onOpenSettings={onOpenSettings}
+        />
+      )}
 
       <SourceViewer citation={viewing} onClose={() => setViewing(null)} />
     </div>
