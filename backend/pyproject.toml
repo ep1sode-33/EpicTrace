@@ -13,6 +13,9 @@ dependencies = [
   "python-pptx",
   "pymilvus[milvus_lite]",
   "FlagEmbedding",
+  # FlagEmbedding 1.4.0 的 reranker 调 tokenizer.prepare_for_model,transformers 5.x 已删除该方法
+  # → 钉在 4.x(否则 BGE-reranker compute_score 报 'XLMRobertaTokenizer has no attribute prepare_for_model')。
+  "transformers<5",
   "openai",
   "jieba",
   "rank_bm25",
