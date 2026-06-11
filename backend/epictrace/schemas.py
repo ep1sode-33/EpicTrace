@@ -130,3 +130,23 @@ class SettingsOut(BaseModel):
     configured: bool
     active_profile_id: str | None
     profiles: list[ProfileView]
+
+
+class ReferenceCreate(BaseModel):
+    kind: Literal["external", "internal"]
+    source_path: str | None = None       # external 必填
+    ingest_record_id: int | None = None  # internal 必填
+
+
+class ReferenceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    conversation_id: int
+    kind: str
+    display_name: str
+    source_path: str | None = None
+    ingest_record_id: int | None = None
+    mode: str
+    text_chars: int
+    detached: bool
+    created_at: datetime

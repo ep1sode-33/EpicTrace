@@ -5,7 +5,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from epictrace.config import AppConfig
 from epictrace.db import Database
-from epictrace.api.routers import conversations, files, health, projects, settings, source
+from epictrace.api.routers import (
+    conversations,
+    files,
+    health,
+    projects,
+    references,
+    settings,
+    source,
+)
 
 
 def create_app(
@@ -52,6 +60,7 @@ def create_app(
     app.include_router(conversations.router, prefix="/api")
     app.include_router(source.router, prefix="/api")
     app.include_router(settings.router, prefix="/api")
+    app.include_router(references.router, prefix="/api")
 
     import os
     from pathlib import Path
