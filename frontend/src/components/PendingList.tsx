@@ -36,6 +36,11 @@ export function PendingList({
   const [indexState, setIndexState] = useState<Record<number, IndexState>>({});
   // 运行中的轮询定时器(按项目 id),组件卸载时统一清理,避免泄漏 / setState after unmount。
   const pollTimers = useRef<Record<number, ReturnType<typeof setInterval>>>({});
+  // 始终指向最新的 onIndexed,供轮询闭包调用,避免把它塞进 effect 依赖。
+  const onIndexedRef = useRef(onIndexed);
+  useEffect(() => {
+    onIndexedRef.current = onIndexed;
+  }, [onIndexed]);
 
   useEffect(() => {
     return () => {
@@ -111,8 +116,62 @@ export function PendingList({
       });
     }
     // 让父级重新聚合:成功的文件翻「已索引」后会离开本队列。
-    onIndexed?.();
+    onIndexedRef.current?.();
   };
+
+  // 每 ~800ms 轮询一次 status,直到 status !== "running" 再收尾。
+  // fallbackTotal 用于轮询整体失败时把进度数兜底为「全部失败」。
+  // runIndex(用户主动点)与挂载时的恢复(切回 tab)共用这一段,避免逻辑重复。
+  const startPolling = (projectId: number, fallbackTotal: number) => {
+    // 已有该项目的定时器在跑(例如 onIndexed 触发的重聚合再次进入恢复):不重复起。
+    if (pollTimers.current[projectId] !== undefined) return;
+    const timer = setInterval(async () => {
+      try {
+        const job = await api.indexStatus(projectId);
+        if (job.status === "running") {
+          setIndexState((prev) => ({
+            ...prev,
+            [projectId]: { phase: "indexing", done: job.done, total: job.total },
+          }));
+        } else {
+          finishIndex(projectId, job.errors.length);
+        }
+      } catch {
+        // 轮询失败:停止并按兜底数计为失败。
+        finishIndex(projectId, fallbackTotal);
+      }
+    }, 800);
+    pollTimers.current[projectId] = timer;
+  };
+
+  // 切回本 tab(组件重挂)时,组件内的进度状态已丢,但后台 job 仍在跑。
+  // 对每个项目查一次 status:仍在 running 的,恢复进度显示并恢复轮询。
+  useEffect(() => {
+    let cancelled = false;
+    for (const p of projects) {
+      // 已经在显示进度 / 已有定时器的项目跳过,避免重复轮询。
+      if (pollTimers.current[p.id] !== undefined) continue;
+      api
+        .indexStatus(p.id)
+        .then((job) => {
+          if (cancelled || job.status !== "running") return;
+          if (pollTimers.current[p.id] !== undefined) return;
+          setIndexState((prev) => ({
+            ...prev,
+            [p.id]: { phase: "indexing", done: job.done, total: job.total },
+          }));
+          startPolling(p.id, job.total);
+        })
+        .catch(() => {
+          /* status 查询失败:不恢复进度,保持静默。 */
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // 仅依赖 projects:projects 变化(切回 tab 重挂 / 列表更新)时重查。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects]);
 
   const runIndex = async (group: PendingGroup) => {
     const { projectId } = group;
@@ -137,24 +196,7 @@ export function PendingList({
         finishIndex(projectId, started.errors.length);
         return;
       }
-      // 每 ~800ms 轮询一次,直到 status !== "running"。
-      const timer = setInterval(async () => {
-        try {
-          const job = await api.indexStatus(projectId);
-          if (job.status === "running") {
-            setIndexState((prev) => ({
-              ...prev,
-              [projectId]: { phase: "indexing", done: job.done, total: job.total },
-            }));
-          } else {
-            finishIndex(projectId, job.errors.length);
-          }
-        } catch {
-          // 轮询失败:停止并按该组全部计为失败。
-          finishIndex(projectId, group.files.length);
-        }
-      }, 800);
-      pollTimers.current[projectId] = timer;
+      startPolling(projectId, group.files.length);
     } catch {
       // POST 整体失败:具体文件数未知,按该组全部计为失败。
       finishIndex(projectId, group.files.length);
