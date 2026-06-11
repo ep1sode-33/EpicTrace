@@ -63,3 +63,30 @@ class FakeReranker:
             return sum(c.text.count(t) for t in terms)
 
         return sorted(chunks, key=score, reverse=True)[:top_k]
+
+
+class FakeLLM:
+    """可编排:grade(固定)或 grade_sequence(逐次)、rewrite、answer。记录收到的 system 提示以分流。"""
+
+    def __init__(self, *, grade="sufficient", grade_sequence=None, rewrite="改写后的查询", answer="假答案[1]"):
+        self._grade = grade
+        self._grade_seq = list(grade_sequence) if grade_sequence else None
+        self._rewrite = rewrite
+        self._answer = answer
+
+    def _route(self, messages):
+        sys = messages[0]["content"]
+        if "sufficient" in sys:  # GRADE_SYS
+            if self._grade_seq:
+                return self._grade_seq.pop(0) if self._grade_seq else "sufficient"
+            return self._grade
+        if "改写" in sys:  # REWRITE_SYS
+            return self._rewrite
+        return self._answer  # GENERATE_SYS
+
+    def complete(self, messages, **kwargs):
+        return self._route(messages)
+
+    def stream(self, messages, **kwargs):
+        for ch in self._route(messages):
+            yield ch

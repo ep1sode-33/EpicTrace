@@ -16,6 +16,7 @@ dependencies = [
   "openai",
   "jieba",
   "rank_bm25",
+  "langgraph",
 ]
 
 [project.optional-dependencies]
