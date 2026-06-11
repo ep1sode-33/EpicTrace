@@ -169,3 +169,21 @@ def test_unknown_or_corrupt_file_does_not_crash(tmp_path: Path):
     (tmp_path / "settings.json").write_text("not json{{{", encoding="utf-8")
     v = _svc(tmp_path).public_view()
     assert v["configured"] is False and v["profiles"] == []
+
+
+def test_context_window_defaults_and_roundtrips(tmp_path: Path):
+    svc = _svc(tmp_path)
+    pid = svc.create_profile(name="A", base_url="http://x", api_key="k", model="m")
+    # 未传 → 默认 32768
+    assert svc.get_active_profile()["context_window"] == 32768
+    assert svc.get_chat_llm().context_window == 32768
+    assert svc.public_view()["profiles"][0]["context_window"] == 32768
+    # 可更新
+    svc.update_profile(pid, context_window=128000)
+    assert svc.get_chat_llm().context_window == 128000
+
+
+def test_create_profile_accepts_explicit_context_window(tmp_path: Path):
+    svc = _svc(tmp_path)
+    svc.create_profile(name="A", base_url="http://x", api_key="k", model="m", context_window=8192)
+    assert svc.get_chat_llm().context_window == 8192

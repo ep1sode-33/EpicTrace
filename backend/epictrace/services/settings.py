@@ -13,6 +13,7 @@ class ChatLLMSettings:
     base_url: str
     api_key: str
     model: str
+    context_window: int = 32768
 
 
 def _short_id() -> str:
@@ -110,10 +111,18 @@ class SettingsService:
             base_url=p.get("base_url", ""),
             api_key=p.get("api_key", ""),
             model=p.get("model", ""),
+            context_window=int(p.get("context_window", 32768)),
         )
 
     # ---- 变更 ----
-    def create_profile(self, name: str, base_url: str, api_key: str, model: str) -> str:
+    def create_profile(
+        self,
+        name: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+        context_window: int = 32768,
+    ) -> str:
         """新建 Profile,返回其 id。首个 Profile 自动成为活动。"""
         data = self._load()
         pid = _short_id()
@@ -127,6 +136,7 @@ class SettingsService:
                 "base_url": base_url,
                 "api_key": api_key,
                 "model": model,
+                "context_window": context_window,
             }
         )
         if data["active_profile_id"] is None:
@@ -142,6 +152,7 @@ class SettingsService:
         base_url: str | None = None,
         model: str | None = None,
         api_key: str | None = None,
+        context_window: int | None = None,
     ) -> None:
         """更新 Profile 的字段。任一参数为 None → 保留原值;
         尤其 api_key=None 保留既有密钥(前端只回传打码视图,不该清空真 key)。"""
@@ -156,6 +167,8 @@ class SettingsService:
                     p["model"] = model
                 if api_key is not None:
                     p["api_key"] = api_key
+                if context_window is not None:
+                    p["context_window"] = context_window
                 self._write(data)
                 return
         # 未找到:静默不改(幂等,避免对已删除 id 抛错)
@@ -194,6 +207,7 @@ class SettingsService:
                     "base_url": p.get("base_url", ""),
                     "api_key": p.get("api_key", ""),
                     "model": p.get("model", ""),
+                    "context_window": int(p.get("context_window", 32768)),
                     "api_key_set": bool(p.get("api_key")),
                 }
                 for p in data["profiles"]
