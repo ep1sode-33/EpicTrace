@@ -381,6 +381,8 @@ function ProfileForm({
     setForm((f) => ({ ...f, [k]: e.target.value }));
   };
   const onEnter = (e: React.KeyboardEvent) => {
+    // 输入法(IME)合成期间按 Enter 是确认候选词,不应触发保存。
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && canSubmit) onSave();
   };
 
