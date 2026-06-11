@@ -14,6 +14,8 @@ dependencies = [
   "pymilvus[milvus_lite]",
   "FlagEmbedding",
   "openai",
+  "jieba",
+  "rank_bm25",
 ]
 
 [project.optional-dependencies]
