@@ -5,6 +5,13 @@ import remarkGfm from "remark-gfm";
 import { type Citation } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+/** 流式途中可能出现未闭合的 ``` 代码围栏,会把后续正文误当代码、来回闪。
+ * 渲染前若 ``` 数为奇数,临时补一个闭合围栏(只影响渲染,不改原始内容)。 */
+function balanceFences(md: string): string {
+  const fences = (md.match(/^```/gm) ?? []).length;
+  return fences % 2 === 1 ? `${md}\n\`\`\`` : md;
+}
+
 // 完整的引用标记 [n](n 为 1+ 位数字)。流式途中可能出现「半截」如 `[` 或 `[1`(右括号未到),
 // 这类不完整片段不匹配,会以普通文本静默渲染,等右括号到达后整体再被切成 chip——不崩、不闪。
 const CITE_RE = /\[(\d+)\]/g;
@@ -186,7 +193,7 @@ export function AssistantMarkdown({
       rehypePlugins={REHYPE_PLUGINS}
       components={components}
     >
-      {content}
+      {balanceFences(content)}
     </ReactMarkdown>
   );
 }
