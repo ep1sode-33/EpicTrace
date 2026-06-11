@@ -934,6 +934,7 @@ function Conversation({
           onSend={send}
           onStop={stop}
           onOpenSettings={onOpenSettings}
+          onAttachPaths={() => {}}
         />
       )}
 

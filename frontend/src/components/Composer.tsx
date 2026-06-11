@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
-import { Settings2, SendHorizontal, Square } from "lucide-react";
+import { Plus, Settings2, SendHorizontal, Square } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { pickFiles } from "@/lib/pickers";
 
 /**
  * 对话输入框。三态:
@@ -18,14 +19,18 @@ export function Composer({
   onSend,
   onStop,
   onOpenSettings,
+  onAttachPaths,
 }: {
   llmConfigured: boolean;
   streaming: boolean;
   onSend: (content: string) => void;
   onStop: () => void;
   onOpenSettings: () => void;
+  /** 用户通过「+」/拖拽/粘贴选了外部文件(绝对路径列表)。拖拽/粘贴在浏览器拿不到绝对路径时为空。 */
+  onAttachPaths: (paths: string[]) => void;
 }) {
   const [value, setValue] = useState("");
+  const [dragging, setDragging] = useState(false);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 
   const grow = (el: HTMLTextAreaElement) => {
@@ -41,17 +46,48 @@ export function Composer({
     if (taRef.current) taRef.current.style.height = "auto";
   };
 
+  const pick = async () => {
+    const paths = await pickFiles();
+    if (paths.length) onAttachPaths(paths);
+  };
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const paths = Array.from(e.dataTransfer.files)
+      .map((f) => (f as File & { path?: string }).path)
+      .filter((p): p is string => Boolean(p));
+    if (paths.length) onAttachPaths(paths);
+  };
+
   return (
     <div className="shrink-0 px-6 pb-7">
       <div className="mx-auto w-full max-w-2xl">
         <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (llmConfigured) setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={llmConfigured ? onDrop : undefined}
           className={cn(
             "flex items-end gap-2 rounded-2xl border bg-background p-2 shadow-sm transition-colors",
             llmConfigured
               ? "border-border focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/40"
               : "border-border/70 bg-muted/30",
+            dragging && "border-ring ring-3 ring-ring/40",
           )}
         >
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            disabled={!llmConfigured}
+            onClick={pick}
+            aria-label="添加文件"
+            className="mb-px"
+          >
+            <Plus className="size-4" />
+          </Button>
           <textarea
             ref={taRef}
             rows={1}
@@ -75,6 +111,15 @@ export function Composer({
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 submit();
+              }
+            }}
+            onPaste={(e) => {
+              const paths = Array.from(e.clipboardData.files)
+                .map((f) => (f as File & { path?: string }).path)
+                .filter((p): p is string => Boolean(p));
+              if (paths.length) {
+                e.preventDefault();
+                onAttachPaths(paths);
               }
             }}
           />
