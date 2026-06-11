@@ -62,6 +62,10 @@ class Conversation(Base):
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation", cascade="all, delete-orphan", order_by="Message.id"
     )
+    references: Mapped[list["ConversationReference"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan",
+        order_by="ConversationReference.id",
+    )
 
 
 class Message(Base):
@@ -77,3 +81,25 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+
+class ConversationReference(Base):
+    __tablename__ = "conversation_references"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16))                 # external | internal
+    display_name: Mapped[str] = mapped_column(String(512))
+    source_path: Mapped[str | None] = mapped_column(String(1024), default=None)   # external
+    ingest_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ingest_records.id"), default=None                            # internal
+    )
+    extracted_text: Mapped[str | None] = mapped_column(Text, default=None)        # external 缓存
+    text_chars: Mapped[int] = mapped_column(default=0)
+    mode: Mapped[str] = mapped_column(String(16))                # fulltext | focus | deferred
+    detached: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+    conversation: Mapped["Conversation"] = relationship(back_populates="references")
