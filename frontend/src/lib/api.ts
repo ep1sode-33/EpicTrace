@@ -35,4 +35,9 @@ export const api = {
     fetch(`${BASE}/api/projects/${projectId}/index`, { method: "POST" }).then(j<IndexStatus>),
   indexStatus: (projectId: number) =>
     fetch(`${BASE}/api/projects/${projectId}/index/status`).then(j<IndexStatus>),
+  deleteProject: (projectId: number, deleteFolder: boolean) =>
+    fetch(
+      `${BASE}/api/projects/${projectId}?delete_folder=${deleteFolder}`,
+      { method: "DELETE" },
+    ).then(j<{ deleted: boolean; project_id: number; folder_path: string | null }>),
 };

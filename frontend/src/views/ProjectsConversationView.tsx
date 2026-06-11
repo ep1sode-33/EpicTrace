@@ -10,6 +10,7 @@ import {
 import { api, type Project } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { CreateProjectModal } from "@/components/CreateProjectModal";
+import { DeleteProjectDialog } from "@/components/DeleteProjectDialog";
 import { FileList } from "@/components/FileList";
 import { ProjectSidebar } from "@/components/ProjectSidebar";
 
@@ -17,6 +18,8 @@ export function ProjectsConversationView() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Project | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  // 待删除确认的项目;为 null 时确认对话框关闭。
+  const [pendingDelete, setPendingDelete] = useState<Project | null>(null);
   // 创建后的自动扫描完成时自增,触发当前项目文件列表重新拉取(扫描晚于 onCreated)。
   const [scanTick, setScanTick] = useState(0);
   // 刚创建项目的自动扫描在途时为 true(扫描异步,完成晚于 onCreated)。
@@ -53,6 +56,15 @@ export function ProjectsConversationView() {
     }
   };
 
+  const handleDeleted = (deleted: Project) => {
+    // 删除成功:从列表移除;若删的是当前选中项,退回首个剩余项目(没有则清空)。
+    const next = projects.filter((p) => p.id !== deleted.id);
+    setProjects(next);
+    setSelected((cur) =>
+      cur && cur.id === deleted.id ? (next[0] ?? null) : cur,
+    );
+  };
+
   return (
     <div className="flex h-[calc(100vh-3.5rem)]">
       <ProjectSidebar
@@ -60,6 +72,7 @@ export function ProjectsConversationView() {
         selectedId={selected?.id ?? null}
         onSelect={setSelected}
         onCreate={() => setCreateOpen(true)}
+        onDelete={setPendingDelete}
       />
 
       <section className="flex min-w-0 flex-1 flex-col">
@@ -85,6 +98,12 @@ export function ProjectsConversationView() {
           setScanTick((t) => t + 1);
         }}
         onScanError={() => setScanning(false)}
+      />
+
+      <DeleteProjectDialog
+        project={pendingDelete}
+        onClose={() => setPendingDelete(null)}
+        onDeleted={handleDeleted}
       />
     </div>
   );

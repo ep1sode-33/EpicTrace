@@ -56,3 +56,6 @@ class MilvusLiteStore(VectorStore):
 
     def delete_by_record(self, ingest_record_id: int) -> None:
         self._client.delete(_COLLECTION, filter=f"ingest_record_id == {ingest_record_id}")
+
+    def delete_by_project(self, project_id: int) -> None:
+        self._client.delete(_COLLECTION, filter=f"project_id == {project_id}")

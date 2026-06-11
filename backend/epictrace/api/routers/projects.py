@@ -43,6 +43,30 @@ def list_projects(db: Database = Depends(get_db)) -> list[ProjectOut]:
     return [ProjectOut.model_validate(p) for p in ProjectService(db).list()]
 
 
+@router.delete("/{project_id}", status_code=status.HTTP_200_OK)
+def delete_project(
+    project_id: int,
+    request: Request,
+    delete_folder: bool = False,
+    db: Database = Depends(get_db),
+) -> dict:
+    _ensure_project(db, project_id)
+
+    # 先尽力清理向量库:store 可能从未构造(未索引过)。构造 Milvus 不加载模型,安全。
+    # 任一步失败都不应阻断 DB 行的删除——尽力而为。
+    try:
+        store = get_vector_store(request)
+        store.delete_by_project(project_id)
+    except Exception:  # noqa: BLE001 — 向量清理失败不阻断项目删除
+        pass
+
+    # 删 DB 行(ingest_records 经 cascade 一并删除),可选删盘上文件夹。
+    folder_path = ProjectService(db).delete(project_id, delete_folder=delete_folder)
+    # 该项目可能残留的索引任务状态一并丢弃,避免 status 轮询到旧 job。
+    request.app.state.index_jobs.pop(project_id, None)
+    return {"deleted": True, "project_id": project_id, "folder_path": folder_path}
+
+
 @router.post("/{project_id}/scan", response_model=ScanResultOut)
 def scan_project(project_id: int, db: Database = Depends(get_db)) -> ScanResultOut:
     try:

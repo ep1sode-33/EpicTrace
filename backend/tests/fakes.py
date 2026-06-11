@@ -1,4 +1,28 @@
 from epictrace.interfaces.embedding import EmbeddingProvider
+from epictrace.interfaces.vector_store import VectorStore
+
+
+class FakeVectorStore(VectorStore):
+    """记录调用,便于断言项目删除时向量被清理;不依赖 Milvus。"""
+
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+        self.deleted_projects: list[int] = []
+        self.deleted_records: list[int] = []
+
+    def upsert(self, records: list[dict]) -> None:
+        self.records.extend(records)
+
+    def query(self, vector: list[float], filter: dict | None, k: int) -> list[dict]:
+        return []
+
+    def delete_by_record(self, ingest_record_id: int) -> None:
+        self.deleted_records.append(ingest_record_id)
+        self.records = [r for r in self.records if r.get("ingest_record_id") != ingest_record_id]
+
+    def delete_by_project(self, project_id: int) -> None:
+        self.deleted_projects.append(project_id)
+        self.records = [r for r in self.records if r.get("project_id") != project_id]
 
 
 class FakeEmbedder(EmbeddingProvider):
