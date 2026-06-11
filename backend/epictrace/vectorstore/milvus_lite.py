@@ -43,7 +43,14 @@ class MilvusLiteStore(VectorStore):
             self._client.create_collection(
                 _COLLECTION, schema=schema, index_params=index_params
             )
-            self._client.load_collection(_COLLECTION)
+        # 无论新建还是已存在,都确保 collection 已加载 —— 否则对"已存在(上次会话建的)
+        # collection"调 search/query 会报 'collection is in state released'(对话检索走这条路,
+        # app 重启后第一次提问必中)。load 对已加载的 collection 是幂等的。
+        self._client.load_collection(_COLLECTION)
+
+    def close(self) -> None:
+        """释放 milvus-lite 的独占文件锁(便于同进程内重开 store / 测试模拟重启)。"""
+        self._client.close()
 
     def upsert(self, records: list[dict]) -> None:
         if not records:
