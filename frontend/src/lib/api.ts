@@ -112,74 +112,94 @@ export const api = {
    * 返回一个 abort 函数:调用即取消本次流(切换会话/卸载时用)。
    */
   sendMessage(cid: number, content: string, h: StreamHandlers): () => void {
-    const ctrl = new AbortController();
-    (async () => {
-      let res: Response;
-      try {
-        res = await fetch(`${BASE}/api/conversations/${cid}/messages`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-          body: JSON.stringify({ content }),
-          signal: ctrl.signal,
-        });
-      } catch (e) {
-        if (!ctrl.signal.aborted) h.onError?.(e instanceof Error ? e : new Error(String(e)));
-        return;
-      }
-      if (!res.ok || !res.body) {
-        const detail = await res.text().catch(() => "");
-        h.onError?.(new Error(`${res.status}: ${detail}`));
-        return;
-      }
+    return streamSSE(`${BASE}/api/conversations/${cid}/messages`, h, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ content }),
+    });
+  },
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      // 一个 SSE 事件以空行分隔;每行可能是 `event:` 或 `data:`(同事件可有多行 data)。
-      // 注:服务端(sse-starlette)用 CRLF,故先把 \r\n 归一为 \n,再按 \n\n 切事件块。
-      const dispatch = (event: string, data: string) => {
-        switch (event) {
-          case "status": h.onStatus?.(data); break;
-          case "token": h.onToken?.(data); break;
-          case "citations":
-            try { h.onCitations?.(JSON.parse(data) as Citation[]); }
-            catch { /* 引用解析失败不致命:答案正文已经流式呈现 */ }
-            break;
-          case "error": h.onError?.(new Error(data || "服务端错误")); break;
-          case "done": h.onDone?.(); break;
-        }
-      };
-      const flush = (block: string) => {
-        let event = "message";
-        const dataLines: string[] = [];
-        for (const line of block.split("\n")) {
-          if (line.startsWith("event:")) event = line.slice(6).trim();
-          else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
-          // 忽略注释行(`:`)、id:、retry: 等
-        }
-        if (dataLines.length || event !== "message") dispatch(event, dataLines.join("\n"));
-      };
-
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          // CRLF → LF 归一在「累积缓冲」上做,才能吃掉跨 chunk 边界的 \r\n(sse-starlette 用 \r\n\r\n);
-          // 已消费部分已 slice 掉,对整段重复归一是幂等且安全的。
-          buf = buf.replace(/\r\n/g, "\n");
-          let sep: number;
-          while ((sep = buf.indexOf("\n\n")) !== -1) {
-            const block = buf.slice(0, sep);
-            buf = buf.slice(sep + 2);
-            if (block.trim()) flush(block);
-          }
-        }
-        if (buf.trim()) flush(buf.replace(/\r\n/g, "\n")); // 收尾:无尾随空行时残留的最后一个事件
-      } catch (e) {
-        if (!ctrl.signal.aborted) h.onError?.(e instanceof Error ? e : new Error(String(e)));
-      }
-    })();
-    return () => ctrl.abort();
+  /**
+   * 重新生成最后一轮回答(用户无需重输)。后端删掉最后一条 user 消息之后的消息、
+   * 对同一提问重跑同一流水线;事件流与 sendMessage 一致(status/token/citations/done,失败发 error)。
+   * 返回一个 abort 函数。
+   */
+  regenerate(cid: number, h: StreamHandlers): () => void {
+    return streamSSE(`${BASE}/api/conversations/${cid}/regenerate`, h, {
+      method: "POST",
+      headers: { Accept: "text/event-stream" },
+    });
   },
 };
+
+/**
+ * POST 一个 SSE 端点并流式分发其事件(status/token/citations/done/error)。
+ * sendMessage / regenerate 共用:fetch + ReadableStream 手解析 `event:`/`data:` 行。
+ * 返回一个 abort 函数:调用即取消本次流(切换会话/卸载时用)。
+ */
+function streamSSE(url: string, h: StreamHandlers, init: RequestInit): () => void {
+  const ctrl = new AbortController();
+  (async () => {
+    let res: Response;
+    try {
+      res = await fetch(url, { ...init, signal: ctrl.signal });
+    } catch (e) {
+      if (!ctrl.signal.aborted) h.onError?.(e instanceof Error ? e : new Error(String(e)));
+      return;
+    }
+    if (!res.ok || !res.body) {
+      const detail = await res.text().catch(() => "");
+      h.onError?.(new Error(`${res.status}: ${detail}`));
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    // 一个 SSE 事件以空行分隔;每行可能是 `event:` 或 `data:`(同事件可有多行 data)。
+    // 注:服务端(sse-starlette)用 CRLF,故先把 \r\n 归一为 \n,再按 \n\n 切事件块。
+    const dispatch = (event: string, data: string) => {
+      switch (event) {
+        case "status": h.onStatus?.(data); break;
+        case "token": h.onToken?.(data); break;
+        case "citations":
+          try { h.onCitations?.(JSON.parse(data) as Citation[]); }
+          catch { /* 引用解析失败不致命:答案正文已经流式呈现 */ }
+          break;
+        case "error": h.onError?.(new Error(data || "服务端错误")); break;
+        case "done": h.onDone?.(); break;
+      }
+    };
+    const flush = (block: string) => {
+      let event = "message";
+      const dataLines: string[] = [];
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+        // 忽略注释行(`:`)、id:、retry: 等
+      }
+      if (dataLines.length || event !== "message") dispatch(event, dataLines.join("\n"));
+    };
+
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // CRLF → LF 归一在「累积缓冲」上做,才能吃掉跨 chunk 边界的 \r\n(sse-starlette 用 \r\n\r\n);
+        // 已消费部分已 slice 掉,对整段重复归一是幂等且安全的。
+        buf = buf.replace(/\r\n/g, "\n");
+        let sep: number;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const block = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          if (block.trim()) flush(block);
+        }
+      }
+      if (buf.trim()) flush(buf.replace(/\r\n/g, "\n")); // 收尾:无尾随空行时残留的最后一个事件
+    } catch (e) {
+      if (!ctrl.signal.aborted) h.onError?.(e instanceof Error ? e : new Error(String(e)));
+    }
+  })();
+  return () => ctrl.abort();
+}

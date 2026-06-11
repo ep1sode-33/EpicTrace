@@ -154,3 +154,72 @@ def test_retriever_error_yields_error_event_and_no_assistant_message(tmp_path: P
     events = list(svc.stream_answer(cid, "问题"))
     assert [e["event"] for e in events][-1] == "error"
     assert _roles(db, cid) == ["user"]
+
+
+def _contents(db, cid):
+    with db.session() as s:
+        return [(m.role, m.content) for m in s.execute(
+            select(Message).where(Message.conversation_id == cid).order_by(Message.id)
+        ).scalars()]
+
+
+def test_regenerate_replaces_last_assistant_without_duplicating_user(tmp_path: Path):
+    # 跑一轮 → user+assistant;regenerate → 删旧 assistant、产新 assistant,数量仍是 2,user 不重复。
+    db, cid = _setup(tmp_path)
+    svc = ChatService(db, FakeLLM(grade="sufficient", answer="第一次答案[1]。"), _Retriever())
+    list(svc.stream_answer(cid, "页表是什么"))
+    assert _roles(db, cid) == ["user", "assistant"]
+
+    svc2 = ChatService(db, FakeLLM(grade="sufficient", answer="重生成答案[1]。"), _Retriever())
+    events = list(svc2.stream_regenerate(cid))
+    assert [e["event"] for e in events][-1] == "done"
+    contents = _contents(db, cid)
+    # 仍是 user + assistant 两条,user 只有一条(未被复制),assistant 是新答案。
+    assert [r for r, _ in contents] == ["user", "assistant"]
+    assert contents[0] == ("user", "页表是什么")
+    assert "重生成答案" in contents[1][1]
+
+
+def test_regenerate_after_error_only_turn_produces_assistant(tmp_path: Path):
+    # 先制造「只有 user、无 assistant」(LLM 报错)的失败轮次。
+    db, cid = _setup(tmp_path)
+    failed = ChatService(db, RaisingLLM(), _Retriever())
+    list(failed.stream_answer(cid, "页表是什么"))
+    assert _roles(db, cid) == ["user"]
+
+    # regenerate 用正常 LLM:对同一个 user 消息重新生成,产出 assistant;user 不重复。
+    svc = ChatService(db, FakeLLM(grade="sufficient", answer="补上的答案[1]。"), _Retriever())
+    events = list(svc.stream_regenerate(cid))
+    assert [e["event"] for e in events][-1] == "done"
+    contents = _contents(db, cid)
+    assert [r for r, _ in contents] == ["user", "assistant"]
+    assert contents[0] == ("user", "页表是什么")
+    assert "补上的答案" in contents[1][1]
+
+
+def test_regenerate_uses_prior_turns_as_history_not_new_user(tmp_path: Path):
+    # 两轮后 regenerate:重生成第二轮的答案;LLM stream 输入应含第一轮历史,且不新增 user 消息。
+    db, cid = _setup(tmp_path)
+    llm = FakeLLM(grade="sufficient", answer="第二轮答案[1]。")
+    svc = ChatService(db, llm, _Retriever())
+    list(svc.stream_answer(cid, "第一轮问题"))
+    list(svc.stream_answer(cid, "第二轮问题"))
+    assert _roles(db, cid) == ["user", "assistant", "user", "assistant"]
+
+    llm.stream_messages.clear()
+    list(svc.stream_regenerate(cid))
+    # 重生成后仍是 user/assistant/user/assistant 四条(删旧 assistant、补新 assistant)。
+    assert _roles(db, cid) == ["user", "assistant", "user", "assistant"]
+    sent = llm.stream_messages[-1]
+    contents = [m["content"] for m in sent]
+    assert any("第一轮问题" in c for c in contents)   # 历史在场
+    assert "第二轮问题" in sent[-1]["content"]          # 重生成的是第二轮问题
+
+
+def test_regenerate_with_no_user_message_yields_error(tmp_path: Path):
+    # 空会话(无任何 user 消息)→ regenerate 发 error,不落消息。
+    db, cid = _setup(tmp_path)
+    svc = ChatService(db, FakeLLM(grade="sufficient"), _Retriever())
+    events = list(svc.stream_regenerate(cid))
+    assert [e["event"] for e in events][-1] == "error"
+    assert _roles(db, cid) == []

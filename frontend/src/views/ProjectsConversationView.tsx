@@ -16,6 +16,7 @@ import {
   type Conversation,
   type IngestRecord,
   type Project,
+  type StreamHandlers,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -735,13 +736,15 @@ function Conversation({
   // 组件卸载时中断在途流,避免回调写入已卸载组件。
   useEffect(() => () => abortRef.current?.(), []);
 
-  // 真正打开 SSE 流。content 已经过乐观插入(用户消息 + 空助手消息)。
-  const streamTo = useCallback(
-    (cid: number, content: string, assistantId: string) => {
+  // 把一个 SSE 流(发送 / 重生成)的事件接到指定 assistant 消息上。
+  // start 接收 onToken/onCitations 等回调,返回 abort 句柄(api.sendMessage / api.regenerate)。
+  // 该 assistant 消息须已就绪(发送:乐观插入的空消息;重生成:已存在并被重置为流式)。
+  const runStream = useCallback(
+    (assistantId: number | string, start: (h: StreamHandlers) => () => void) => {
       const patch = (fn: (m: ViewMessage) => ViewMessage) =>
         setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
 
-      abortRef.current = api.sendMessage(cid, content, {
+      abortRef.current = start({
         onStatus: (s) => setStatus(s),
         onToken: (t) => patch((m) => ({ ...m, content: m.content + t })),
         onCitations: (c) => patch((m) => ({ ...m, citations: c })),
@@ -764,6 +767,13 @@ function Conversation({
       });
     },
     [onConversationActivity],
+  );
+
+  // 真正打开发送的 SSE 流。content 已经过乐观插入(用户消息 + 空助手消息)。
+  const streamTo = useCallback(
+    (cid: number, content: string, assistantId: string) =>
+      runStream(assistantId, (h) => api.sendMessage(cid, content, h)),
+    [runStream],
   );
 
   const send = useCallback(
@@ -816,6 +826,40 @@ function Conversation({
     );
   }, []);
 
+  // 重新生成最后一轮:后端删最后一条 user 之后的消息、对同一提问重跑。前端把最后一条
+  // assistant 消息复位为流式(清空旧正文/引用/错误),token 流进同一条;无 assistant 消息
+  // (理论上不会)则补一条空的流式消息。复用与发送相同的流式/abort 机制。
+  const regenerate = useCallback(() => {
+    if (streaming || conversationId == null) return;
+
+    let targetId: number | string | null = null;
+    setMessages((prev) => {
+      const lastAssistantIdx = prev.reduce(
+        (acc, m, i) => (m.role === "assistant" ? i : acc),
+        -1,
+      );
+      if (lastAssistantIdx >= 0) {
+        targetId = prev[lastAssistantIdx].id;
+        return prev.map((m, i) =>
+          i === lastAssistantIdx
+            ? { ...m, content: "", citations: [], error: undefined, streaming: true }
+            : m,
+        );
+      }
+      // 兜底:历史里没有 assistant 消息(失败轮次理应留有乐观空消息,这里以防万一)。
+      targetId = `assistant-${Date.now()}`;
+      return [
+        ...prev,
+        { id: targetId, role: "assistant", content: "", citations: [], streaming: true },
+      ];
+    });
+    if (targetId == null) return;
+
+    setStreaming(true);
+    setStatus("检索中");
+    runStream(targetId, (h) => api.regenerate(conversationId, h));
+  }, [streaming, conversationId, runStream]);
+
   const hasMessages = messages.length > 0;
   // 主区有「正在对话」上下文:已有选中会话,或正在撰写一段草稿。
   // 二者皆无时只展示项目空态与「新建对话」CTA,不挂输入框(发送无处可去)。
@@ -837,7 +881,12 @@ function Conversation({
             正在加载对话…
           </div>
         ) : hasMessages ? (
-          <MessageList messages={messages} status={status} onCitation={setViewing} />
+          <MessageList
+            messages={messages}
+            status={status}
+            onCitation={setViewing}
+            onRegenerate={regenerate}
+          />
         ) : (
           <CenteredEmpty
             title={`与「${projectTitle}」对话`}

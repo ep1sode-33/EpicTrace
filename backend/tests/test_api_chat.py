@@ -81,6 +81,45 @@ def test_send_message_without_llm_configured_returns_409(tmp_path):
     assert r.status_code == 409  # 未配置对话模型
 
 
+def test_regenerate_replaces_last_assistant(chat_client, tmp_path):
+    client, db, store, emb = chat_client
+    folder = tmp_path / "P"
+    pid = client.post("/api/projects", json={"title": "P", "folder_path": str(folder)}).json()["id"]
+    store.upsert([{ "vector": emb.embed(["页表映射地址"])[0], "text": "页表映射地址", "ingest_record_id": 1,
+                    "project_id": pid, "char_start": 0, "char_end": 6, "source_type": "folder_scan",
+                    "embed_model_id": "fake" }])
+    cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
+    with client.stream("POST", f"/api/conversations/{cid}/messages", json={"content": "页表是什么"}) as r:
+        assert r.status_code == 200
+        "".join(chunk for chunk in r.iter_text())
+    assert len(client.get(f"/api/conversations/{cid}/messages").json()) == 2
+
+    with client.stream("POST", f"/api/conversations/{cid}/regenerate") as r:
+        assert r.status_code == 200
+        body = "".join(chunk for chunk in r.iter_text())
+    assert "event: token" in body and "event: done" in body
+
+    msgs = client.get(f"/api/conversations/{cid}/messages").json()
+    # 数量仍是 user + assistant 两条(旧 assistant 被替换),user 未复制。
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[0]["content"] == "页表是什么"
+
+
+def test_regenerate_unknown_conversation_returns_404(chat_client):
+    client, db, store, emb = chat_client
+    assert client.request("POST", "/api/conversations/999999/regenerate").status_code == 404
+
+
+def test_regenerate_without_llm_configured_returns_409(tmp_path):
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    app = create_app(db=db)  # llm=None 且 settings 从未保存(未配置)
+    client = TestClient(app)
+    pid = client.post("/api/projects", json={"title": "P", "folder_path": str(tmp_path / "P")}).json()["id"]
+    cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
+    r = client.request("POST", f"/api/conversations/{cid}/regenerate")
+    assert r.status_code == 409  # 未配置对话模型
+
+
 def test_get_llm_allows_keyless_local_endpoint_when_configured(tmp_path):
     # 已保存设置但 api_key 为空(本地 Ollama 等):应构造出 LLM,而非 None。
     from fastapi import Request

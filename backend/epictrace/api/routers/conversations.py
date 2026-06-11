@@ -72,3 +72,24 @@ def send_message(cid: int, payload: MessageCreate, request: Request, db: Databas
             yield {"event": e["event"], "data": e["data"]}
 
     return EventSourceResponse(gen())
+
+
+@router.post("/conversations/{cid}/regenerate")
+def regenerate_message(cid: int, request: Request, db: Database = Depends(get_db)):
+    # 重生成最后一轮:删最后一条 user 消息之后的消息、对同一提问重跑流水线(不新增 user)。
+    with db.session() as s:
+        if s.get(Conversation, cid) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    llm = get_llm(request)
+    if llm is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "对话模型未配置:请在设置里填写 OpenAI-Compatible 端点",
+        )
+    svc = ChatService(db, llm, get_retriever(request))
+
+    def gen():
+        for e in svc.stream_regenerate(cid):
+            yield {"event": e["event"], "data": e["data"]}
+
+    return EventSourceResponse(gen())

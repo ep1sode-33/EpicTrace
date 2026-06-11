@@ -27,10 +27,30 @@ class ChatService:
     def stream_answer(self, conversation_id: int, question: str) -> Iterator[dict]:
         # 先读历史(本轮 user message 尚未落库,故不会把它算进历史),再落 user message。
         history = self._load_history(conversation_id)
-        is_first_user_turn = not any(m["role"] == "user" for m in history)
         with self._db.session() as s:
             s.add(Message(conversation_id=conversation_id, role="user", content=question))
+        yield from self._run_turn(conversation_id, question, history)
 
+    def stream_regenerate(self, conversation_id: int) -> Iterator[dict]:
+        """重生成最后一轮:找最后一条 user 消息,删它之后的所有消息(上轮或失败的 assistant),
+        用它之前的消息作历史、对同一个 user 问题重跑同一条流水线(不新增 user 消息)。"""
+        msgs = self._load_history(conversation_id)
+        # 找最后一条 user 消息的下标;无 → 无可重生成的内容。
+        last_user = next((i for i in range(len(msgs) - 1, -1, -1) if msgs[i]["role"] == "user"), None)
+        if last_user is None:
+            yield {"event": "error", "data": "没有可重新生成的提问"}
+            return
+        question = msgs[last_user]["content"]
+        history = msgs[:last_user]
+        # 删该 user 消息之后的所有消息(已生成或失败的 assistant 轮次),避免重复累积。
+        self._delete_messages_after(conversation_id, keep_count=last_user + 1)
+        yield from self._run_turn(conversation_id, question, history)
+
+    def _run_turn(self, conversation_id: int, question: str, history: list[dict]) -> Iterator[dict]:
+        """一轮生成的共享核心(stream_answer / stream_regenerate 共用):
+        路由→(可选)检索→流式→引用→落 assistant 消息 + 首轮自动命名。
+        前置条件:本轮 user 消息状态已就绪(stream_answer 先落库;regenerate 复用已存在的)。"""
+        is_first_user_turn = not any(m["role"] == "user" for m in history)
         yield {"event": "status", "data": "检索中"}
         # 检索 + 生成全程兜异常:任一步抛错 → 发 error 事件并中止(不落半截 assistant 消息)。
         try:
@@ -75,6 +95,15 @@ class ChatService:
                 if is_first_user_turn and c.title == _DEFAULT_TITLE:
                     c.title = self._make_title(question)
         yield {"event": "done", "data": ""}
+
+    def _delete_messages_after(self, conversation_id: int, keep_count: int) -> None:
+        """保留按 id 升序的前 keep_count 条消息,删除其后的全部(重生成时清掉旧/失败 assistant 轮次)。"""
+        with self._db.session() as s:
+            rows = s.execute(
+                select(Message).where(Message.conversation_id == conversation_id).order_by(Message.id)
+            ).scalars().all()
+            for m in rows[keep_count:]:
+                s.delete(m)
 
     def _make_title(self, question: str) -> str:
         """首轮自动命名:一次廉价 LLM 调用产出简短标题;失败/为空 → 回退到问题首段。"""
