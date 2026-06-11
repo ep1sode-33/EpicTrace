@@ -26,10 +26,17 @@ class IndexJob:
 
 
 class IndexService:
-    def __init__(self, db: Database, embedder: EmbeddingProvider, vector_store: VectorStore) -> None:
+    def __init__(self, db: Database, embedder: EmbeddingProvider, vector_store) -> None:
+        # vector_store 可以是 VectorStore 实例,或返回它的可调用(getter)。
+        # 用 getter 时,Milvus(gRPC)的构造会被推迟到 _run 里、在 warmup 之后,
+        # 避免 'gRPC 激活后再加载模型' 段错误(macOS)。
         self._db = db
         self._embedder = embedder
-        self._store = vector_store
+        self._vector_store = vector_store
+
+    def _resolve_store(self) -> VectorStore:
+        vs = self._vector_store
+        return vs() if callable(vs) else vs
 
     def index_project(self, project_id: int) -> IndexJob:
         """构建一个 running 的 IndexJob(算好 total),不在此处跑活。
@@ -61,6 +68,10 @@ class IndexService:
 
     def _run(self, job: IndexJob) -> None:
         targets = getattr(job, "_targets", [])
+        # 关键顺序:先加载模型(warmup),再构造/使用 Milvus(gRPC)。
+        # 反过来(gRPC 已激活后再 fork 加载模型)会在 macOS 上段错误。
+        self._embedder.warmup()
+        store = self._resolve_store()
         for rec_id, path_str in targets:
             try:
                 path = Path(path_str)
@@ -69,10 +80,10 @@ class IndexService:
                 chunks = chunk_text(text)
                 # 幂等:提取成功后、入库前无条件清旧块,
                 # 这样「现在提取为空」的文件也能清掉历史向量。
-                self._store.delete_by_record(rec_id)
+                store.delete_by_record(rec_id)
                 if chunks:
                     vectors = self._embedder.embed([c.text for c in chunks])
-                    self._store.upsert([
+                    store.upsert([
                         {
                             "vector": vec, "text": c.text,
                             "ingest_record_id": rec_id, "project_id": job.project_id,

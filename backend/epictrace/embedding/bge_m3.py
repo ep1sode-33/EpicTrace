@@ -29,6 +29,11 @@ class BgeM3Embedder:
         dense = out["dense_vecs"]
         return [list(map(float, v)) for v in dense]
 
+    def warmup(self) -> None:
+        """预加载模型。务必在任何 Milvus/gRPC 客户端创建之前调用,
+        否则 'gRPC 激活后再 fork 加载模型' 会在 macOS 上段错误。"""
+        self._ensure()
+
     @property
     def model_id(self) -> str:
         return self._MODEL_ID

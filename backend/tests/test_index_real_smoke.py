@@ -1,0 +1,52 @@
+"""真模型回归测试:防止 'gRPC(Milvus)激活后再加载 BGE-M3 → fork 段错误'。
+
+按 app 的真实顺序跑 IndexService(真 BGE-M3 + 延迟构造的真 Milvus Lite):
+_run 必须先 warmup 模型、再构造 Milvus,否则段错误。默认跳过(需下/载模型)。
+跑:`EPICTRACE_RUN_SLOW=1 HF_HUB_OFFLINE=1 .venv/bin/pytest tests/test_index_real_smoke.py -v`
+"""
+import os
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("EPICTRACE_RUN_SLOW") != "1",
+    reason="真 BGE-M3 + Milvus 全链回归:需模型,设 EPICTRACE_RUN_SLOW=1 才跑",
+)
+
+
+def test_index_real_flow_app_order_no_segfault(tmp_path):
+    from epictrace.config import AppConfig
+    from epictrace.db import Database
+    from epictrace.embedding.bge_m3 import BgeM3Embedder
+    from epictrace.services.index import IndexService
+    from epictrace.services.ingest import IngestService
+    from epictrace.services.projects import ProjectService
+    from epictrace.services.scan import ScanService
+    from epictrace.vectorstore.milvus_lite import MilvusLiteStore
+
+    db = Database(AppConfig(data_dir=tmp_path))
+    db.create_all()
+    proj = ProjectService(db).create(title="P", folder_path=str(tmp_path / "P"))
+    (Path(proj.folder_path) / "note.md").write_text("虚拟内存与页表 " * 50, encoding="utf-8")
+    ScanService(db).scan_and_register(proj.id)
+
+    # 像 router 那样:store 用 getter 延迟构造,embedder 真件。
+    holder: dict = {}
+
+    def get_store() -> MilvusLiteStore:
+        if "s" not in holder:
+            holder["s"] = MilvusLiteStore(db_path=str(tmp_path / "v.db"), dim=1024)
+        return holder["s"]
+
+    svc = IndexService(db, BgeM3Embedder(), get_store)
+    job = svc.index_project(proj.id)
+    svc._run(job)  # 同步:warmup → 建 Milvus → 嵌入 → 入库;顺序错会段错误(进程崩溃)
+
+    assert job.status == "done"
+    assert job.done == 1
+    recs = IngestService(db).list_for_project(proj.id)
+    assert all(r.indexed for r in recs)
+    # 向量确实进了库(就地构造的 store)
+    hits = get_store().query(BgeM3Embedder().embed(["页表"])[0], filter={"project_id": proj.id}, k=1)
+    assert len(hits) >= 1

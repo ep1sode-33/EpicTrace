@@ -55,7 +55,9 @@ def scan_project(project_id: int, db: Database = Depends(get_db)) -> ScanResultO
 @router.post("/{project_id}/index", response_model=IndexStatusOut)
 def index_project(project_id: int, request: Request, db: Database = Depends(get_db)) -> IndexStatusOut:
     _ensure_project(db, project_id)
-    svc = IndexService(db, get_embedder(request), get_vector_store(request))
+    # vector store 传 getter 延迟构造:Milvus(gRPC)会在后台线程 warmup 模型之后才创建,
+    # 避免 'gRPC 激活后再 fork 加载模型' 的段错误(见 services/index.py._run)。
+    svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request))
     # 构建 running 的 job 并在守护线程里推进 per-file 工作,立刻返回 running 状态。
     # (同步等待会在真模型上把请求拖到超时;前端改为轮询 status 读实时进度。)
     job = svc.index_project(project_id)
