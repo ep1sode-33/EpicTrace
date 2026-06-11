@@ -1,25 +1,20 @@
-import { useEffect, useState } from "react";
-import { Loader2, Settings2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Check, Loader2, Pencil, Plus, Settings2, Trash2, X } from "lucide-react";
 
-import { api, type Settings } from "@/lib/api";
+import { api, type LLMProfile, type Settings } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
-/** OpenAI-compatible 端点预设:点一下填入 base_url + 占位模型,api_key 仍需手填。 */
-const PRESETS: { label: string; base_url: string; model: string }[] = [
-  { label: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-chat" },
-  { label: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  { label: "Ollama(本地)", base_url: "http://localhost:11434/v1", model: "qwen2.5" },
-];
+type FormState = { name: string; base_url: string; api_key: string; model: string };
+const BLANK: FormState = { name: "", base_url: "", api_key: "", model: "" };
 
 export function SettingsModal({
   open,
@@ -28,78 +23,145 @@ export function SettingsModal({
 }: {
   open: boolean;
   onClose: () => void;
-  /** 保存成功后回调,携带最新公开设置(api_key_set 已更新),供父级解禁 Composer。 */
+  /** 任一变更成功后回调,携带最新公开设置(configured 已更新),供父级解禁 Composer。 */
   onSaved?: (settings: Settings) => void;
 }) {
-  const [baseUrl, setBaseUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState("");
-  const [keyAlreadySet, setKeyAlreadySet] = useState(false);
+  const [profiles, setProfiles] = useState<LLMProfile[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 表单态:editingId === null 表示「新建」;非空表示编辑该 Profile。null === 表单关闭。
+  const [editingId, setEditingId] = useState<string | null | undefined>(undefined);
+  const [form, setForm] = useState<FormState>(BLANK);
+  const [editKeyAlreadySet, setEditKeyAlreadySet] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null); // "save" | "active:<id>" | "delete:<id>"
+  const nameRef = useRef<HTMLInputElement>(null);
 
-  // 每次打开都拉取当前设置回填(api_key 永不回传,只用 api_key_set 提示「已配置」)。
+  const apply = (s: Settings) => {
+    setProfiles(s.profiles);
+    setActiveId(s.active_profile_id);
+    onSaved?.(s);
+  };
+
+  // 每次打开都拉取当前设置(api_key 永不回传)。重置表单态。
   useEffect(() => {
     if (!open) return;
     setError(null);
-    setApiKey("");
+    setEditingId(undefined);
+    setForm(BLANK);
     setLoading(true);
     let cancelled = false;
     api
       .getSettings()
       .then((s) => {
         if (cancelled) return;
-        setBaseUrl(s.chat_llm.base_url);
-        setModel(s.chat_llm.model);
-        setKeyAlreadySet(s.chat_llm.api_key_set);
+        setProfiles(s.profiles);
+        setActiveId(s.active_profile_id);
       })
-      .catch((e) => {
-        if (!cancelled) setError(String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+      .catch((e) => !cancelled && setError(String(e)))
+      .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
     };
   }, [open]);
 
-  const applyPreset = (p: (typeof PRESETS)[number]) => {
-    setBaseUrl(p.base_url);
-    setModel(p.model);
+  // 表单打开时聚焦名称输入。
+  useEffect(() => {
+    if (editingId !== undefined) nameRef.current?.focus();
+  }, [editingId]);
+
+  const formOpen = editingId !== undefined;
+  const anyBusy = busy !== null;
+
+  const openCreate = () => {
+    setError(null);
+    setForm(BLANK);
+    setEditKeyAlreadySet(false);
+    setEditingId(null);
   };
 
+  const openEdit = (p: LLMProfile) => {
+    setError(null);
+    // 回填除 api_key 外的字段;api_key 始终留空(空=保留既有)。
+    setForm({ name: p.name, base_url: p.base_url, api_key: "", model: p.model });
+    setEditKeyAlreadySet(p.api_key_set);
+    setEditingId(p.id);
+  };
+
+  const closeForm = () => {
+    setEditingId(undefined);
+    setForm(BLANK);
+    setError(null);
+  };
+
+  const canSubmit =
+    Boolean(form.name.trim() && form.base_url.trim() && form.model.trim()) && !anyBusy;
+
   const save = async () => {
-    if (!baseUrl.trim() || !model.trim()) return;
-    setSaving(true);
+    if (!canSubmit) return;
+    setBusy("save");
     setError(null);
     try {
-      // api_key 留空时不放进请求体(omit),后端据此保留既有 key——只改模型/Base URL 不会误清密钥。
-      // 仅当用户填了新 key 才提交并覆盖。
-      const trimmedKey = apiKey.trim();
-      const settings = await api.putSettings({
-        chat_llm: {
-          base_url: baseUrl.trim(),
-          model: model.trim(),
-          ...(trimmedKey ? { api_key: trimmedKey } : {}),
-        },
-      });
-      onSaved?.(settings);
-      onClose();
+      const key = form.api_key.trim();
+      let s: Settings;
+      if (typeof editingId === "string") {
+        // 编辑:api_key 留空 → 不放进请求体,后端保留既有 key。
+        s = await api.updateProfile(editingId, {
+          name: form.name.trim(),
+          base_url: form.base_url.trim(),
+          model: form.model.trim(),
+          ...(key ? { api_key: key } : {}),
+        });
+      } else {
+        // 新建(editingId === null):api_key 可空(无 key 的本地端点)。
+        s = await api.createProfile({
+          name: form.name.trim(),
+          base_url: form.base_url.trim(),
+          api_key: key,
+          model: form.model.trim(),
+        });
+      }
+      apply(s);
+      closeForm();
     } catch (e) {
       setError(String(e));
     } finally {
-      setSaving(false);
+      setBusy(null);
     }
   };
 
-  // 可提交只需 base_url + model:api_key 留空即「保留既有」(请求体里 omit),无密钥的本地端点也能保存。
-  const canSubmit = Boolean(baseUrl.trim() && model.trim()) && !saving && !loading;
+  const setActive = async (id: string) => {
+    if (id === activeId || anyBusy) return;
+    setBusy(`active:${id}`);
+    setError(null);
+    try {
+      apply(await api.setActiveProfile(id));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async (id: string) => {
+    if (anyBusy) return;
+    setBusy(`delete:${id}`);
+    setError(null);
+    try {
+      const s = await api.deleteProfile(id);
+      apply(s);
+      // 若正在编辑被删的 Profile,关掉表单。
+      if (editingId === id) closeForm();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && !saving && onClose()}>
-      <DialogContent showCloseButton={!saving} className="gap-0 p-0">
+    <Dialog open={open} onOpenChange={(o) => !o && !anyBusy && onClose()}>
+      <DialogContent showCloseButton={!anyBusy} className="gap-0 p-0">
         <DialogHeader className="gap-2 px-6 pt-6">
           <span
             aria-hidden
@@ -109,106 +171,334 @@ export function SettingsModal({
           </span>
           <DialogTitle>对话模型</DialogTitle>
           <DialogDescription>
-            填写一个 OpenAI-Compatible 端点用于对话。密钥仅保存在本机,不会上传。
+            管理多个 OpenAI-Compatible 端点,选一个作为当前对话使用的 Profile。密钥仅保存在本机,不会上传。
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-5 px-6 py-5">
-          <div className="flex flex-wrap gap-1.5">
-            {PRESETS.map((p) => (
-              <Button
-                key={p.label}
-                type="button"
-                variant="outline"
-                size="xs"
-                disabled={saving || loading}
-                onClick={() => applyPreset(p)}
-              >
-                {p.label}
-              </Button>
-            ))}
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="settings-base-url" className="text-xs font-medium text-muted-foreground">
-              Base URL
-            </label>
-            <Input
-              id="settings-base-url"
-              value={baseUrl}
-              disabled={saving || loading}
-              placeholder="https://api.deepseek.com"
-              className="font-mono text-xs"
-              onChange={(e) => setBaseUrl(e.target.value)}
-            />
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="settings-api-key" className="text-xs font-medium text-muted-foreground">
-              API Key
-            </label>
-            <Input
-              id="settings-api-key"
-              type="password"
-              value={apiKey}
-              disabled={saving || loading}
-              placeholder={keyAlreadySet ? "已配置(留空则保留)" : "sk-…"}
-              className="font-mono text-xs"
-              autoComplete="off"
-              onChange={(e) => setApiKey(e.target.value)}
-            />
-            {keyAlreadySet && !apiKey && (
-              <p className="text-xs text-muted-foreground">
-                已保存过密钥。留空保存会保留它;如需更换,请填入新密钥。
-              </p>
-            )}
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="settings-model" className="text-xs font-medium text-muted-foreground">
-              模型
-            </label>
-            <Input
-              id="settings-model"
-              value={model}
-              disabled={saving || loading}
-              placeholder="deepseek-chat"
-              className="font-mono text-xs"
-              onChange={(e) => setModel(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && canSubmit) save();
-              }}
-            />
-          </div>
-
-          {error && (
-            <p
-              className={cn(
-                "rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2",
-                "text-xs leading-relaxed text-destructive",
+        <div className="flex max-h-[min(70vh,40rem)] flex-col gap-4 overflow-y-auto px-6 py-5">
+          {loading ? (
+            <ProfileSkeleton />
+          ) : (
+            <>
+              {profiles.length > 0 && (
+                <ul className="flex flex-col gap-2">
+                  {profiles.map((p) => (
+                    <ProfileRow
+                      key={p.id}
+                      profile={p}
+                      active={p.id === activeId}
+                      busy={busy}
+                      onActivate={() => setActive(p.id)}
+                      onEdit={() => openEdit(p)}
+                      onDelete={() => remove(p.id)}
+                    />
+                  ))}
+                </ul>
               )}
-            >
-              {error}
-            </p>
+
+              {profiles.length === 0 && !formOpen && (
+                <div className="flex flex-col items-center gap-1 rounded-xl border border-dashed border-border/80 bg-muted/30 px-6 py-8 text-center">
+                  <p className="text-sm font-medium text-foreground">还没有 Profile</p>
+                  <p className="max-w-xs text-xs leading-relaxed text-muted-foreground">
+                    新建一个 OpenAI-Compatible 端点(名称、Base URL、密钥、模型)即可开始对话。
+                  </p>
+                </div>
+              )}
+
+              {formOpen ? (
+                <ProfileForm
+                  editing={editingId !== null}
+                  form={form}
+                  setForm={setForm}
+                  keyAlreadySet={editKeyAlreadySet}
+                  saving={busy === "save"}
+                  canSubmit={canSubmit}
+                  nameRef={nameRef}
+                  onSave={save}
+                  onCancel={closeForm}
+                />
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  disabled={anyBusy}
+                  className="justify-center border-dashed"
+                  onClick={openCreate}
+                >
+                  <Plus className="size-4" strokeWidth={2} />
+                  新建 Profile
+                </Button>
+              )}
+
+              {error && (
+                <p
+                  className={cn(
+                    "rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2",
+                    "text-xs leading-relaxed text-destructive",
+                  )}
+                >
+                  {error}
+                </p>
+              )}
+            </>
           )}
         </div>
-
-        <DialogFooter className="gap-2 border-t border-border/70 bg-muted/30 px-6 py-4">
-          <Button type="button" variant="ghost" size="lg" disabled={saving} onClick={onClose}>
-            取消
-          </Button>
-          <Button type="button" size="lg" disabled={!canSubmit} onClick={save}>
-            {saving ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                正在保存…
-              </>
-            ) : (
-              "保存"
-            )}
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function ProfileRow({
+  profile,
+  active,
+  busy,
+  onActivate,
+  onEdit,
+  onDelete,
+}: {
+  profile: LLMProfile;
+  active: boolean;
+  busy: string | null;
+  onActivate: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const activating = busy === `active:${profile.id}`;
+  const deleting = busy === `delete:${profile.id}`;
+  const anyBusy = busy !== null;
+
+  return (
+    <li
+      className={cn(
+        "group/row flex items-center gap-3 rounded-xl border px-3 py-2.5 transition-colors",
+        active
+          ? "border-foreground/15 bg-muted/50 ring-1 ring-foreground/[0.04]"
+          : "border-border/70 bg-background hover:bg-muted/40",
+      )}
+    >
+      {/* 活动选择器:整块可点的单选。活动态为实心标记,非活动为空心环。 */}
+      <button
+        type="button"
+        role="radio"
+        aria-checked={active}
+        disabled={anyBusy}
+        onClick={onActivate}
+        title={active ? "当前使用中" : "设为当前使用"}
+        className={cn(
+          "flex size-5 shrink-0 items-center justify-center rounded-full border outline-none transition-all",
+          "focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50",
+          active
+            ? "border-transparent bg-primary text-primary-foreground"
+            : "border-border bg-background hover:border-foreground/40",
+        )}
+      >
+        {activating ? (
+          <Loader2 className="size-3 animate-spin" />
+        ) : active ? (
+          <Check className="size-3" strokeWidth={3} />
+        ) : null}
+      </button>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium text-foreground">{profile.name}</span>
+          <span className="truncate font-mono text-xs text-muted-foreground">{profile.model}</span>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="truncate font-mono">{profile.base_url}</span>
+          <span aria-hidden className="text-border">·</span>
+          <span className={cn("shrink-0", profile.api_key_set ? "" : "text-muted-foreground/80")}>
+            {profile.api_key_set ? "已配置 key" : "无 key"}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-0.5 opacity-60 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          disabled={anyBusy}
+          title="编辑"
+          onClick={onEdit}
+        >
+          <Pencil className="size-3.5" />
+          <span className="sr-only">编辑 {profile.name}</span>
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          disabled={anyBusy}
+          title="删除"
+          className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+          onClick={onDelete}
+        >
+          {deleting ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+          <span className="sr-only">删除 {profile.name}</span>
+        </Button>
+      </div>
+    </li>
+  );
+}
+
+function ProfileForm({
+  editing,
+  form,
+  setForm,
+  keyAlreadySet,
+  saving,
+  canSubmit,
+  nameRef,
+  onSave,
+  onCancel,
+}: {
+  editing: boolean;
+  form: FormState;
+  setForm: React.Dispatch<React.SetStateAction<FormState>>;
+  keyAlreadySet: boolean;
+  saving: boolean;
+  canSubmit: boolean;
+  nameRef: React.RefObject<HTMLInputElement | null>;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const set = (k: keyof FormState) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setForm((f) => ({ ...f, [k]: e.target.value }));
+  const onEnter = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && canSubmit) onSave();
+  };
+
+  return (
+    <div className="flex flex-col gap-4 rounded-xl border border-border/70 bg-muted/30 p-4">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-foreground">
+          {editing ? "编辑 Profile" : "新建 Profile"}
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          disabled={saving}
+          onClick={onCancel}
+          title="取消"
+        >
+          <X className="size-4" />
+          <span className="sr-only">取消</span>
+        </Button>
+      </div>
+
+      <Field id="pf-name" label="名称">
+        <Input
+          id="pf-name"
+          ref={nameRef}
+          value={form.name}
+          disabled={saving}
+          placeholder="给这个端点起个名字"
+          onChange={set("name")}
+          onKeyDown={onEnter}
+        />
+      </Field>
+
+      <Field id="pf-base-url" label="Base URL">
+        <Input
+          id="pf-base-url"
+          value={form.base_url}
+          disabled={saving}
+          placeholder="https://…/v1"
+          className="font-mono text-xs"
+          onChange={set("base_url")}
+          onKeyDown={onEnter}
+        />
+      </Field>
+
+      <Field id="pf-api-key" label="API Key">
+        <Input
+          id="pf-api-key"
+          type="password"
+          value={form.api_key}
+          disabled={saving}
+          placeholder={editing && keyAlreadySet ? "已配置(留空则保留)" : "可留空(本地端点)"}
+          className="font-mono text-xs"
+          autoComplete="off"
+          onChange={set("api_key")}
+          onKeyDown={onEnter}
+        />
+        {editing && keyAlreadySet && !form.api_key && (
+          <p className="text-xs text-muted-foreground">
+            已保存过密钥。留空保存会保留它;如需更换,请填入新密钥。
+          </p>
+        )}
+      </Field>
+
+      <Field id="pf-model" label="模型">
+        <Input
+          id="pf-model"
+          value={form.model}
+          disabled={saving}
+          placeholder="如 deepseek-chat"
+          className="font-mono text-xs"
+          onChange={set("model")}
+          onKeyDown={onEnter}
+        />
+      </Field>
+
+      <div className="flex justify-end gap-2 pt-0.5">
+        <Button type="button" variant="ghost" size="sm" disabled={saving} onClick={onCancel}>
+          取消
+        </Button>
+        <Button type="button" size="sm" disabled={!canSubmit} onClick={onSave}>
+          {saving ? (
+            <>
+              <Loader2 className="size-3.5 animate-spin" />
+              正在保存…
+            </>
+          ) : editing ? (
+            "保存修改"
+          ) : (
+            "保存"
+          )}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function Field({
+  id,
+  label,
+  children,
+}: {
+  id: string;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-xs font-medium text-muted-foreground">
+        {label}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+function ProfileSkeleton() {
+  return (
+    <div className="flex flex-col gap-2" aria-hidden>
+      {[0, 1].map((i) => (
+        <div
+          key={i}
+          className="flex items-center gap-3 rounded-xl border border-border/70 px-3 py-2.5"
+        >
+          <span className="size-5 shrink-0 animate-pulse rounded-full bg-muted" />
+          <div className="flex flex-1 flex-col gap-1.5">
+            <span className="h-3.5 w-1/3 animate-pulse rounded bg-muted" />
+            <span className="h-3 w-2/3 animate-pulse rounded bg-muted" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }

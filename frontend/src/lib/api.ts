@@ -17,8 +17,15 @@ export interface ChatMessage {
   id: number; role: "user" | "assistant"; content: string; citations_json: string | null; created_at: string;
 }
 export interface SourceText { filename: string; path: string; text: string; }
-export interface ChatLLMSettings { base_url: string; model: string; api_key_set: boolean; }
-export interface Settings { configured: boolean; chat_llm: ChatLLMSettings; }
+/** 一个命名的 OpenAI-Compatible 端点。api_key 永不回传,仅 api_key_set 标记是否已配置。 */
+export interface LLMProfile {
+  id: string; name: string; base_url: string; model: string; api_key_set: boolean;
+}
+export interface Settings {
+  configured: boolean;
+  active_profile_id: string | null;
+  profiles: LLMProfile[];
+}
 
 /** sendMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
 export interface StreamHandlers {
@@ -72,11 +79,26 @@ export const api = {
   getSource: (recordId: number) =>
     fetch(`${BASE}/api/source/${recordId}`).then(j<SourceText>),
   getSettings: () => fetch(`${BASE}/api/settings`).then(j<Settings>),
-  // api_key 可选:留空(undefined)时不放进请求体,后端据此保留既有 key,避免「只改模型」误清密钥。
-  putSettings: (payload: { chat_llm: { base_url: string; api_key?: string; model: string } }) =>
-    fetch(`${BASE}/api/settings`, {
+  createProfile: (payload: { name: string; base_url: string; api_key: string; model: string }) =>
+    fetch(`${BASE}/api/settings/profiles`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(j<Settings>),
+  // api_key 留空(undefined/空串)时后端保留既有 key,避免「只改模型」误清密钥。
+  updateProfile: (
+    id: string,
+    payload: { name?: string; base_url?: string; api_key?: string; model?: string },
+  ) =>
+    fetch(`${BASE}/api/settings/profiles/${id}`, {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+    }).then(j<Settings>),
+  deleteProfile: (id: string) =>
+    fetch(`${BASE}/api/settings/profiles/${id}`, { method: "DELETE" }).then(j<Settings>),
+  setActiveProfile: (id: string) =>
+    fetch(`${BASE}/api/settings/active`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: id }),
     }).then(j<Settings>),
 
   /**
