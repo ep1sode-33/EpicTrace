@@ -1,0 +1,103 @@
+import { useState } from "react";
+import { ChevronDown, ChevronRight, FileText, FolderInput, Paperclip, X } from "lucide-react";
+
+import { type ConversationReference } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+
+const MODE_LABEL: Record<ConversationReference["mode"], string> = {
+  fulltext: "全文已载入",
+  focus: "已索引聚焦",
+  deferred: "待 Plan B(文件较大)",
+};
+
+/** 折叠式「本对话引用」面板:两栏(外部/内部),每条带模式标签 + 解挂。空则不渲染。 */
+export function ReferencePanel({
+  references,
+  onDetach,
+  onAddInternal,
+}: {
+  references: ConversationReference[];
+  onDetach: (rid: number) => void;
+  onAddInternal: () => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const external = references.filter((r) => r.kind === "external");
+  const internal = references.filter((r) => r.kind === "internal");
+  if (references.length === 0) return null;
+
+  return (
+    <div className="mx-auto w-full max-w-2xl px-6">
+      <div className="rounded-xl border border-border/70 bg-muted/30">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground outline-none hover:text-foreground"
+        >
+          {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+          <Paperclip className="size-3.5" />
+          本对话引用 ({references.length})
+        </button>
+        {open && (
+          <div className="flex flex-col gap-3 px-3 pb-3">
+            <Zone title="外部文件" icon={<Paperclip className="size-3" />}
+                  rows={external} onDetach={onDetach} />
+            <Zone title="内部文件" icon={<FileText className="size-3" />}
+                  rows={internal} onDetach={onDetach}
+                  action={
+                    <Button type="button" variant="ghost" size="xs" onClick={onAddInternal}>
+                      <FolderInput className="size-3" /> 从项目添加
+                    </Button>
+                  } />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Zone({
+  title, icon, rows, onDetach, action,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  rows: ConversationReference[];
+  onDetach: (rid: number) => void;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-1 text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground/80">
+          {icon} {title}
+        </span>
+        {action}
+      </div>
+      {rows.length === 0 ? (
+        <p className="px-1 text-xs text-muted-foreground/60">无</p>
+      ) : (
+        <ul className="flex flex-col gap-1">
+          {rows.map((r) => (
+            <li key={r.id}
+                className="flex items-center gap-2 rounded-lg border border-border/60 bg-background px-2.5 py-1.5">
+              <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate text-xs text-foreground" title={r.display_name}>
+                {r.display_name}
+              </span>
+              <span className={cn(
+                "shrink-0 rounded px-1.5 py-0.5 text-[0.65rem] font-medium",
+                r.mode === "deferred" ? "bg-amber-500/15 text-amber-700" : "bg-muted text-muted-foreground",
+              )}>
+                {MODE_LABEL[r.mode]}
+              </span>
+              <button type="button" onClick={() => onDetach(r.id)} aria-label="解挂"
+                      className="shrink-0 rounded p-0.5 text-muted-foreground outline-none hover:bg-muted hover:text-foreground">
+                <X className="size-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
