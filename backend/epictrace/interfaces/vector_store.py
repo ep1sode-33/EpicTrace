@@ -17,3 +17,6 @@ class VectorStore(ABC):
 
     @abstractmethod
     def delete_by_project(self, project_id: int) -> None: ...
+
+    @abstractmethod
+    def list_by_project(self, project_id: int) -> list[dict]: ...

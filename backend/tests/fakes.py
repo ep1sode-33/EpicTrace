@@ -24,6 +24,9 @@ class FakeVectorStore(VectorStore):
         self.deleted_projects.append(project_id)
         self.records = [r for r in self.records if r.get("project_id") != project_id]
 
+    def list_by_project(self, project_id: int) -> list[dict]:
+        return [r for r in self.records if r.get("project_id") == project_id]
+
 
 class FakeEmbedder(EmbeddingProvider):
     """确定性 1024 维向量,遵守 EmbeddingProvider 契约;不依赖 torch。"""

@@ -59,3 +59,11 @@ class MilvusLiteStore(VectorStore):
 
     def delete_by_project(self, project_id: int) -> None:
         self._client.delete(_COLLECTION, filter=f"project_id == {project_id}")
+
+    def list_by_project(self, project_id: int) -> list[dict]:
+        return self._client.query(
+            _COLLECTION,
+            filter=f"project_id == {project_id}",
+            output_fields=list(_SCALARS.keys()),
+            limit=16384,
+        )
