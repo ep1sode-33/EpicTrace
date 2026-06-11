@@ -29,7 +29,7 @@ def delete_client(tmp_path):
     db.create_all()
     store = FakeVectorStore()
     app = create_app(db=db, vector_store=store)
-    return TestClient(app), store
+    return TestClient(app), store, db
 
 
 def _make_project_with_record(client: TestClient, folder: Path) -> int:
@@ -42,10 +42,22 @@ def _make_project_with_record(client: TestClient, folder: Path) -> int:
 
 
 def test_delete_project_removes_from_list_and_records(delete_client, tmp_path):
-    client, store = delete_client
+    from sqlalchemy import select
+
+    from epictrace.models import IngestRecord
+
+    client, store, db = delete_client
     folder = tmp_path / "proj"
     pid = _make_project_with_record(client, folder)
     assert len(client.get(f"/api/files?project_id={pid}").json()) == 1
+    # 标记该记录已索引,使删除时确有向量需要清理(否则按设计跳过 Milvus)。
+    with db.session() as s:
+        rec = (
+            s.execute(select(IngestRecord).where(IngestRecord.project_id == pid))
+            .scalars()
+            .first()
+        )
+        rec.indexed = True
 
     resp = client.request("DELETE", f"/api/projects/{pid}")
     assert resp.status_code in (200, 204)
@@ -59,7 +71,7 @@ def test_delete_project_removes_from_list_and_records(delete_client, tmp_path):
 
 
 def test_delete_project_keeps_folder_by_default(delete_client, tmp_path):
-    client, _ = delete_client
+    client, _, _ = delete_client
     folder = tmp_path / "proj"
     pid = _make_project_with_record(client, folder)
 
@@ -70,7 +82,7 @@ def test_delete_project_keeps_folder_by_default(delete_client, tmp_path):
 
 
 def test_delete_project_with_delete_folder_removes_folder(delete_client, tmp_path):
-    client, _ = delete_client
+    client, _, _ = delete_client
     folder = tmp_path / "proj"
     pid = _make_project_with_record(client, folder)
 
@@ -79,7 +91,7 @@ def test_delete_project_with_delete_folder_removes_folder(delete_client, tmp_pat
 
 
 def test_delete_unknown_project_404(delete_client):
-    client, _ = delete_client
+    client, _, _ = delete_client
     assert client.request("DELETE", "/api/projects/99999").status_code == 404
 
 

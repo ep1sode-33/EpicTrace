@@ -50,3 +50,34 @@ def test_index_real_flow_app_order_no_segfault(tmp_path):
     # 向量确实进了库(就地构造的 store)
     hits = get_store().query(BgeM3Embedder().embed(["页表"])[0], filter={"project_id": proj.id}, k=1)
     assert len(hits) >= 1
+
+
+def test_get_vector_store_warms_model_before_milvus(tmp_path, monkeypatch):
+    """回归(段错误复发):任何路径(删除/索引/RAG)首次构造 Milvus 时,
+    get_vector_store 必须先 warmup 模型、再起 gRPC。否则"gRPC 先起、再 fork 加载模型"段错误。"""
+    from types import SimpleNamespace
+
+    import epictrace.api.deps as deps
+    from epictrace.config import AppConfig
+
+    monkeypatch.setattr(
+        AppConfig, "milvus_path", property(lambda self: str(tmp_path / "v.db"))
+    )
+    req = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(embedder=None, vector_store=None))
+    )
+
+    store = deps.get_vector_store(req)  # 危险顺序:首次就构造 Milvus;fix 应先暖模型
+    assert req.app.state.embedder is not None  # 模型必须已在构造 Milvus 之前加载好
+
+    emb = deps.get_embedder(req)
+    v = emb.embed(["页表"])
+    store.upsert(
+        [
+            {
+                "vector": v[0], "text": "x", "ingest_record_id": 1, "project_id": 1,
+                "char_start": 0, "char_end": 1, "source_type": "folder_scan",
+                "embed_model_id": emb.model_id,
+            }
+        ]
+    )  # 跑到这里进程没崩 = 顺序正确

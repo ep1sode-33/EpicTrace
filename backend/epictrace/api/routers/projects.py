@@ -52,17 +52,33 @@ def delete_project(
 ) -> dict:
     _ensure_project(db, project_id)
 
-    # 先尽力清理向量库:store 可能从未构造(未索引过)。构造 Milvus 不加载模型,安全。
-    # 任一步失败都不应阻断 DB 行的删除——尽力而为。
-    try:
-        store = get_vector_store(request)
-        store.delete_by_project(project_id)
-    except Exception as exc:  # noqa: BLE001 — 向量清理失败不阻断项目删除,但要记日志
-        import logging
+    # 仅当项目确有"已索引"记录(= 向量库里真有它的向量)时才碰 Milvus。否则没必要构造
+    # Milvus —— 那会顺带 warmup 模型(见 deps.get_vector_store),让"删一个没索引过的项目"
+    # 白白加载几 GB 模型。无已索引内容时直接跳过,保持删除瞬时。
+    from sqlalchemy import func, select
 
-        logging.getLogger("epictrace").warning(
-            "删除项目 %s 的向量失败(不阻断删除): %s", project_id, exc
-        )
+    from epictrace.models import IngestRecord
+
+    with db.session() as s:
+        indexed_count = s.execute(
+            select(func.count())
+            .select_from(IngestRecord)
+            .where(
+                IngestRecord.project_id == project_id,
+                IngestRecord.indexed.is_(True),
+            )
+        ).scalar_one()
+    if indexed_count > 0:
+        # 清理向量库(get_vector_store 会先 warmup 模型再起 Milvus,保证顺序安全)。
+        # 失败不阻断 DB 删除,但记日志。
+        try:
+            get_vector_store(request).delete_by_project(project_id)
+        except Exception as exc:  # noqa: BLE001
+            import logging
+
+            logging.getLogger("epictrace").warning(
+                "删除项目 %s 的向量失败(不阻断删除): %s", project_id, exc
+            )
 
     # 删 DB 行(ingest_records 经 cascade 一并删除),可选删盘上文件夹。
     folder_path = ProjectService(db).delete(project_id, delete_folder=delete_folder)
