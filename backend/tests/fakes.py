@@ -14,7 +14,10 @@ class FakeVectorStore(VectorStore):
         self.records.extend(records)
 
     def query(self, vector: list[float], filter: dict | None, k: int) -> list[dict]:
-        return []
+        rows = self.records
+        if filter:
+            rows = [r for r in rows if all(r.get(key) == val for key, val in filter.items())]
+        return rows[:k]
 
     def delete_by_record(self, ingest_record_id: int) -> None:
         self.deleted_records.append(ingest_record_id)
