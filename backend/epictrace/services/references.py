@@ -6,8 +6,8 @@ from sqlalchemy import select
 
 from epictrace.db import Database
 from epictrace.media import get_processor
-from epictrace.models import ConversationReference, IngestRecord
-from epictrace.services.budget import fits_fulltext
+from epictrace.models import Conversation, ConversationReference, IngestRecord
+from epictrace.services.budget import estimate_tokens, fits_fulltext
 
 
 def _to_dict(r: ConversationReference) -> dict:
@@ -27,15 +27,25 @@ class ReferenceService:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    def _used_fulltext_tokens(self, conversation_id: int) -> int:
+        return sum(estimate_tokens(r.get("extracted_text") or "")
+                   for r in self.list_active(conversation_id) if r["mode"] == "fulltext")
+
     def add_external(self, conversation_id: int, path: str, context_window: int) -> dict:
         p = Path(path)
+        if not p.exists() or not p.is_file():
+            raise ValueError("file not found")
         proc = get_processor(p)
         if proc is None:
             raise ValueError("unsupported file type")
-        text = proc.process(p).text
+        try:
+            text = proc.process(p).text
+        except Exception as e:  # noqa: BLE001 — 提取失败转成可读的 400(由路由映射)
+            raise ValueError(f"extract failed: {e}")
         if not text.strip():
             raise ValueError("empty file")
-        mode = "fulltext" if fits_fulltext(text, context_window) else "deferred"
+        used = self._used_fulltext_tokens(conversation_id)
+        mode = "fulltext" if fits_fulltext(text, context_window, used) else "deferred"
         with self._db.session() as s:
             ref = ConversationReference(
                 conversation_id=conversation_id, kind="external", display_name=p.name,
@@ -46,14 +56,25 @@ class ReferenceService:
 
     def add_internal(self, conversation_id: int, ingest_record_id: int, context_window: int) -> dict:
         with self._db.session() as s:
+            conv = s.get(Conversation, conversation_id)
+            if conv is None:
+                raise ValueError("conversation not found")
             rec = s.get(IngestRecord, ingest_record_id)
             if rec is None:
                 raise ValueError("ingest record not found")
+            if rec.project_id != conv.project_id:
+                raise ValueError("ingest record belongs to a different project")
             path = Path(rec.stored_path); name = rec.original_filename
         proc = get_processor(path)
-        text = proc.process(path).text if proc is not None else ""
+        text = ""
+        if proc is not None:
+            try:
+                text = proc.process(path).text
+            except Exception:  # noqa: BLE001 — 提取失败 → 退化为 focus(复用现成向量)
+                text = ""
         # 内部:小→fulltext(缓存整段);大或无法提取→focus(只记 ingest_record_id,复用现成向量)
-        fulltext = bool(text.strip()) and fits_fulltext(text, context_window)
+        used = self._used_fulltext_tokens(conversation_id)
+        fulltext = bool(text.strip()) and fits_fulltext(text, context_window, used)
         mode = "fulltext" if fulltext else "focus"
         with self._db.session() as s:
             ref = ConversationReference(
@@ -65,10 +86,10 @@ class ReferenceService:
             s.add(ref); s.flush(); s.refresh(ref)
             return _to_dict(ref)
 
-    def detach(self, reference_id: int) -> None:
+    def detach(self, conversation_id: int, reference_id: int) -> None:
         with self._db.session() as s:
             ref = s.get(ConversationReference, reference_id)
-            if ref is not None:
+            if ref is not None and ref.conversation_id == conversation_id:
                 ref.detached = True
 
     def list_active(self, conversation_id: int) -> list[dict]:

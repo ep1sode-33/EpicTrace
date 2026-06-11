@@ -51,4 +51,4 @@ def add_reference(cid: int, payload: ReferenceCreate, request: Request,
 @router.delete("/conversations/{cid}/references/{rid}", status_code=status.HTTP_204_NO_CONTENT)
 def detach_reference(cid: int, rid: int, db: Database = Depends(get_db)):
     _require_conv(db, cid)
-    ReferenceService(db).detach(rid)
+    ReferenceService(db).detach(cid, rid)
