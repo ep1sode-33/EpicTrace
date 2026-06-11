@@ -860,6 +860,36 @@ function Conversation({
     runStream(targetId, (h) => api.regenerate(conversationId, h));
   }, [streaming, conversationId, runStream]);
 
+  // 编辑某条 user 消息并就地重生成:把该消息内容改为 content、删它之后的全部消息(本地截断)、
+  // 追加一条空的流式 assistant 消息,token 流进去。后端做同样的事(改内容、删其后、重跑)。
+  // 仅对已落库(数字 mid)的 user 消息可用;复用与发送/重生成相同的流式/abort 机制。
+  const editMessage = useCallback(
+    (messageId: number | string, content: string) => {
+      if (streaming || conversationId == null || typeof messageId !== "number") return;
+      const text = content.trim();
+      if (!text) return;
+
+      const assistantId = `assistant-${Date.now()}`;
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === messageId);
+        if (idx < 0) return prev; // 该消息已不在(竞态):放弃。
+        // 保留到被编辑消息(含),改其内容,删其后的全部,追加新的流式 assistant。
+        const kept = prev.slice(0, idx + 1).map((m) =>
+          m.id === messageId ? { ...m, content: text } : m,
+        );
+        return [
+          ...kept,
+          { id: assistantId, role: "assistant", content: "", citations: [], streaming: true },
+        ];
+      });
+
+      setStreaming(true);
+      setStatus("检索中");
+      runStream(assistantId, (h) => api.editMessage(conversationId, messageId, text, h));
+    },
+    [streaming, conversationId, runStream],
+  );
+
   const hasMessages = messages.length > 0;
   // 主区有「正在对话」上下文:已有选中会话,或正在撰写一段草稿。
   // 二者皆无时只展示项目空态与「新建对话」CTA,不挂输入框(发送无处可去)。
@@ -884,8 +914,10 @@ function Conversation({
           <MessageList
             messages={messages}
             status={status}
+            busy={streaming}
             onCitation={setViewing}
             onRegenerate={regenerate}
+            onEdit={editMessage}
           />
         ) : (
           <CenteredEmpty

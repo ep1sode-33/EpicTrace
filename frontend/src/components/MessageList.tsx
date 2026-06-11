@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useRef, useState } from "react";
-import { AlertCircle, Check, Copy, Loader2, RotateCcw } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { AlertCircle, Check, Copy, Loader2, Pencil, RotateCcw, X } from "lucide-react";
 
 import { type Citation } from "@/lib/api";
+import { AssistantMarkdown } from "@/components/AssistantMarkdown";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -20,16 +21,22 @@ export interface ViewMessage {
 export function MessageList({
   messages,
   status,
+  busy,
   onCitation,
   onRegenerate,
+  onEdit,
 }: {
   messages: ViewMessage[];
   /** 流式状态文案(如「检索中」「生成中」);为空表示无进行中的检索/生成。 */
   status: string | null;
+  /** 当前是否有进行中的流(发送/重生成/编辑);为 true 时隐藏编辑等会打断流的入口。 */
+  busy?: boolean;
   /** 点击某条引用 chip 时回调,打开来源查看器。 */
   onCitation: (citation: Citation) => void;
   /** 重新生成最后一轮回答;未提供时不显示重试入口。 */
   onRegenerate?: () => void;
+  /** 编辑某条 user 消息并就地重生成(传入消息 id + 新内容);未提供时不显示编辑入口。 */
+  onEdit?: (messageId: number | string, content: string) => void;
 }) {
   const endRef = useRef<HTMLDivElement | null>(null);
   // 最后一条助手消息的下标——只有它(以及出错轮次)可重试,旧轮次不显示重试。
@@ -57,6 +64,14 @@ export function MessageList({
               ? onRegenerate
               : undefined
           }
+          // 编辑只挂在已落库(数字 id)的 user 消息上;且需有回调、当前无进行中的流
+          // (否则打断在途生成)。乐观插入但尚未落库(字符串 id)的 user 消息暂不可编辑——
+          // 后端 edit 需要真实消息 id。
+          onEdit={
+            onEdit && m.role === "user" && typeof m.id === "number" && !busy
+              ? onEdit
+              : undefined
+          }
         />
       ))}
       <div ref={endRef} />
@@ -69,23 +84,43 @@ function MessageRow({
   status,
   onCitation,
   onRegenerate,
+  onEdit,
 }: {
   message: ViewMessage;
   status: string | null;
   onCitation: (citation: Citation) => void;
   /** 若可重试(最后一条助手消息),传入重新生成回调。 */
   onRegenerate?: () => void;
+  /** 若可编辑(user 消息且无在途流),传入编辑回调(消息 id + 新内容)。 */
+  onEdit?: (messageId: number | string, content: string) => void;
 }) {
   const isUser = message.role === "user";
+  const [editing, setEditing] = useState(false);
 
   if (isUser) {
+    if (editing && onEdit) {
+      return (
+        <UserMessageEditor
+          initial={message.content}
+          onCancel={() => setEditing(false)}
+          onSave={(next) => {
+            setEditing(false);
+            onEdit(message.id, next);
+          }}
+        />
+      );
+    }
     return (
-      // group/msg + focus-within:悬停或聚焦时显露消息工具条(复制)。
+      // group/msg + focus-within:悬停或聚焦时显露消息工具条(复制 / 编辑)。
       <div className="group/msg flex flex-col items-end gap-1">
         <div className="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words text-primary-foreground">
           {message.content}
         </div>
-        <MessageToolbar content={message.content} align="end" />
+        <MessageToolbar
+          content={message.content}
+          onEdit={onEdit ? () => setEditing(true) : undefined}
+          align="end"
+        />
       </div>
     );
   }
@@ -110,8 +145,8 @@ function MessageRow({
         </div>
       )}
       {hasContent && (
-        <div className="text-sm leading-relaxed whitespace-pre-wrap break-words text-foreground">
-          <AssistantContent
+        <div className="text-sm leading-relaxed break-words text-foreground">
+          <AssistantMarkdown
             content={message.content}
             citations={message.citations}
             onCitation={onCitation}
@@ -145,16 +180,19 @@ function MessageRow({
 function MessageToolbar({
   content,
   onRegenerate,
+  onEdit,
   align,
 }: {
   /** 可复制的文本;为空(出错无正文)时不渲染复制按钮。 */
   content?: string;
   /** 可重试时的重新生成回调。 */
   onRegenerate?: () => void;
+  /** 可编辑时的进入编辑回调(仅 user 消息)。 */
+  onEdit?: () => void;
   /** 工具条对齐:user 一侧靠右,assistant 一侧靠左。 */
   align: "start" | "end";
 }) {
-  if (!content && !onRegenerate) return null;
+  if (!content && !onRegenerate && !onEdit) return null;
   return (
     <div
       className={cn(
@@ -168,6 +206,18 @@ function MessageToolbar({
       )}
     >
       {content !== undefined && <CopyButton content={content} />}
+      {onEdit && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          onClick={onEdit}
+          aria-label="编辑"
+          title="编辑"
+        >
+          <Pencil aria-hidden />
+        </Button>
+      )}
       {onRegenerate && (
         <Button
           type="button"
@@ -180,6 +230,81 @@ function MessageToolbar({
           <RotateCcw aria-hidden />
         </Button>
       )}
+    </div>
+  );
+}
+
+/**
+ * user 消息的就地编辑器:预填原内容的多行输入,保存/取消两个动作。
+ * Enter 保存(空内容禁止)、Shift+Enter 换行、Esc 取消;沿用 Composer 同款的输入框语汇,
+ * 靠右对齐贴合 user 一侧。挂载即自动聚焦并把光标移到末尾、按内容撑高。
+ */
+function UserMessageEditor({
+  initial,
+  onSave,
+  onCancel,
+}: {
+  initial: string;
+  onSave: (content: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const grow = (el: HTMLTextAreaElement) => {
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
+  };
+
+  // 挂载即聚焦、光标置末尾、按内容撑高。
+  useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+    grow(el);
+  }, []);
+
+  const save = () => {
+    const text = value.trim();
+    if (!text) return; // 空内容无意义:不保存(也不退出,留用户继续编辑或取消)。
+    onSave(text);
+  };
+
+  return (
+    <div className="flex flex-col items-end gap-2">
+      <div className="w-[85%] rounded-2xl border border-ring bg-background p-2 shadow-sm ring-3 ring-ring/40">
+        <textarea
+          ref={taRef}
+          rows={1}
+          value={value}
+          aria-label="编辑消息"
+          className="max-h-60 min-h-9 w-full resize-none bg-transparent px-1.5 py-1 text-sm leading-relaxed text-foreground outline-none"
+          onChange={(e) => {
+            setValue(e.target.value);
+            grow(e.target);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              save();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              onCancel();
+            }
+          }}
+        />
+      </div>
+      <div className="flex items-center gap-1.5">
+        <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+          <X aria-hidden />
+          取消
+        </Button>
+        <Button type="button" size="sm" disabled={!value.trim()} onClick={save}>
+          <Check aria-hidden />
+          保存
+        </Button>
+      </div>
     </div>
   );
 }
@@ -251,72 +376,3 @@ function ErrorNotice({ message, onRetry }: { message: string; onRetry?: () => vo
   );
 }
 
-// 匹配答案中的引用标记 [n](1+ 位数字)。
-const CITE_RE = /\[(\d+)\]/g;
-
-/**
- * 把助手文本里的 `[n]` 替换为可点的引用 chip;其余按纯文本渲染。
- * citations 为按 n 索引的查找表;流式途中可能还没有 citations,此时 `[n]` 退化为普通文本 chip(禁用)。
- */
-function AssistantContent({
-  content,
-  citations,
-  onCitation,
-}: {
-  content: string;
-  citations: Citation[];
-  onCitation: (citation: Citation) => void;
-}) {
-  const byN = new Map(citations.map((c) => [c.n, c]));
-  const parts: React.ReactNode[] = [];
-  let last = 0;
-  let key = 0;
-
-  for (const match of content.matchAll(CITE_RE)) {
-    const idx = match.index ?? 0;
-    if (idx > last) parts.push(<Fragment key={key++}>{content.slice(last, idx)}</Fragment>);
-    const n = Number(match[1]);
-    const cite = byN.get(n);
-    parts.push(
-      <CitationChip key={key++} n={n} citation={cite} onCitation={onCitation} />,
-    );
-    last = idx + match[0].length;
-  }
-  if (last < content.length) parts.push(<Fragment key={key++}>{content.slice(last)}</Fragment>);
-
-  return <>{parts}</>;
-}
-
-function CitationChip({
-  n,
-  citation,
-  onCitation,
-}: {
-  n: number;
-  citation: Citation | undefined;
-  onCitation: (citation: Citation) => void;
-}) {
-  // 未拿到对应引用元数据(尚在流式)时,渲染为不可点的占位标记。
-  if (!citation) {
-    return (
-      <sup className="mx-0.5 rounded bg-muted px-1 text-[0.7em] font-medium text-muted-foreground tabular-nums">
-        {n}
-      </sup>
-    );
-  }
-  return (
-    <button
-      type="button"
-      onClick={() => onCitation(citation)}
-      title={citation.snippet}
-      className={cn(
-        "mx-0.5 inline-flex translate-y-[-1px] items-center rounded bg-primary/10 px-1 align-baseline",
-        "text-[0.7em] font-semibold text-primary tabular-nums leading-none",
-        "outline-none transition-colors hover:bg-primary/20 focus-visible:ring-2 focus-visible:ring-ring/50",
-      )}
-      aria-label={`查看来源 ${n}`}
-    >
-      {n}
-    </button>
-  );
-}

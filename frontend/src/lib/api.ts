@@ -136,6 +136,19 @@ export const api = {
       headers: { Accept: "text/event-stream" },
     });
   },
+
+  /**
+   * 编辑某条 user 消息并就地重生成。后端把该消息内容改为 content、删它之后的全部消息、
+   * 以它之前的消息作历史对新内容重跑流水线;事件流与 sendMessage 一致
+   * (status/token/citations/done,失败发 error)。返回一个 abort 函数。
+   */
+  editMessage(cid: number, mid: number, content: string, h: StreamHandlers): () => void {
+    return streamSSE(`${BASE}/api/conversations/${cid}/messages/${mid}/edit`, h, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ content }),
+    });
+  },
 };
 
 /**
