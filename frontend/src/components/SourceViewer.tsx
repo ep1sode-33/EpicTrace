@@ -36,8 +36,11 @@ export function SourceViewer({
     setError(null);
     setLoading(true);
     let cancelled = false;
-    api
-      .getSource(citation.ingest_record_id)
+    const fetcher =
+      citation.source_kind === "attachment" && citation.reference_id != null
+        ? api.getAttachmentSource(citation.reference_id)
+        : api.getSource(citation.ingest_record_id);
+    fetcher
       .then((s) => {
         if (!cancelled) setSource(s);
       })

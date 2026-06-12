@@ -14,3 +14,4 @@ class AgentState(TypedDict, total=False):
     chunks: list[RetrievedChunk]
     iterations: int
     _grade: str          # grade 节点写、decide 读;不生成答案(交给 ChatService 流式)
+    focus_ids: list[int]   # ChatService 写:pin 的内部文件(聚焦检索);空/缺省=全项目

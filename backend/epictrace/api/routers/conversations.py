@@ -9,6 +9,7 @@ from epictrace.db import Database
 from epictrace.models import Conversation, Message, Project
 from epictrace.schemas import ConversationCreate, ConversationOut, MessageCreate, MessageOut
 from epictrace.services.chat import ChatService
+from epictrace.services.references import ReferenceService
 
 router = APIRouter(tags=["conversations"])  # /api 由 app 工厂统一挂载
 
@@ -65,7 +66,7 @@ def send_message(cid: int, payload: MessageCreate, request: Request, db: Databas
             status.HTTP_409_CONFLICT,
             "对话模型未配置:请在设置里填写 OpenAI-Compatible 端点",
         )
-    svc = ChatService(db, llm, get_retriever(request))
+    svc = ChatService(db, llm, get_retriever(request), references=ReferenceService(db))
 
     def gen():
         for e in svc.stream_answer(cid, payload.content):
@@ -92,7 +93,7 @@ def edit_message(cid: int, mid: int, payload: MessageCreate, request: Request,
         m = s.get(Message, mid)
         if m is None or m.conversation_id != cid or m.role != "user":
             raise HTTPException(status.HTTP_404_NOT_FOUND, "editable user message not found")
-    svc = ChatService(db, llm, get_retriever(request))
+    svc = ChatService(db, llm, get_retriever(request), references=ReferenceService(db))
 
     def gen():
         for e in svc.stream_edit(cid, mid, payload.content):
@@ -113,7 +114,7 @@ def regenerate_message(cid: int, request: Request, db: Database = Depends(get_db
             status.HTTP_409_CONFLICT,
             "对话模型未配置:请在设置里填写 OpenAI-Compatible 端点",
         )
-    svc = ChatService(db, llm, get_retriever(request))
+    svc = ChatService(db, llm, get_retriever(request), references=ReferenceService(db))
 
     def gen():
         for e in svc.stream_regenerate(cid):

@@ -10,6 +10,7 @@ from epictrace.agent.graph import build_rag_graph
 from epictrace.agent.prompts import GENERATE_SYS, format_chunks
 from epictrace.db import Database
 from epictrace.models import Conversation, Message, _utcnow
+from epictrace.retrieval.types import RetrievedChunk
 
 _DEFAULT_TITLE = "新对话"
 _TITLE_MAX = 30
@@ -18,11 +19,26 @@ CHAT_SYS = "你是有帮助的助手,用中文简洁作答。"
 TITLE_SYS = "给这段对话起一个不超过 12 字的简短中文标题,只回标题本身。"
 
 
+def _ref_chunk(r: dict) -> RetrievedChunk:
+    """把"全文引用"包成单个 chunk 注入【资料】。外部→attachment(跳回外部文件),
+    内部→project(跳回项目文件,带 ingest_record_id);char 区间覆盖整段(文件级引用)。"""
+    text = r.get("extracted_text") or ""
+    is_ext = r["kind"] == "external"
+    return RetrievedChunk(
+        text=text, ingest_record_id=r.get("ingest_record_id") or 0, project_id=0,
+        char_start=0, char_end=len(text),
+        source_type="attachment" if is_ext else "folder_scan",
+        source_kind="attachment" if is_ext else "project",
+        reference_id=r["id"],
+    )
+
+
 class ChatService:
-    def __init__(self, db: Database, llm, retriever) -> None:
+    def __init__(self, db: Database, llm, retriever, references=None) -> None:
         self._db = db
         self._llm = llm
         self._retriever = retriever
+        self._references = references
 
     def stream_answer(self, conversation_id: int, question: str) -> Iterator[dict]:
         # 先读历史(本轮 user message 尚未落库,故不会把它算进历史),再落 user message。
@@ -71,14 +87,21 @@ class ChatService:
         路由→(可选)检索→流式→引用→落 assistant 消息 + 首轮自动命名。
         前置条件:本轮 user 消息状态已就绪(stream_answer 先落库;regenerate 复用已存在的)。"""
         is_first_user_turn = not any(m["role"] == "user" for m in history)
-        yield {"event": "status", "data": "检索中"}
+        # 首发用中性「思考中」:此刻还没判 route,direct 直答并不真检索,「检索中」会误导。
+        yield {"event": "status", "data": "思考中"}
         # 检索 + 生成全程兜异常:任一步抛错 → 发 error 事件并中止(不落半截 assistant 消息)。
         try:
             # 跑图到拿到最终 chunks(grade/rewrite 在图里),但生成改为这里流式。
+            refs = self._references.list_active(conversation_id) if self._references else []
+            fulltext_refs = [r for r in refs if r["mode"] == "fulltext"]
+            focus_ids = [r["ingest_record_id"] for r in refs
+                         if r["mode"] == "focus" and r.get("ingest_record_id")]
             graph = build_rag_graph(self._llm, self._retriever)
-            state = graph.invoke({"project_id": self._project_id(conversation_id), "question": question,
-                                  "query": question, "history": history, "iterations": 0})
-            chunks = state.get("chunks", [])
+            state = graph.invoke({"project_id": self._project_id(conversation_id),
+                                  "question": question, "query": question, "history": history,
+                                  "iterations": 0, "focus_ids": focus_ids})
+            # 全文引用恒在最前(无论 route);其后接项目/聚焦检索结果。
+            chunks = [_ref_chunk(r) for r in fulltext_refs] + state.get("chunks", [])
 
             yield {"event": "status", "data": "生成中"}
             # 有资料 → 带引用作答(GENERATE_SYS + 【资料】);无资料(direct 路由)→ 普通聊天作答。

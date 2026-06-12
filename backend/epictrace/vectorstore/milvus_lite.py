@@ -58,15 +58,26 @@ class MilvusLiteStore(VectorStore):
         self._client.insert(_COLLECTION, records)
 
     def query(self, vector: list[float], filter: dict | None, k: int) -> list[dict]:
-        expr = None
-        if filter:
-            expr = " and ".join(f"{key} == {val!r}" if isinstance(val, str)
-                                else f"{key} == {val}" for key, val in filter.items())
+        expr = self._build_expr(filter)
         res = self._client.search(
             _COLLECTION, data=[vector], limit=k, filter=expr or "",
             output_fields=list(_SCALARS.keys()),
         )
         return [hit["entity"] for hit in res[0]]
+
+    @staticmethod
+    def _build_expr(filter: dict | None) -> str | None:
+        if not filter:
+            return None
+        parts = []
+        for key, val in filter.items():
+            if isinstance(val, (list, tuple)):
+                parts.append(f"{key} in {list(val)}")
+            elif isinstance(val, str):
+                parts.append(f"{key} == {val!r}")
+            else:
+                parts.append(f"{key} == {val}")
+        return " and ".join(parts)
 
     def delete_by_record(self, ingest_record_id: int) -> None:
         self._client.delete(_COLLECTION, filter=f"ingest_record_id == {ingest_record_id}")

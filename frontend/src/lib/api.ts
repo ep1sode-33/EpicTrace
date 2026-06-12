@@ -12,6 +12,8 @@ export interface IndexStatus {
 export interface Conversation { id: number; project_id: number; title: string; created_at: string; }
 export interface Citation {
   n: number; ingest_record_id: number; char_start: number; char_end: number; snippet: string; source_type: string;
+  source_kind?: "project" | "attachment";
+  reference_id?: number | null;
 }
 export interface ChatMessage {
   id: number; role: "user" | "assistant"; content: string; citations_json: string | null; created_at: string;
@@ -20,6 +22,12 @@ export interface SourceText { filename: string; path: string; text: string; }
 /** 一个命名的 OpenAI-Compatible 端点。本地单机:api_key 明文回传,允许查看/编辑/复制。 */
 export interface LLMProfile {
   id: string; name: string; base_url: string; model: string; api_key: string; api_key_set: boolean;
+  context_window: number;
+}
+export interface ConversationReference {
+  id: number; conversation_id: number; kind: "external" | "internal";
+  display_name: string; source_path: string | null; ingest_record_id: number | null;
+  mode: "fulltext" | "focus" | "deferred"; text_chars: number; detached: boolean; created_at: string;
 }
 export interface Settings {
   configured: boolean;
@@ -83,8 +91,26 @@ export const api = {
     fetch(`${BASE}/api/conversations/${cid}/messages`).then(j<ChatMessage[]>),
   getSource: (recordId: number) =>
     fetch(`${BASE}/api/source/${recordId}`).then(j<SourceText>),
+  getAttachmentSource: (referenceId: number) =>
+    fetch(`${BASE}/api/attachment-source/${referenceId}`).then(j<SourceText>),
+  listReferences: (cid: number) =>
+    fetch(`${BASE}/api/conversations/${cid}/references`).then(j<ConversationReference[]>),
+  addExternalReference: (cid: number, source_path: string) =>
+    fetch(`${BASE}/api/conversations/${cid}/references`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "external", source_path }),
+    }).then(j<ConversationReference>),
+  addInternalReference: (cid: number, ingest_record_id: number) =>
+    fetch(`${BASE}/api/conversations/${cid}/references`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "internal", ingest_record_id }),
+    }).then(j<ConversationReference>),
+  detachReference: (cid: number, rid: number) =>
+    fetch(`${BASE}/api/conversations/${cid}/references/${rid}`, { method: "DELETE" }).then((r) => {
+      if (!r.ok && r.status !== 404) throw new Error(`${r.status}: ${r.statusText}`);
+    }),
   getSettings: () => fetch(`${BASE}/api/settings`).then(j<Settings>),
-  createProfile: (payload: { name: string; base_url: string; api_key: string; model: string }) =>
+  createProfile: (payload: { name: string; base_url: string; api_key: string; model: string; context_window?: number }) =>
     fetch(`${BASE}/api/settings/profiles`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -92,7 +118,7 @@ export const api = {
   // api_key 留空(undefined/空串)时后端保留既有 key,避免「只改模型」误清密钥。
   updateProfile: (
     id: string,
-    payload: { name?: string; base_url?: string; api_key?: string; model?: string },
+    payload: { name?: string; base_url?: string; api_key?: string; model?: string; context_window?: number },
   ) =>
     fetch(`${BASE}/api/settings/profiles/${id}`, {
       method: "PUT", headers: { "Content-Type": "application/json" },

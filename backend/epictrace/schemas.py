@@ -90,6 +90,7 @@ class ProfileCreate(BaseModel):
     base_url: str = Field(min_length=1)
     api_key: str = ""
     model: str = Field(min_length=1)
+    context_window: int = 32768
 
 
 class ProfileUpdate(BaseModel):
@@ -98,6 +99,7 @@ class ProfileUpdate(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     model: str | None = None
+    context_window: int | None = None
 
 
 class SetActiveIn(BaseModel):
@@ -123,6 +125,7 @@ class ProfileView(BaseModel):
     name: str
     base_url: str
     model: str
+    context_window: int
     api_key_set: bool
 
 
@@ -130,3 +133,23 @@ class SettingsOut(BaseModel):
     configured: bool
     active_profile_id: str | None
     profiles: list[ProfileView]
+
+
+class ReferenceCreate(BaseModel):
+    kind: Literal["external", "internal"]
+    source_path: str | None = None       # external 必填
+    ingest_record_id: int | None = None  # internal 必填
+
+
+class ReferenceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    conversation_id: int
+    kind: str
+    display_name: str
+    source_path: str | None = None
+    ingest_record_id: int | None = None
+    mode: str
+    text_chars: int
+    detached: bool
+    created_at: datetime

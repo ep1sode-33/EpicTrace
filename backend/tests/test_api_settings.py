@@ -140,3 +140,13 @@ def test_chat_409_when_no_profile(app_client):
         "POST", f"/api/conversations/{cid}/messages", json={"content": "x"}
     )
     assert r.status_code == 409
+
+
+def test_profile_context_window_via_api(client):
+    client.post("/api/settings/profiles",
+                json={"name": "A", "base_url": "http://x", "api_key": "k",
+                      "model": "m", "context_window": 8192})
+    prof = client.get("/api/settings").json()["profiles"][0]
+    assert prof["context_window"] == 8192
+    client.put(f"/api/settings/profiles/{prof['id']}", json={"context_window": 128000})
+    assert client.get("/api/settings").json()["profiles"][0]["context_window"] == 128000

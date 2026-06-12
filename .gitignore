@@ -1,6 +1,9 @@
 # Brainstorm / superpowers 工作文件(含临时 HTML,不进 git)
 .superpowers/
 
+# 决策记录(本地个人笔记:技术选型/架构取舍的原因与备选,不进 git)
+docs/decisions/
+
 # Python
 __pycache__/
 *.py[cod]

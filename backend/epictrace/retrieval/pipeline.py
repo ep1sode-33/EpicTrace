@@ -15,9 +15,12 @@ class HybridRetriever:
         self._reranker = reranker
 
     def retrieve(self, *, project_id: int, query: str, k: int = 6,
-                 dense_n: int = 30, fuse_m: int = 20) -> list[RetrievedChunk]:
-        dense = dense_search(self._embedder, self._store, project_id=project_id, query=query, k=dense_n)
-        sparse = sparse_search(self._store, project_id=project_id, query=query, k=dense_n)
+                 dense_n: int = 30, fuse_m: int = 20,
+                 ingest_record_ids: list[int] | None = None) -> list[RetrievedChunk]:
+        dense = dense_search(self._embedder, self._store, project_id=project_id, query=query,
+                             k=dense_n, ingest_record_ids=ingest_record_ids)
+        sparse = sparse_search(self._store, project_id=project_id, query=query,
+                               k=dense_n, ingest_record_ids=ingest_record_ids)
         fused = rrf_fuse([dense, sparse], k=fuse_m)
         if not fused:
             return []

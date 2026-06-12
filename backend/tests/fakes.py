@@ -17,7 +17,16 @@ class FakeVectorStore(VectorStore):
     def query(self, vector: list[float], filter: dict | None, k: int) -> list[dict]:
         rows = self.records
         if filter:
-            rows = [r for r in rows if all(r.get(key) == val for key, val in filter.items())]
+            def ok(r):
+                for key, val in filter.items():
+                    rv = r.get(key)
+                    if isinstance(val, (list, tuple)):
+                        if rv not in val:
+                            return False
+                    elif rv != val:
+                        return False
+                return True
+            rows = [r for r in rows if ok(r)]
         return rows[:k]
 
     def delete_by_record(self, ingest_record_id: int) -> None:
