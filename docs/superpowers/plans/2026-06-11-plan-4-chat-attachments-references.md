@@ -1,14 +1,14 @@
-# Plan A — 现代对话体验 + 对话引用(外部附件全文 + 内部文件聚焦)Implementation Plan
+# Plan 4 — 现代对话体验 + 对话引用(外部附件全文 + 内部文件聚焦)Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让对话能引用文件——外部拖/选进来的临时文件(全文进上下文,大文件留给 Plan B)和项目内已索引文件(全文或聚焦检索),引用可跳回原文,外部附件不入库、不向量化;并把对话外壳打磨到现代桌面 LLM 手感。
+**Goal:** 让对话能引用文件——外部拖/选进来的临时文件(全文进上下文,大文件留给 Plan 5)和项目内已索引文件(全文或聚焦检索),引用可跳回原文,外部附件不入库、不向量化;并把对话外壳打磨到现代桌面 LLM 手感。
 
 **Architecture:** 后端新增会话级 `conversation_references` 表 + `ReferenceService`(提取/缓存/size-gate);`ChatService` 组装时把"全文引用"作为 chunk 注入【资料】、把"聚焦引用"作为 `ingest_record_id IN {…}` 过滤透传进现有 RAG 图;引用 chunk 带 `source_kind`(project|attachment)以驱动来源跳回。前端加折叠两栏「本对话引用」面板 + Composer 附件入口(拖拽/粘贴/选择) + 流式 markdown 缓冲。size-gate 阈值随 LLM Profile 的 `context_window` 动态算。
 
 **Tech Stack:** Python 3.11 / FastAPI / SQLAlchemy(SQLite) / LangGraph / Milvus Lite / FlagEmbedding;React 19 / Vite / Tailwind v4 / shadcn;pytest(后端 TDD,Fake LLM/Embedder/Reranker/VectorStore);前端以 `npm run build` 为验收门。
 
-**设计来源:** `docs/superpowers/specs/2026-06-11-epictrace-plan-a-chat-attachments-references-design.md`(决策见 `docs/decisions/2026-06-11-attachment-phase-plan-and-tech-choices.md`)。
+**设计来源:** `docs/superpowers/specs/2026-06-11-epictrace-plan-4-chat-attachments-references-design.md`(决策见 `docs/decisions/2026-06-11-attachment-phase-plan-4nd-tech-choices.md`)。
 
 **约定:** 提交用 ep1sode-33 git 身份,commit message 结尾附 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` 行(下方各 commit 步骤只写主题,统一加此 trailer)。后端命令在 `backend/` 下用项目 venv 跑(`cd backend && .venv/bin/pytest ...`)。前端命令在 `frontend/` 下跑。**先开 feature 分支再动手**(收尾用 superpowers:finishing-a-development-branch)。
 
@@ -1449,7 +1449,7 @@ import { Button } from "@/components/ui/button";
 const MODE_LABEL: Record<ConversationReference["mode"], string> = {
   fulltext: "全文已载入",
   focus: "已索引聚焦",
-  deferred: "待 Plan B(文件较大)",
+  deferred: "待 Plan 5(文件较大)",
 };
 
 /** 折叠式「本对话引用」面板:两栏(外部/内部),每条带模式标签 + 解挂。空则不渲染。 */
@@ -1843,7 +1843,7 @@ git commit -m "feat(web): wire reference panel + attach/detach into conversation
 
 ## Self-Review(写计划后自查,已校对)
 
-**Spec 覆盖:** 两区面板(Task 15/20)、外部全文/大文件 deferred(Task 8/9)、内部全文/聚焦(Task 6/7/8/9)、不向量化外部(全程无 scratch 向量)、context_window 动态阈值(Task 2/3/11/18)、引用 source_kind 跳回(Task 4/12/17)、对话级存活(引用会话级 + ChatService 自取 list_active,Task 9)、解挂(Task 8/15/20)、UI 打磨 chips/拖拽/粘贴/消抖/空状态(Task 15/16/19)、数据模型 conversation_references + Message 不变(Task 1)、错误/边界(空文件/不支持/大文件/原文件移动:Task 8/12)、为 Plan B 留口(deferred 引用不进资料,Task 9)。**均有对应任务。**
+**Spec 覆盖:** 两区面板(Task 15/20)、外部全文/大文件 deferred(Task 8/9)、内部全文/聚焦(Task 6/7/8/9)、不向量化外部(全程无 scratch 向量)、context_window 动态阈值(Task 2/3/11/18)、引用 source_kind 跳回(Task 4/12/17)、对话级存活(引用会话级 + ChatService 自取 list_active,Task 9)、解挂(Task 8/15/20)、UI 打磨 chips/拖拽/粘贴/消抖/空状态(Task 15/16/19)、数据模型 conversation_references + Message 不变(Task 1)、错误/边界(空文件/不支持/大文件/原文件移动:Task 8/12)、为 Plan 5 留口(deferred 引用不进资料,Task 9)。**均有对应任务。**
 
 **类型一致性:** `ConversationReference` 字段、`ReferenceService` 方法名(add_external/add_internal/detach/list_active)、`RetrievedChunk.source_kind/reference_id`、`retrieve(..., ingest_record_ids=...)`、`AgentState.focus_ids`、API 形状(ReferenceCreate/Out、context_window)在前后端各任务间一致。
 
