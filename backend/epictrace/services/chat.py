@@ -34,11 +34,13 @@ def _ref_chunk(r: dict) -> RetrievedChunk:
 
 
 class ChatService:
-    def __init__(self, db: Database, llm, retriever, references=None) -> None:
+    def __init__(self, db: Database, llm, retriever, references=None,
+                 attachment_retriever=None) -> None:
         self._db = db
         self._llm = llm
         self._retriever = retriever
         self._references = references
+        self._attachment_retriever = attachment_retriever
 
     def stream_answer(self, conversation_id: int, question: str) -> Iterator[dict]:
         # 先读历史(本轮 user message 尚未落库,故不会把它算进历史),再落 user message。
@@ -96,12 +98,18 @@ class ChatService:
             fulltext_refs = [r for r in refs if r["mode"] == "fulltext"]
             focus_ids = [r["ingest_record_id"] for r in refs
                          if r["mode"] == "focus" and r.get("ingest_record_id")]
+            indexed_ext_ids = [r["id"] for r in refs
+                               if r["mode"] == "indexed" and r["kind"] == "external"]
             graph = build_rag_graph(self._llm, self._retriever)
             state = graph.invoke({"project_id": self._project_id(conversation_id),
                                   "question": question, "query": question, "history": history,
                                   "iterations": 0, "focus_ids": focus_ids})
-            # 全文引用恒在最前(无论 route);其后接项目/聚焦检索结果。
-            chunks = [_ref_chunk(r) for r in fulltext_refs] + state.get("chunks", [])
+            # 全文引用恒在最前;其后接项目检索;再接附件临时 RAG 检索(有活跃 indexed 引用时)。
+            attach_chunks = []
+            if indexed_ext_ids and self._attachment_retriever is not None:
+                attach_chunks = self._attachment_retriever.retrieve(
+                    conversation_id=conversation_id, reference_ids=indexed_ext_ids, query=question)
+            chunks = [_ref_chunk(r) for r in fulltext_refs] + state.get("chunks", []) + attach_chunks
 
             yield {"event": "status", "data": "生成中"}
             # 有资料 → 带引用作答(GENERATE_SYS + 【资料】);无资料(direct 路由)→ 普通聊天作答。
