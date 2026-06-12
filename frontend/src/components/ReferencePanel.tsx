@@ -1,8 +1,7 @@
-import { FileText, FolderInput, Paperclip, X } from "lucide-react";
+import { FileText, Paperclip, X } from "lucide-react";
 
 import { type ConversationReference } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 
 const MODE_LABEL: Record<ConversationReference["mode"], string> = {
   fulltext: "全文已载入",
@@ -11,17 +10,16 @@ const MODE_LABEL: Record<ConversationReference["mode"], string> = {
 };
 
 /**
- * 「本对话引用」侧栏内容:两栏(外部/内部),每条带模式标签 + 解挂。
+ * 「本对话引用」侧栏内容:两栏(外部已引用/库内已引用),每条带模式标签 + 解挂。
  * 作为右侧引用侧栏的纵向内容渲染(无折叠外壳/无 max-w 居中)。空态给出拖放/添加提示。
+ * 「从项目添加」入口已移至下方独立的「库内文件」区(ProjectFilesZone)。
  */
 export function ReferencePanel({
   references,
   onDetach,
-  onAddInternal,
 }: {
   references: ConversationReference[];
   onDetach: (rid: number) => void;
-  onAddInternal: () => void;
 }) {
   const external = references.filter((r) => r.kind === "external");
   const internal = references.filter((r) => r.kind === "internal");
@@ -30,30 +28,24 @@ export function ReferencePanel({
     <div className="flex flex-col gap-3">
       {references.length === 0 && (
         <p className="px-1 text-xs leading-relaxed text-muted-foreground/70">
-          拖文件进来,或从项目添加引用。
+          拖文件进来,或从下方「库内文件」添加引用。
         </p>
       )}
-      <Zone title="外部文件" icon={<Paperclip className="size-3" />}
+      <Zone title="外部已引用" icon={<Paperclip className="size-3" />}
             rows={external} onDetach={onDetach} />
-      <Zone title="内部文件" icon={<FileText className="size-3" />}
-            rows={internal} onDetach={onDetach}
-            action={
-              <Button type="button" variant="ghost" size="xs" onClick={onAddInternal}>
-                <FolderInput className="size-3" /> 从项目添加
-              </Button>
-            } />
+      <Zone title="库内已引用" icon={<FileText className="size-3" />}
+            rows={internal} onDetach={onDetach} />
     </div>
   );
 }
 
 function Zone({
-  title, icon, rows, onDetach, action,
+  title, icon, rows, onDetach,
 }: {
   title: string;
   icon: React.ReactNode;
   rows: ConversationReference[];
   onDetach: (rid: number) => void;
-  action?: React.ReactNode;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
@@ -61,7 +53,6 @@ function Zone({
         <span className="flex items-center gap-1 text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground/80">
           {icon} {title}
         </span>
-        {action}
       </div>
       {rows.length === 0 ? (
         <p className="px-1 text-xs text-muted-foreground/60">无</p>

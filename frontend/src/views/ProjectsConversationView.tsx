@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  FileText,
   FolderGit2,
   FolderPlus,
   Loader2,
@@ -16,7 +15,6 @@ import {
   type Citation,
   type Conversation,
   type ConversationReference,
-  type IngestRecord,
   type Project,
   type StreamHandlers,
 } from "@/lib/api";
@@ -31,11 +29,11 @@ import {
 } from "@/components/ui/dialog";
 import { CreateProjectModal } from "@/components/CreateProjectModal";
 import { DeleteProjectDialog } from "@/components/DeleteProjectDialog";
-import { FileList } from "@/components/FileList";
 import { ProjectSidebar } from "@/components/ProjectSidebar";
 import { Composer } from "@/components/Composer";
 import { MessageList, type ViewMessage } from "@/components/MessageList";
 import { ReferencePanel } from "@/components/ReferencePanel";
+import { ProjectFilesZone } from "@/components/ProjectFilesZone";
 import { SourceViewer } from "@/components/SourceViewer";
 
 export function ProjectsConversationView({
@@ -53,10 +51,6 @@ export function ProjectsConversationView({
   // 待删除确认的对话;为 null 时确认对话框关闭。
   const [pendingDeleteConversation, setPendingDeleteConversation] =
     useState<Conversation | null>(null);
-  // 创建后的自动扫描完成时自增,触发当前项目文件列表重新拉取(扫描晚于 onCreated)。
-  const [scanTick, setScanTick] = useState(0);
-  // 刚创建项目的自动扫描在途时为 true(扫描异步,完成晚于 onCreated)。
-  const [scanning, setScanning] = useState(false);
 
   // —— 树状态:展开集合 + 每项目对话缓存 + 选中会话 ——
   // 展开的项目 id 集合(可多开);默认展开当前选中项目。
@@ -314,8 +308,6 @@ export function ProjectsConversationView({
           <Workspace
             key={selected.id}
             project={selected}
-            refreshKey={scanTick}
-            scanning={scanning}
             llmConfigured={llmConfigured}
             onOpenSettings={onOpenSettings}
             activeConversationId={activeConversationId}
@@ -334,12 +326,6 @@ export function ProjectsConversationView({
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={handleCreated}
-        onScanStart={() => setScanning(true)}
-        onScanComplete={() => {
-          setScanning(false);
-          setScanTick((t) => t + 1);
-        }}
-        onScanError={() => setScanning(false)}
       />
 
       <DeleteProjectDialog
@@ -440,8 +426,6 @@ function DeleteConversationDialog({
 
 function Workspace({
   project,
-  refreshKey,
-  scanning,
   llmConfigured,
   onOpenSettings,
   activeConversationId,
@@ -452,8 +436,6 @@ function Workspace({
   onConversationActivity,
 }: {
   project: Project;
-  refreshKey: number;
-  scanning: boolean;
   llmConfigured: boolean;
   onOpenSettings: () => void;
   activeConversationId: number | null;
@@ -467,38 +449,11 @@ function Workspace({
   onConversationCreated: (conversation: Conversation) => void;
   onConversationActivity: () => void;
 }) {
-  // 来源(文件)抽屉默认关闭——对话是中心,文件是安静的次要资料。
-  const [sourcesOpen, setSourcesOpen] = useState(false);
-  // 头部紧凑摘要用的文件计数;FileList 自己也会拉一次,但本视图需要独立的轻量计数。
-  const [counts, setCounts] = useState<{ total: number; indexed: number } | null>(
-    null,
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    setCounts(null);
-    api
-      .listFiles(project.id)
-      .then((rows: IngestRecord[]) => {
-        if (cancelled) return;
-        setCounts({
-          total: rows.length,
-          indexed: rows.filter((f) => f.indexed).length,
-        });
-      })
-      .catch(() => {
-        /* 计数拉取失败时静默:抽屉里的 FileList 仍会展示完整错误。 */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [project.id, refreshKey]);
-
   return (
     <div className="relative flex h-full min-w-0 flex-1">
       {/* 主区:对话为中心 */}
       <div className="flex h-full min-w-0 flex-1 flex-col">
-        {/* Workspace header:标题 + 路径,右侧是安静的「来源」摘要/开关 */}
+        {/* Workspace header:标题 + 路径 */}
         <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border/70 px-8 py-5">
           <div className="min-w-0">
             <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">
@@ -511,13 +466,6 @@ function Workspace({
               </span>
             </div>
           </div>
-
-          <SourcesToggle
-            counts={counts}
-            scanning={scanning}
-            open={sourcesOpen}
-            onToggle={() => setSourcesOpen((v) => !v)}
-          />
         </header>
 
         {/* 对话主体:占据主纵向空间 */}
@@ -534,114 +482,7 @@ function Workspace({
           onConversationActivity={onConversationActivity}
         />
       </div>
-
-      {/* 来源抽屉:默认关闭;开启时贴主区右侧,复用现有 FileList */}
-      {sourcesOpen && (
-        <SourcesDrawer
-          projectId={project.id}
-          refreshKey={refreshKey}
-          scanning={scanning}
-          onClose={() => setSourcesOpen(false)}
-        />
-      )}
     </div>
-  );
-}
-
-/**
- * 头部的「来源」开关:把文件清单降级为一行紧凑摘要 + 一个安静的按钮。
- * 文本形如「N 个文件 · M 已索引」,几乎不占注意力。
- */
-function SourcesToggle({
-  counts,
-  scanning,
-  open,
-  onToggle,
-}: {
-  counts: { total: number; indexed: number } | null;
-  scanning: boolean;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      onClick={onToggle}
-      aria-expanded={open}
-      aria-pressed={open}
-      className="shrink-0 gap-2 text-muted-foreground"
-    >
-      <PanelRight className="size-3.5" strokeWidth={1.75} aria-hidden />
-      <span className="font-medium text-foreground">来源</span>
-      <span aria-hidden className="text-border">·</span>
-      {scanning ? (
-        <span className="inline-flex items-center gap-1 tabular-nums">
-          <Loader2 className="size-3 animate-spin" aria-hidden />
-          扫描中
-        </span>
-      ) : counts ? (
-        <span className="tabular-nums">
-          {counts.total} 个文件 · {counts.indexed} 已索引
-        </span>
-      ) : (
-        <span className="tabular-nums text-muted-foreground/70">…</span>
-      )}
-    </Button>
-  );
-}
-
-/**
- * 来源抽屉:贴在工作区右侧的次要面板,默认关闭。
- * 内容直接复用 FileList(已带 已索引/待索引 徽章),不做改动。
- */
-function SourcesDrawer({
-  projectId,
-  refreshKey,
-  scanning,
-  onClose,
-}: {
-  projectId: number;
-  refreshKey: number;
-  scanning: boolean;
-  onClose: () => void;
-}) {
-  return (
-    <aside
-      aria-label="项目来源文件"
-      className="flex h-full w-80 shrink-0 flex-col border-l border-border/70 bg-sidebar"
-    >
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/70 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-medium text-foreground">来源</h2>
-          {scanning && (
-            <span
-              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
-              role="status"
-              aria-live="polite"
-            >
-              <Loader2 className="size-3.5 animate-spin" />
-              正在扫描…
-            </span>
-          )}
-        </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          onClick={onClose}
-          aria-label="关闭来源面板"
-          className="text-muted-foreground"
-        >
-          <X className="size-4" />
-        </Button>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <FileList projectId={projectId} refreshKey={refreshKey} />
-      </div>
-    </aside>
   );
 }
 
@@ -691,8 +532,9 @@ function Conversation({
   const [viewing, setViewing] = useState<Citation | null>(null);
   // 本对话引用(外部附件 + 内部项目文件)。草稿态为空,落库后随会话拉取。
   const [references, setReferences] = useState<ConversationReference[]>([]);
-  // 「从项目添加内部文件」选择对话框开关。
-  const [pickInternalOpen, setPickInternalOpen] = useState(false);
+  // 「库内文件」区的强制展开信号:自增即让侧栏内的 ProjectFilesZone 展开并滚入视野
+  //(Composer 的「从项目」按钮触发)。
+  const [filesZoneSignal, setFilesZoneSignal] = useState(0);
   // 附加外部文件失败时的可关闭内联提示;null 表示无错误。
   const [attachError, setAttachError] = useState<string | null>(null);
   // 右侧「引用」侧栏开关(类 Claude Desktop 的 Context 面板)。默认收起。
@@ -904,7 +746,6 @@ function Conversation({
         /* ignore */
       }
       await refreshRefs(cid);
-      setPickInternalOpen(false);
     },
     [ensureConversation, refreshRefs],
   );
@@ -1004,6 +845,12 @@ function Conversation({
   );
 
   const hasMessages = messages.length > 0;
+  // 已 pin 为内部引用的项目文件 id 集合:供「库内文件」区标记「已引用」并禁用点选。
+  const pinnedRecordIds = new Set(
+    references
+      .filter((r) => r.kind === "internal" && r.ingest_record_id != null)
+      .map((r) => r.ingest_record_id as number),
+  );
   // 主区有「正在对话」上下文:已有选中会话,或正在撰写一段草稿。
   // 二者皆无时只展示项目空态与「新建对话」CTA,不挂输入框(发送无处可去)。
   const inConversation = conversationId != null || draft;
@@ -1134,7 +981,11 @@ function Conversation({
               onStop={stop}
               onOpenSettings={onOpenSettings}
               onAttachPaths={attachExternal}
-              onAddInternal={() => setPickInternalOpen(true)}
+              onAddInternal={() => {
+                // 「从项目」:开侧栏并让「库内文件」区展开+滚入视野(取代旧的选择对话框)。
+                setRefSidebarOpen(true);
+                setFilesZoneSignal((s) => s + 1);
+              }}
               onAttachUnsupported={() =>
                 setAttachError("当前环境无法读取拖拽/粘贴的文件路径,请点 + 选择文件。")
               }
@@ -1169,22 +1020,20 @@ function Conversation({
               <X className="size-4" />
             </Button>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-4">
-            <ReferencePanel
-              references={references}
-              onDetach={detachRef}
-              onAddInternal={() => setPickInternalOpen(true)}
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+            {/* 外部已引用 / 库内已引用 */}
+            <ReferencePanel references={references} onDetach={detachRef} />
+            {/* 库内文件:可折叠(默认收起),搜索 + 点选 pin + 右键在 Finder 查看 */}
+            <ProjectFilesZone
+              projectId={projectId}
+              pinnedRecordIds={pinnedRecordIds}
+              onPin={addInternal}
+              openSignal={filesZoneSignal}
+              refreshSignal={references.length}
             />
           </div>
         </aside>
       )}
-
-      <InternalFilePicker
-        open={pickInternalOpen}
-        projectId={projectId}
-        onClose={() => setPickInternalOpen(false)}
-        onPick={addInternal}
-      />
 
       <SourceViewer citation={viewing} onClose={() => setViewing(null)} />
     </div>
@@ -1227,95 +1076,6 @@ function ReferenceSidebarToggle({
         </span>
       )}
     </Button>
-  );
-}
-
-/**
- * 「从项目添加」内部文件选择器。打开时拉取该项目文件清单,以安静的列表行呈现。
- * 仅已索引文件可点选(聚焦引用需要索引);未索引文件置灰禁用。点选即附加并关闭。
- */
-function InternalFilePicker({
-  open,
-  projectId,
-  onClose,
-  onPick,
-}: {
-  open: boolean;
-  projectId: number;
-  onClose: () => void;
-  onPick: (ingestRecordId: number) => void;
-}) {
-  const [files, setFiles] = useState<IngestRecord[] | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    setFiles(null);
-    api
-      .listFiles(projectId)
-      .then((rows) => {
-        if (!cancelled) setFiles(rows);
-      })
-      .catch(() => {
-        // 拉取失败:落空数组,显示「暂无可添加的文件」。
-        if (!cancelled) setFiles([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, projectId]);
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent
-        showCloseButton
-        className="flex max-h-[min(70vh,40rem)] w-full max-w-md flex-col gap-0 overflow-hidden p-0"
-      >
-        <DialogHeader className="gap-1 border-b border-border/70 px-5 py-4 pr-12">
-          <DialogTitle className="text-sm font-semibold">从项目添加文件</DialogTitle>
-          <DialogDescription className="text-xs">
-            选一个已索引的文件作为本对话的聚焦引用。
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="min-h-0 flex-1 overflow-y-auto p-3">
-          {files == null ? (
-            <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" />
-              正在加载文件…
-            </div>
-          ) : files.length === 0 ? (
-            <p className="px-2 py-12 text-center text-xs text-muted-foreground">
-              该项目暂无文件。
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-1">
-              {files.map((f) => (
-                <li key={f.id}>
-                  <button
-                    type="button"
-                    disabled={!f.indexed}
-                    onClick={() => onPick(f.id)}
-                    className="flex w-full items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-left outline-none hover:border-border/60 hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-transparent disabled:hover:bg-transparent"
-                  >
-                    <FileText className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span
-                      className="min-w-0 flex-1 truncate text-xs text-foreground"
-                      title={f.original_filename}
-                    >
-                      {f.original_filename}
-                    </span>
-                    <span className="shrink-0 text-[0.65rem] text-muted-foreground">
-                      {f.indexed ? "已索引" : "待索引"}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }
 
