@@ -1,0 +1,137 @@
+import json
+from pathlib import Path
+
+from epictrace.config import AppConfig
+from epictrace.db import Database
+from epictrace.models import Conversation, ConversationReference, Project
+from epictrace.retrieval.types import RetrievedChunk
+from epictrace.services.chat import ChatService
+from tests.fakes import FakeLLM
+
+
+class _EmptyRetriever:
+    def retrieve(self, *, project_id, query, **kwargs):
+        return []
+
+
+class _FakeAttachmentRetriever:
+    def __init__(self): self.calls = []
+    def retrieve(self, *, conversation_id, reference_ids, query, k=6):
+        self.calls.append((conversation_id, tuple(reference_ids)))
+        return [RetrievedChunk(text="附件相关片段", ingest_record_id=0, project_id=0,
+                               char_start=5, char_end=11, source_type="attachment",
+                               source_kind="attachment", reference_id=reference_ids[0])]
+
+
+def _setup(tmp_path):
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    with db.session() as s:
+        p = Project(title="P", folder_path=str(tmp_path)); s.add(p); s.flush()
+        c = Conversation(project_id=p.id, title="t"); s.add(c); s.flush()
+        cid = c.id
+    return db, cid
+
+
+def _add_indexed_ref(db, cid) -> int:
+    with db.session() as s:
+        ref = ConversationReference(conversation_id=cid, kind="external", display_name="big.md",
+                                    source_path="/x/big.md", extracted_text="…", text_chars=1,
+                                    mode="indexed")
+        s.add(ref); s.flush(); return ref.id
+
+
+def _add_fulltext_ref(db, cid, name="report.pdf") -> int:
+    with db.session() as s:
+        ref = ConversationReference(conversation_id=cid, kind="external", display_name=name,
+                                    source_path="/x/" + name, extracted_text="页表内容",
+                                    text_chars=4, mode="fulltext")
+        s.add(ref); s.flush(); return ref.id
+
+
+class _Refs:
+    def __init__(self, db): self._db = db
+    def list_active(self, cid):
+        from epictrace.services.references import ReferenceService
+        return ReferenceService(self._db).list_active(cid)
+
+
+def test_indexed_ref_pulls_attachment_chunks_and_cites_them(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    rid = _add_indexed_ref(db, cid)
+    attach = _FakeAttachmentRetriever()
+    svc = ChatService(db, FakeLLM(route="retrieve", grade="sufficient", answer="见附件[1]。"),
+                      _EmptyRetriever(), references=_Refs(db), attachment_retriever=attach)
+    events = list(svc.stream_answer(cid, "这个文件讲了什么"))
+    assert attach.calls == [(cid, (rid,))]
+    cites = json.loads(next(e for e in events if e["event"] == "citations")["data"])
+    assert cites and cites[0]["source_kind"] == "attachment" and cites[0]["reference_id"] == rid
+    assert cites[0]["char_start"] == 5 and cites[0]["char_end"] == 11
+
+
+def test_prompt_names_attached_files(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    _add_fulltext_ref(db, cid, "report.pdf")
+    llm = FakeLLM(route="direct", answer="见资料[1]。")  # fulltext ref injects → chunks 非空
+    svc = ChatService(db, llm, _EmptyRetriever(), references=_Refs(db))
+    list(svc.stream_answer(cid, "这个文件讲了啥"))
+    sent = " ".join(m["content"] for m in llm.stream_messages[-1])
+    assert "report.pdf" in sent          # 提示里点名了附件
+    assert "附加" in sent                 # 且说明这是用户附加的文件
+
+
+def test_no_attachment_retriever_or_no_indexed_ref_is_noop(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    svc = ChatService(db, FakeLLM(route="direct", answer="你好"), _EmptyRetriever())
+    events = list(svc.stream_answer(cid, "你好"))
+    assert json.loads(next(e for e in events if e["event"] == "citations")["data"]) == []
+
+
+def test_attachment_retriever_factory_not_called_without_indexed_refs(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    built = []
+    def factory():
+        built.append(1)
+        return _FakeAttachmentRetriever()
+    svc = ChatService(db, FakeLLM(route="direct", answer="你好"), _EmptyRetriever(),
+                      references=_Refs(db), attachment_retriever=factory)
+    list(svc.stream_answer(cid, "你好"))   # 无 indexed 引用 → 工厂不该被调用
+    assert built == []
+
+
+def test_attachment_retriever_factory_called_with_indexed_refs(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    rid = _add_indexed_ref(db, cid)
+    inner = _FakeAttachmentRetriever()
+    svc = ChatService(db, FakeLLM(route="retrieve", grade="sufficient", answer="见[1]。"),
+                      _EmptyRetriever(), references=_Refs(db), attachment_retriever=lambda: inner)
+    list(svc.stream_answer(cid, "讲讲文件"))
+    assert inner.calls == [(cid, (rid,))]   # 工厂解析出的 retriever 被调用
+
+
+class _ProjectRetriever:
+    """返回一个可识别的项目 chunk,用于断言"有外部附件时全局项目 RAG 被裁掉"。"""
+    def retrieve(self, *, project_id, query, **kwargs):
+        return [RetrievedChunk(text="项目课程内容TLB", ingest_record_id=99, project_id=project_id,
+                               char_start=0, char_end=8, source_type="folder_scan")]
+
+
+def test_external_attachment_suppresses_global_project_rag(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    rid = _add_indexed_ref(db, cid)
+    attach = _FakeAttachmentRetriever()
+    llm = FakeLLM(route="retrieve", grade="sufficient", answer="见附件[1]。")
+    svc = ChatService(db, llm, _ProjectRetriever(), references=_Refs(db), attachment_retriever=attach)
+    list(svc.stream_answer(cid, "这个文件讲了什么"))
+    sent = " ".join(m["content"] for m in llm.stream_messages[-1])
+    assert "附件相关片段" in sent          # 附件检索结果在
+    assert "项目课程内容TLB" not in sent   # 全局项目 RAG 被裁掉(不掺项目资料)
+    assert attach.calls == [(cid, (rid,))]
+
+
+def test_no_attachment_keeps_global_project_rag(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    llm = FakeLLM(route="retrieve", grade="sufficient", answer="答[1]。")
+    svc = ChatService(db, llm, _ProjectRetriever(), references=_Refs(db))
+    list(svc.stream_answer(cid, "TLB怎么算"))
+    sent = " ".join(m["content"] for m in llm.stream_messages[-1])
+    assert "项目课程内容TLB" in sent       # 无附件 → 项目 RAG 照常

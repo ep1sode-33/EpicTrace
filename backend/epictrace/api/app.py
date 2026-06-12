@@ -23,6 +23,7 @@ def create_app(
     reranker=None,
     llm=None,
     retriever=None,
+    attachment_store=None,
     config: AppConfig | None = None,
 ) -> FastAPI:
     app = FastAPI(title="EpicTrace")
@@ -49,6 +50,8 @@ def create_app(
     # 而是首次用到索引路由时再建真件(见 deps.get_embedder / get_vector_store)。
     app.state.embedder = embedder
     app.state.vector_store = vector_store
+    # 会话级临时附件 store(attachment_chunks collection)。注入或延迟构造(见 deps.get_attachment_store)。
+    app.state.attachment_store = attachment_store
     app.state.reranker = reranker  # 注入或延迟构造(见 deps.get_reranker)
     app.state.llm = llm  # 注入或由 SettingsService 接线(见 deps.get_llm)
     app.state.retriever = retriever  # 注入或延迟构造(见 deps.get_retriever)

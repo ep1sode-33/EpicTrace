@@ -537,6 +537,8 @@ function Conversation({
   const [filesZoneSignal, setFilesZoneSignal] = useState(0);
   // 附加外部文件失败时的可关闭内联提示;null 表示无错误。
   const [attachError, setAttachError] = useState<string | null>(null);
+  // 正在附加(后端对大文件同步索引,较慢)时显示瞬态提示。
+  const [attaching, setAttaching] = useState(false);
   // 右侧「引用」侧栏开关(类 Claude Desktop 的 Context 面板)。默认收起。
   const [refSidebarOpen, setRefSidebarOpen] = useState(false);
   // 拖放覆盖层:在整个对话区拖动文件时显示半透明提示。
@@ -609,7 +611,7 @@ function Conversation({
   // start 接收 onToken/onCitations 等回调,返回 abort 句柄(api.sendMessage / api.regenerate)。
   // 该 assistant 消息须已就绪(发送:乐观插入的空消息;重生成:已存在并被重置为流式)。
   const runStream = useCallback(
-    (assistantId: number | string, start: (h: StreamHandlers) => () => void) => {
+    (cid: number, assistantId: number | string, start: (h: StreamHandlers) => () => void) => {
       const patch = (fn: (m: ViewMessage) => ViewMessage) =>
         setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
 
@@ -624,6 +626,14 @@ function Conversation({
           abortRef.current = null;
           // 后端在首轮按 LLM 自动命名:刷新当前项目对话列表,让已命名的会话出现在侧栏。
           onConversationActivity();
+          // 用真实(数字)消息 id 替换乐观字符串 id → 本轮立即可编辑/重试。
+          api.listMessages(cid)
+            .then((rows) =>
+              setMessages(rows.map((m) => ({
+                id: m.id, role: m.role, content: m.content,
+                citations: parseCitations(m.citations_json),
+              }))))
+            .catch(() => { /* 刷新失败不致命:乐观消息仍在,切换会话后会校正 */ });
         },
         onError: (e) => {
           // SSE 可能发来 error 事件(base_url 错误 / 端点不可达 / 模型报错)。
@@ -641,7 +651,7 @@ function Conversation({
   // 真正打开发送的 SSE 流。content 已经过乐观插入(用户消息 + 空助手消息)。
   const streamTo = useCallback(
     (cid: number, content: string, assistantId: string) =>
-      runStream(assistantId, (h) => api.sendMessage(cid, content, h)),
+      runStream(cid, assistantId, (h) => api.sendMessage(cid, content, h)),
     [runStream],
   );
 
@@ -681,7 +691,7 @@ function Conversation({
         { id: assistantId, role: "assistant", content: "", citations: [], streaming: true },
       ]);
       setStreaming(true);
-      setStatus("检索中");
+      setStatus("思考中");
 
       let cid: number;
       try {
@@ -710,6 +720,7 @@ function Conversation({
   const attachExternal = useCallback(
     async (paths: string[]) => {
       const cid = await ensureConversation();
+      setAttaching(true);
       const failures: string[] = [];
       for (const p of paths) {
         try {
@@ -720,7 +731,9 @@ function Conversation({
           failures.push(`${name}(${e instanceof Error ? e.message : String(e)})`);
         }
       }
-      // 先呈现失败提示,再刷新引用列表——这样即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
+      // 先收起进行态,再呈现失败提示,最后刷新引用列表——
+      // 这样即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
+      setAttaching(false);
       setAttachError(failures.length ? `部分文件未能添加:${failures.join("；")}` : null);
       await refreshRefs(cid);
     },
@@ -811,7 +824,7 @@ function Conversation({
 
     setStreaming(true);
     setStatus("检索中");
-    runStream(targetId, (h) => api.regenerate(conversationId, h));
+    runStream(conversationId, targetId, (h) => api.regenerate(conversationId, h));
   }, [streaming, conversationId, runStream]);
 
   // 编辑某条 user 消息并就地重生成:把该消息内容改为 content、删它之后的全部消息(本地截断)、
@@ -839,7 +852,7 @@ function Conversation({
 
       setStreaming(true);
       setStatus("检索中");
-      runStream(assistantId, (h) => api.editMessage(conversationId, messageId, text, h));
+      runStream(conversationId, assistantId, (h) => api.editMessage(conversationId, messageId, text, h));
     },
     [streaming, conversationId, runStream],
   );
@@ -962,6 +975,10 @@ function Conversation({
                 拖放文件到此处添加引用
               </span>
             </div>
+          )}
+
+          {inConversation && attaching && (
+            <p className="mx-auto w-full max-w-2xl px-6 text-xs text-muted-foreground">正在索引附件…</p>
           )}
 
           {inConversation && attachError && (

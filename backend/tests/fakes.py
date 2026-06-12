@@ -14,31 +14,36 @@ class FakeVectorStore(VectorStore):
     def upsert(self, records: list[dict]) -> None:
         self.records.extend(records)
 
-    def query(self, vector: list[float], filter: dict | None, k: int) -> list[dict]:
-        rows = self.records
-        if filter:
-            def ok(r):
-                for key, val in filter.items():
-                    rv = r.get(key)
-                    if isinstance(val, (list, tuple)):
-                        if rv not in val:
-                            return False
-                    elif rv != val:
-                        return False
-                return True
-            rows = [r for r in rows if ok(r)]
+    def _match(self, r: dict, filter: dict) -> bool:
+        for key, val in filter.items():
+            rv = r.get(key)
+            if isinstance(val, (list, tuple)):
+                if rv not in val:
+                    return False
+            elif rv != val:
+                return False
+        return True
+
+    def query(self, vector, filter, k):
+        rows = self.records if not filter else [r for r in self.records if self._match(r, filter)]
         return rows[:k]
+
+    def list_by(self, filter: dict) -> list[dict]:
+        return [r for r in self.records if self._match(r, filter)]
+
+    def delete(self, filter: dict) -> None:
+        self.records = [r for r in self.records if not self._match(r, filter)]
 
     def delete_by_record(self, ingest_record_id: int) -> None:
         self.deleted_records.append(ingest_record_id)
-        self.records = [r for r in self.records if r.get("ingest_record_id") != ingest_record_id]
+        self.delete({"ingest_record_id": ingest_record_id})
 
     def delete_by_project(self, project_id: int) -> None:
         self.deleted_projects.append(project_id)
-        self.records = [r for r in self.records if r.get("project_id") != project_id]
+        self.delete({"project_id": project_id})
 
     def list_by_project(self, project_id: int) -> list[dict]:
-        return [r for r in self.records if r.get("project_id") == project_id]
+        return self.list_by({"project_id": project_id})
 
 
 class FakeEmbedder(EmbeddingProvider):

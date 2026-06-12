@@ -29,6 +29,8 @@ def test_list_by_project_warns_on_limit_truncation(caplog):
 
     s = MilvusLiteStore.__new__(MilvusLiteStore)
     s._client = _FakeClient()
+    s._collection = milvus_lite._COLLECTION
+    s._scalars = milvus_lite._SCALARS
     with caplog.at_level("WARNING", logger="epictrace"):
         rows = s.list_by_project(7)
     assert len(rows) == milvus_lite._LIST_LIMIT

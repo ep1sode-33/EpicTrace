@@ -34,11 +34,13 @@ def _ref_chunk(r: dict) -> RetrievedChunk:
 
 
 class ChatService:
-    def __init__(self, db: Database, llm, retriever, references=None) -> None:
+    def __init__(self, db: Database, llm, retriever, references=None,
+                 attachment_retriever=None) -> None:
         self._db = db
         self._llm = llm
         self._retriever = retriever
         self._references = references
+        self._attachment_retriever = attachment_retriever
 
     def stream_answer(self, conversation_id: int, question: str) -> Iterator[dict]:
         # 先读历史(本轮 user message 尚未落库,故不会把它算进历史),再落 user message。
@@ -96,19 +98,42 @@ class ChatService:
             fulltext_refs = [r for r in refs if r["mode"] == "fulltext"]
             focus_ids = [r["ingest_record_id"] for r in refs
                          if r["mode"] == "focus" and r.get("ingest_record_id")]
+            indexed_ext_ids = [r["id"] for r in refs
+                               if r["mode"] == "indexed" and r["kind"] == "external"]
+            # 已附加的外部文件名(全文注入 + 临时索引);告诉 LLM【资料】含这些附件内容,
+            # 否则它会一边总结一边说"没收到文件"。
+            attached_names = [r["display_name"] for r in refs
+                              if r["kind"] == "external" and r["mode"] in ("fulltext", "indexed")]
+            has_external = any(r["kind"] == "external" for r in refs)
             graph = build_rag_graph(self._llm, self._retriever)
             state = graph.invoke({"project_id": self._project_id(conversation_id),
                                   "question": question, "query": question, "history": history,
                                   "iterations": 0, "focus_ids": focus_ids})
-            # 全文引用恒在最前(无论 route);其后接项目/聚焦检索结果。
-            chunks = [_ref_chunk(r) for r in fulltext_refs] + state.get("chunks", [])
+            route = state.get("route", "retrieve")
+            # 有外部附件在场时,项目检索只保留"显式 pin 的内部文件"(focus,图内已 scope),
+            # 丢弃全局项目检索 —— 用户带了外部文件就聚焦在引用上(像 GPT 网页版),不掺全项目资料。
+            project_chunks = state.get("chunks", []) if (not has_external or focus_ids) else []
+            # 附件临时 RAG 检索(有活跃 indexed 引用、且本轮判为检索;direct 招呼不查)。
+            attach_chunks = []
+            if indexed_ext_ids and self._attachment_retriever is not None and route != "direct":
+                ar = (self._attachment_retriever()
+                      if callable(self._attachment_retriever)
+                      else self._attachment_retriever)
+                attach_chunks = ar.retrieve(
+                    conversation_id=conversation_id, reference_ids=indexed_ext_ids, query=question)
+            # 全文引用恒在最前;其后接(可能被裁掉全局的)项目检索;再接附件检索。
+            chunks = [_ref_chunk(r) for r in fulltext_refs] + project_chunks + attach_chunks
 
             yield {"event": "status", "data": "生成中"}
             # 有资料 → 带引用作答(GENERATE_SYS + 【资料】);无资料(direct 路由)→ 普通聊天作答。
             # 多轮:系统提示 → 历史轮次 → 本轮。
             if chunks:
                 sys_prompt = GENERATE_SYS
-                user_content = f"问题:{question}\n\n【资料】\n{format_chunks(chunks)}"
+                note = ""
+                if attached_names:
+                    note = (f"(用户在本次对话附加了文件:{'、'.join(attached_names)};"
+                            f"下方【资料】已包含这些附件的相关内容,请据此作答,不要说未收到文件。)\n\n")
+                user_content = f"{note}问题:{question}\n\n【资料】\n{format_chunks(chunks)}"
             else:
                 sys_prompt = CHAT_SYS
                 user_content = question
