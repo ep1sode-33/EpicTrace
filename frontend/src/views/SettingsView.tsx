@@ -15,33 +15,26 @@ import {
 import { api, type LLMProfile, type Settings } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
 type FormState = { name: string; base_url: string; api_key: string; model: string; context_window: string };
 const BLANK: FormState = { name: "", base_url: "", api_key: "", model: "", context_window: "32768" };
 
-export function SettingsModal({
-  open,
-  onClose,
+/**
+ * 「模型配置」整页设置视图(替换主内容区,非弹窗)。
+ * 现仅一节(对话模型 Profile 管理);后续设置项以新的 <section> 追加即可。
+ */
+export function SettingsView({
   onSaved,
 }: {
-  open: boolean;
-  onClose: () => void;
   /** 任一变更成功后回调,携带最新公开设置(configured 已更新),供父级解禁 Composer。 */
   onSaved?: (settings: Settings) => void;
 }) {
   const [profiles, setProfiles] = useState<LLMProfile[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // 表单态:editingId === null 表示「新建」;非空表示编辑该 Profile。null === 表单关闭。
+  // 表单态:editingId === null 表示「新建」;非空表示编辑该 Profile。undefined === 表单关闭。
   const [editingId, setEditingId] = useState<string | null | undefined>(undefined);
   const [form, setForm] = useState<FormState>(BLANK);
   const [busy, setBusy] = useState<string | null>(null); // "save" | "active:<id>" | "delete:<id>"
@@ -53,13 +46,8 @@ export function SettingsModal({
     onSaved?.(s);
   };
 
-  // 每次打开都拉取当前设置(api_key 永不回传)。重置表单态。
+  // 进入页面时拉取当前设置(api_key 永不回传)。
   useEffect(() => {
-    if (!open) return;
-    setError(null);
-    setEditingId(undefined);
-    setForm(BLANK);
-    setLoading(true);
     let cancelled = false;
     api
       .getSettings()
@@ -73,7 +61,7 @@ export function SettingsModal({
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, []);
 
   // 表单打开时聚焦名称输入。
   useEffect(() => {
@@ -176,22 +164,24 @@ export function SettingsModal({
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && !anyBusy && onClose()}>
-      <DialogContent showCloseButton={!anyBusy} className="gap-0 p-0">
-        <DialogHeader className="gap-2 px-6 pt-6">
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto w-full max-w-2xl px-6 py-8">
+        {/* 页头 */}
+        <header className="flex flex-col gap-2">
           <span
             aria-hidden
             className="flex size-9 items-center justify-center rounded-xl bg-muted text-foreground ring-1 ring-border/70"
           >
             <Settings2 className="size-[18px]" strokeWidth={2} />
           </span>
-          <DialogTitle>对话模型</DialogTitle>
-          <DialogDescription>
+          <h1 className="text-xl font-semibold tracking-tight text-foreground">模型配置</h1>
+          <p className="text-sm leading-relaxed text-muted-foreground">
             管理多个 OpenAI-Compatible 端点,选一个作为当前对话使用的 Profile。密钥仅保存在本机,不会上传。
-          </DialogDescription>
-        </DialogHeader>
+          </p>
+        </header>
 
-        <div className="flex max-h-[min(70vh,40rem)] flex-col gap-4 overflow-y-auto px-6 py-5">
+        {/* 对话模型 Profile 管理。后续设置项以新的 <section> 追加于此下方。 */}
+        <section className="mt-8 flex flex-col gap-4">
           {loading ? (
             <ProfileSkeleton />
           ) : (
@@ -258,9 +248,9 @@ export function SettingsModal({
               )}
             </>
           )}
-        </div>
-      </DialogContent>
-    </Dialog>
+        </section>
+      </div>
+    </div>
   );
 }
 

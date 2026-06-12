@@ -15,11 +15,14 @@ export function TopBar({
   active,
   onChange,
   onOpenSettings,
+  inSettings = false,
 }: {
   active: TabKey;
   onChange: (tab: TabKey) => void;
-  /** 点齿轮打开对话模型设置。 */
+  /** 点齿轮进入「模型配置」整页设置。 */
   onOpenSettings: () => void;
+  /** 处于设置页时高亮齿轮(镜像活动 Tab 的视觉)。 */
+  inSettings?: boolean;
 }) {
   return (
     <header className="sticky top-0 z-30 border-b border-border/70 bg-background/85 backdrop-blur-xl supports-[backdrop-filter]:bg-background/70">
@@ -82,10 +85,17 @@ export function TopBar({
             type="button"
             onClick={onOpenSettings}
             aria-label="设置"
+            aria-pressed={inSettings}
             title="设置"
-            className="flex size-8 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+            className={cn(
+              "flex size-8 items-center justify-center rounded-lg outline-none transition-colors",
+              "focus-visible:ring-2 focus-visible:ring-ring/50",
+              inSettings
+                ? "bg-muted text-foreground ring-1 ring-foreground/[0.06]"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            )}
           >
-            <Settings className="size-[18px]" strokeWidth={2} />
+            <Settings className="size-[18px]" strokeWidth={inSettings ? 2.25 : 2} />
           </button>
         </div>
       </div>
