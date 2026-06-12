@@ -107,7 +107,10 @@ class ChatService:
             # 全文引用恒在最前;其后接项目检索;再接附件临时 RAG 检索(有活跃 indexed 引用时)。
             attach_chunks = []
             if indexed_ext_ids and self._attachment_retriever is not None:
-                attach_chunks = self._attachment_retriever.retrieve(
+                ar = (self._attachment_retriever()
+                      if callable(self._attachment_retriever)
+                      else self._attachment_retriever)
+                attach_chunks = ar.retrieve(
                     conversation_id=conversation_id, reference_ids=indexed_ext_ids, query=question)
             chunks = [_ref_chunk(r) for r in fulltext_refs] + state.get("chunks", []) + attach_chunks
 

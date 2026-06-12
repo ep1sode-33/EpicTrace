@@ -75,7 +75,8 @@ def get_attachment_store(request: Request):
             from epictrace.config import AppConfig
             from epictrace.vectorstore.milvus_lite import MilvusLiteStore, _ATTACHMENT_SCALARS
 
-            store = MilvusLiteStore(db_path=AppConfig().attachment_milvus_path, dim=1024,
+            config = getattr(request.app.state, "config", None) or AppConfig()
+            store = MilvusLiteStore(db_path=config.attachment_milvus_path, dim=1024,
                                     collection="attachment_chunks", scalars=_ATTACHMENT_SCALARS)
             request.app.state.attachment_store = store
     return store

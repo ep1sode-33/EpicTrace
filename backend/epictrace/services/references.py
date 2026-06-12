@@ -118,12 +118,20 @@ class ReferenceService:
             return False
 
     def detach(self, conversation_id: int, reference_id: int) -> None:
+        owned = False
         with self._db.session() as s:
             ref = s.get(ConversationReference, reference_id)
             if ref is not None and ref.conversation_id == conversation_id:
                 ref.detached = True
-        if self._attachment_store is not None:
-            self._attachment_store.delete({"reference_id": reference_id})
+                owned = True
+        # 仅在归属校验通过时清理临时向量,且按 conversation_id + reference_id 双重限定;
+        # 清理失败不应影响解挂(残留向量无害——检索按活跃引用过滤)。
+        if owned and self._attachment_store is not None:
+            try:
+                self._attachment_store.delete({"conversation_id": conversation_id,
+                                               "reference_id": reference_id})
+            except Exception:  # noqa: BLE001
+                pass
 
     def list_active(self, conversation_id: int) -> list[dict]:
         with self._db.session() as s:

@@ -65,3 +65,25 @@ def test_no_attachment_retriever_or_no_indexed_ref_is_noop(tmp_path: Path):
     svc = ChatService(db, FakeLLM(route="direct", answer="你好"), _EmptyRetriever())
     events = list(svc.stream_answer(cid, "你好"))
     assert json.loads(next(e for e in events if e["event"] == "citations")["data"]) == []
+
+
+def test_attachment_retriever_factory_not_called_without_indexed_refs(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    built = []
+    def factory():
+        built.append(1)
+        return _FakeAttachmentRetriever()
+    svc = ChatService(db, FakeLLM(route="direct", answer="你好"), _EmptyRetriever(),
+                      references=_Refs(db), attachment_retriever=factory)
+    list(svc.stream_answer(cid, "你好"))   # 无 indexed 引用 → 工厂不该被调用
+    assert built == []
+
+
+def test_attachment_retriever_factory_called_with_indexed_refs(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    rid = _add_indexed_ref(db, cid)
+    inner = _FakeAttachmentRetriever()
+    svc = ChatService(db, FakeLLM(route="retrieve", grade="sufficient", answer="见[1]。"),
+                      _EmptyRetriever(), references=_Refs(db), attachment_retriever=lambda: inner)
+    list(svc.stream_answer(cid, "讲讲文件"))
+    assert inner.calls == [(cid, (rid,))]   # 工厂解析出的 retriever 被调用

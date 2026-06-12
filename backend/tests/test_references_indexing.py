@@ -54,6 +54,17 @@ def test_detach_cleans_attachment_vectors(tmp_path: Path):
     assert store.list_by({"reference_id": ref["id"]}) == []
 
 
+def test_detach_wrong_conversation_does_not_delete_vectors(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    store = FakeVectorStore()
+    svc = ReferenceService(db, embedder=FakeEmbedder(), attachment_store=store)
+    ref = svc.add_external(cid, _w(tmp_path, "big.md", "内容内容" * 100), TINY)
+    svc.detach(cid + 999, ref["id"])                      # 错误的会话 id
+    assert store.list_by({"reference_id": ref["id"]})     # 向量未被误删
+    svc.detach(cid, ref["id"])                            # 正确 → 删
+    assert store.list_by({"reference_id": ref["id"]}) == []
+
+
 def test_small_external_still_fulltext_no_indexing(tmp_path: Path):
     db, cid = _setup(tmp_path)
     store = FakeVectorStore()

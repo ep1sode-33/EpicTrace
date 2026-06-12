@@ -7,6 +7,7 @@ from sse_starlette.sse import EventSourceResponse
 from epictrace.api.deps import (
     get_db, get_llm, get_retriever, get_embedder, get_reranker, get_attachment_store,
 )
+from epictrace.api.routers.references import _Lazy
 from epictrace.db import Database
 from epictrace.models import Conversation, Message, Project
 from epictrace.retrieval.attachment import AttachmentRetriever
@@ -22,10 +23,13 @@ def _chat_service(request: Request, db: Database) -> ChatService:
     if llm is None:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "对话模型未配置:请在设置里填写 OpenAI-Compatible 端点")
-    attach = AttachmentRetriever(get_embedder(request), get_attachment_store(request),
-                                 get_reranker(request))
-    refs = ReferenceService(db, embedder=get_embedder(request),
-                            attachment_store=get_attachment_store(request))
+    # 工厂 + 惰性代理:只有当本轮真有活跃 indexed 引用(ChatService 调 attach())或外部大文件
+    # 真正走 indexed 分支(ReferenceService 用 embedder/store)时,才构造附件 Milvus/模型;
+    # 无附件的普通聊天不该急切起第二个 Milvus 客户端 / BGE-M3(见 macos-embedding-milvus-fork-order)。
+    attach = lambda: AttachmentRetriever(get_embedder(request), get_attachment_store(request),  # noqa: E731
+                                         get_reranker(request))
+    refs = ReferenceService(db, embedder=_Lazy(lambda: get_embedder(request)),
+                            attachment_store=_Lazy(lambda: get_attachment_store(request)))
     return ChatService(db, llm, get_retriever(request), references=refs, attachment_retriever=attach)
 
 
@@ -60,7 +64,10 @@ def delete_conversation(cid: int, request: Request, db: Database = Depends(get_d
     # 清理会话级临时附件向量(派生索引,随会话销毁;只清不重建)。
     store = getattr(request.app.state, "attachment_store", None)
     if store is not None:
-        store.delete({"conversation_id": cid})
+        try:
+            store.delete({"conversation_id": cid})
+        except Exception:  # noqa: BLE001 — 清理失败不应让删除请求 500;残留向量无害
+            pass
 
 
 @router.get("/conversations/{cid}/messages", response_model=list[MessageOut])
