@@ -24,4 +24,7 @@ class RetrievedChunk:
         )
 
     def key(self) -> tuple:
-        return (self.ingest_record_id, self.char_start, self.char_end)
+        # 含 reference_id:附件 chunk 的 ingest_record_id 恒为 0,不同引用的同偏移块(尤其每文件
+        # 首块都 char_start=0)否则会在 RRF 去重时撞键、互相吞掉。项目 chunk 的 reference_id 为 None,
+        # 行为不变。
+        return (self.ingest_record_id, self.reference_id, self.char_start, self.char_end)
