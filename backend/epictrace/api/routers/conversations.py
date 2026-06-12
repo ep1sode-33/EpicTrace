@@ -6,6 +6,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from epictrace.api.deps import (
     get_db, get_llm, get_retriever, get_embedder, get_reranker, get_attachment_store,
+    get_chat_model_factory, get_supports_tools,
 )
 from epictrace.api.routers.references import _Lazy
 from epictrace.db import Database
@@ -30,7 +31,10 @@ def _chat_service(request: Request, db: Database) -> ChatService:
                                          get_reranker(request))
     refs = ReferenceService(db, embedder=_Lazy(lambda: get_embedder(request)),
                             attachment_store=_Lazy(lambda: get_attachment_store(request)))
-    return ChatService(db, llm, get_retriever(request), references=refs, attachment_retriever=attach)
+    return ChatService(db, llm, get_retriever(request), references=refs,
+                       attachment_retriever=attach,
+                       chat_model_factory=get_chat_model_factory(request),
+                       supports_tools=get_supports_tools(request))
 
 
 @router.post("/projects/{project_id}/conversations", response_model=ConversationOut,
