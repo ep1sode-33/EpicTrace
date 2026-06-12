@@ -3,30 +3,34 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
-_PROBE_SYS = "你能调用工具。请调用 echo 工具,参数 x 填 'ping'。"
-_PROBE_USER = "调用 echo。"
+_PROBE_TOOL_NAME = "epictrace_probe_echo"
+_PROBE_SYS = (
+    f"你能调用工具。请调用 {_PROBE_TOOL_NAME} 工具,参数 x 填 'ping'。")
+_PROBE_USER = f"调用 {_PROBE_TOOL_NAME}。"
 
 
-@tool
-def _echo(x: str) -> str:
+@tool(_PROBE_TOOL_NAME)
+def _probe_echo(x: str) -> str:
     """Echo back x. (probe-only trivial tool)"""
     return x
 
 
 def probe_tool_calling(chat_model) -> bool:
     """绑一个 trivial 工具,让模型调它,检查回包含结构合法的 tool_call。
-    合法 → True;吐人话/坏结构/任何异常 → False(视为不支持,回退基础检索)。"""
+    合法 → True;吐人话/坏结构/调错工具/带 invalid_tool_calls/任何异常 → False。"""
     try:
-        bound = chat_model.bind_tools([_echo])
+        bound = chat_model.bind_tools([_probe_echo])
         msg = bound.invoke([SystemMessage(content=_PROBE_SYS),
                             HumanMessage(content=_PROBE_USER)])
     except Exception:  # noqa: BLE001 — 任何探测故障一律视为不支持
         return False
+    # 坏 JSON 时 langchain 把残件塞进 invalid_tool_calls;有任何这种残件 → 不算支持。
+    if getattr(msg, "invalid_tool_calls", None):
+        return False
     calls = getattr(msg, "tool_calls", None) or []
     for c in calls:
-        # 结构合法:有名字 + args 是 dict。坏 JSON 时 langchain 会塞 invalid_tool_calls
-        # 而非 tool_calls,故这里取不到 → False。
-        if c.get("name") and isinstance(c.get("args"), dict):
+        # 结构合法:名字必须正好是探测工具名(防"瞎调别的名字"误判) + args 是 dict。
+        if c.get("name") == _PROBE_TOOL_NAME and isinstance(c.get("args"), dict):
             return True
     return False
 

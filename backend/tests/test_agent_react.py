@@ -113,6 +113,21 @@ def test_malformed_then_empty_pool_signals_fallback():
     assert status == FALLBACK     # first round crash + empty pool → fallback to Plan 5
 
 
+def test_invalid_tool_calls_no_valid_empty_pool_signals_fallback():
+    # Model emits ONLY invalid_tool_calls (malformed attempt) and no valid tool_calls.
+    # This must NOT be treated as a clean no-tool stop ("direct"); it flows into the
+    # retry-once path, and with an empty pool the loop signals FALLBACK.
+    retr = _Retr([])
+    bad = AIMessage(content="", invalid_tool_calls=[
+        {"name": "search_project_library", "args": "{not json", "id": "1",
+         "error": "could not parse", "type": "invalid_tool_call"}])
+    model = FakeChatModel(script=[bad, bad, bad, bad])  # deterministic: retry also malformed
+    acc = ChunkAccumulator()
+    status = run_react_loop(model, _tools(retr), acc, "q", history=[])
+    assert status == FALLBACK
+    assert acc.chunks == []
+
+
 def test_malformed_then_nonempty_pool_force_answers():
     retr = _Retr([_proj_chunk("已搜到")])
 

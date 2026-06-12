@@ -17,7 +17,8 @@ LOOP_SYS = (
 
 
 def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: str,
-                   *, history: list[dict], max_rounds: int = 8) -> str:
+                   *, history: list[dict], max_rounds: int = 8,
+                   attachment_manifest: str = "") -> str:
     """跑 agent↔tools 循环,只攒池(chunk 从 ToolMessage.artifact 收割)。返回状态:
       "ok"      → 池里有 chunk(或正常停手),交给 GENERATE 作答;
       "direct"  → 全程未调工具且池空(寒暄)→ ChatService 走 direct 直答;
@@ -32,6 +33,11 @@ def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: s
         if rounds >= max_rounds:
             return {"messages": [AIMessage(content="")], "rounds": rounds}
         msg = bound.invoke(state["messages"])
+        # 模型想调工具但 JSON 坏了(langchain 塞进 invalid_tool_calls 而非 tool_calls)且
+        # 没有任何合法 tool_call → 抛错,流入"重试 1 次 → force-answer / FALLBACK"路;
+        # 绝不当成"干净停手/direct"。
+        if getattr(msg, "invalid_tool_calls", None) and not getattr(msg, "tool_calls", None):
+            raise ValueError("invalid_tool_calls without any valid tool_calls")
         return {"messages": [msg], "rounds": rounds + 1}
 
     def harvest(state: ReactState) -> ReactState:
@@ -46,9 +52,9 @@ def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: s
         return {}
 
     def route(state: ReactState) -> str:
+        # 轮数上限的强制停手只在 agent 节点判(撞顶→回空的无工具消息);route 只看最后一条
+        # 是否真要调工具。这样"最后一批被请求的工具"仍会被执行/收割,而非被悄悄丢弃。
         last = state["messages"][-1]
-        if state.get("rounds", 0) >= max_rounds:
-            return "end"
         if isinstance(last, AIMessage) and last.tool_calls:
             return "tools"
         return "end"
@@ -63,7 +69,11 @@ def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: s
     g.add_edge("harvest", "agent")
     graph = g.compile()
 
-    init = [SystemMessage(content=LOOP_SYS)]
+    # 把可读附件清单拼进循环系统提示,模型才知道有哪些 reference_id 可传给 read_attachment。
+    sys_text = LOOP_SYS
+    if attachment_manifest:
+        sys_text = f"{LOOP_SYS}\n\n可读附件清单(可用 read_attachment 按 reference_id 通读):\n{attachment_manifest}"
+    init = [SystemMessage(content=sys_text)]
     for h in history:
         # 复用历史轮次的纯文本上下文(role→LangChain 消息;assistant 文本用 AIMessage)。
         if h["role"] == "user":

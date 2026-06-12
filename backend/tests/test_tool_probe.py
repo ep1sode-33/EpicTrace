@@ -2,13 +2,17 @@ from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage
 
-from epictrace.agent.tool_probe import cached_supports_tools, probe_tool_calling
+from epictrace.agent.tool_probe import (
+    _PROBE_TOOL_NAME,
+    cached_supports_tools,
+    probe_tool_calling,
+)
 from tests.fakes import FakeChatModel
 
 
 def _tool_call_msg():
     return AIMessage(content="", tool_calls=[
-        {"name": "echo", "args": {"x": "hi"}, "id": "1", "type": "tool_call"}])
+        {"name": _PROBE_TOOL_NAME, "args": {"x": "hi"}, "id": "1", "type": "tool_call"}])
 
 
 def test_probe_true_on_valid_tool_call():
@@ -17,6 +21,23 @@ def test_probe_true_on_valid_tool_call():
 
 def test_probe_false_on_prose():
     assert probe_tool_calling(FakeChatModel(script=[AIMessage(content="just talking")])) is False
+
+
+def test_probe_false_on_wrong_tool_name():
+    # Model calls *some* tool but not the actual probe tool → reject (false positive guard).
+    msg = AIMessage(content="", tool_calls=[
+        {"name": "some_other_tool", "args": {"x": "hi"}, "id": "1", "type": "tool_call"}])
+    assert probe_tool_calling(FakeChatModel(script=[msg])) is False
+
+
+def test_probe_false_when_invalid_tool_calls_present():
+    # Even a valid-looking tool_call is rejected if the message also carries malformed attempts.
+    msg = AIMessage(
+        content="",
+        tool_calls=[{"name": _PROBE_TOOL_NAME, "args": {"x": "hi"}, "id": "1", "type": "tool_call"}],
+        invalid_tool_calls=[{"name": _PROBE_TOOL_NAME, "args": "{bad json", "id": "2",
+                             "error": "could not parse", "type": "invalid_tool_call"}])
+    assert probe_tool_calling(FakeChatModel(script=[msg])) is False
 
 
 def test_probe_false_on_exception():
