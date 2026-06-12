@@ -537,6 +537,8 @@ function Conversation({
   const [filesZoneSignal, setFilesZoneSignal] = useState(0);
   // 附加外部文件失败时的可关闭内联提示;null 表示无错误。
   const [attachError, setAttachError] = useState<string | null>(null);
+  // 正在附加(后端对大文件同步索引,较慢)时显示瞬态提示。
+  const [attaching, setAttaching] = useState(false);
   // 右侧「引用」侧栏开关(类 Claude Desktop 的 Context 面板)。默认收起。
   const [refSidebarOpen, setRefSidebarOpen] = useState(false);
   // 拖放覆盖层:在整个对话区拖动文件时显示半透明提示。
@@ -710,6 +712,7 @@ function Conversation({
   const attachExternal = useCallback(
     async (paths: string[]) => {
       const cid = await ensureConversation();
+      setAttaching(true);
       const failures: string[] = [];
       for (const p of paths) {
         try {
@@ -720,7 +723,9 @@ function Conversation({
           failures.push(`${name}(${e instanceof Error ? e.message : String(e)})`);
         }
       }
-      // 先呈现失败提示,再刷新引用列表——这样即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
+      // 先收起进行态,再呈现失败提示,最后刷新引用列表——
+      // 这样即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
+      setAttaching(false);
       setAttachError(failures.length ? `部分文件未能添加:${failures.join("；")}` : null);
       await refreshRefs(cid);
     },
@@ -962,6 +967,10 @@ function Conversation({
                 拖放文件到此处添加引用
               </span>
             </div>
+          )}
+
+          {inConversation && attaching && (
+            <p className="mx-auto w-full max-w-2xl px-6 text-xs text-muted-foreground">正在索引附件…</p>
           )}
 
           {inConversation && attachError && (

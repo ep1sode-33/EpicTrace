@@ -6,7 +6,8 @@ import { cn } from "@/lib/utils";
 const MODE_LABEL: Record<ConversationReference["mode"], string> = {
   fulltext: "全文已载入",
   focus: "已索引聚焦",
-  deferred: "待 Plan B(文件较大)",
+  indexed: "已索引检索",
+  deferred: "未能索引",
 };
 
 /**

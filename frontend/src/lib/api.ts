@@ -27,7 +27,7 @@ export interface LLMProfile {
 export interface ConversationReference {
   id: number; conversation_id: number; kind: "external" | "internal";
   display_name: string; source_path: string | null; ingest_record_id: number | null;
-  mode: "fulltext" | "focus" | "deferred"; text_chars: number; detached: boolean; created_at: string;
+  mode: "fulltext" | "focus" | "indexed" | "deferred"; text_chars: number; detached: boolean; created_at: string;
 }
 export interface Settings {
   configured: boolean;
