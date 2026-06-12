@@ -100,6 +100,10 @@ class ChatService:
                          if r["mode"] == "focus" and r.get("ingest_record_id")]
             indexed_ext_ids = [r["id"] for r in refs
                                if r["mode"] == "indexed" and r["kind"] == "external"]
+            # 已附加的外部文件名(全文注入 + 临时索引);告诉 LLM【资料】含这些附件内容,
+            # 否则它会一边总结一边说"没收到文件"。
+            attached_names = [r["display_name"] for r in refs
+                              if r["kind"] == "external" and r["mode"] in ("fulltext", "indexed")]
             graph = build_rag_graph(self._llm, self._retriever)
             state = graph.invoke({"project_id": self._project_id(conversation_id),
                                   "question": question, "query": question, "history": history,
@@ -119,7 +123,11 @@ class ChatService:
             # 多轮:系统提示 → 历史轮次 → 本轮。
             if chunks:
                 sys_prompt = GENERATE_SYS
-                user_content = f"问题:{question}\n\n【资料】\n{format_chunks(chunks)}"
+                note = ""
+                if attached_names:
+                    note = (f"(用户在本次对话附加了文件:{'、'.join(attached_names)};"
+                            f"下方【资料】已包含这些附件的相关内容,请据此作答,不要说未收到文件。)\n\n")
+                user_content = f"{note}问题:{question}\n\n【资料】\n{format_chunks(chunks)}"
             else:
                 sys_prompt = CHAT_SYS
                 user_content = question

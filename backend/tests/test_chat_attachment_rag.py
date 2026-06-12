@@ -40,6 +40,14 @@ def _add_indexed_ref(db, cid) -> int:
         s.add(ref); s.flush(); return ref.id
 
 
+def _add_fulltext_ref(db, cid, name="report.pdf") -> int:
+    with db.session() as s:
+        ref = ConversationReference(conversation_id=cid, kind="external", display_name=name,
+                                    source_path="/x/" + name, extracted_text="页表内容",
+                                    text_chars=4, mode="fulltext")
+        s.add(ref); s.flush(); return ref.id
+
+
 class _Refs:
     def __init__(self, db): self._db = db
     def list_active(self, cid):
@@ -58,6 +66,17 @@ def test_indexed_ref_pulls_attachment_chunks_and_cites_them(tmp_path: Path):
     cites = json.loads(next(e for e in events if e["event"] == "citations")["data"])
     assert cites and cites[0]["source_kind"] == "attachment" and cites[0]["reference_id"] == rid
     assert cites[0]["char_start"] == 5 and cites[0]["char_end"] == 11
+
+
+def test_prompt_names_attached_files(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    _add_fulltext_ref(db, cid, "report.pdf")
+    llm = FakeLLM(route="direct", answer="见资料[1]。")  # fulltext ref injects → chunks 非空
+    svc = ChatService(db, llm, _EmptyRetriever(), references=_Refs(db))
+    list(svc.stream_answer(cid, "这个文件讲了啥"))
+    sent = " ".join(m["content"] for m in llm.stream_messages[-1])
+    assert "report.pdf" in sent          # 提示里点名了附件
+    assert "附加" in sent                 # 且说明这是用户附加的文件
 
 
 def test_no_attachment_retriever_or_no_indexed_ref_is_noop(tmp_path: Path):
