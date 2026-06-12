@@ -27,20 +27,20 @@ class Api:
     def pick_folder(self) -> str | None:
         if self._window is None:
             return None
-        result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+        result = self._window.create_file_dialog(webview.FileDialog.FOLDER)
         return result[0] if result else None
 
     def pick_file(self) -> str | None:
         if self._window is None:
             return None
-        result = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False)
+        result = self._window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=False)
         return result[0] if result else None
 
     def pick_files(self) -> list[str]:
         """多选文件(对话附件用)。返回绝对路径列表;取消则空列表。"""
         if self._window is None:
             return []
-        result = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True)
+        result = self._window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True)
         return list(result) if result else []
 
     def reveal_in_finder(self, path: str) -> dict:
