@@ -907,7 +907,7 @@ git commit -m "$(printf 'feat(web): indexed mode label + indexing-in-progress hi
 ## 收尾
 - [ ] **全量后端**: `cd backend && .venv/bin/pytest -q`(期望全绿;slow 真模型默认跳过)
 - [ ] **前端构建**: `cd frontend && npm run build`
-- [ ] **代号扫描**: `grep -rniE "conflux" docs/superpowers backend/epictrace frontend/src shell`(应无)
+- [ ] **代号扫描**: 确认提交内容不含前身原型代号(grep 扫 docs/superpowers、backend/epictrace、frontend/src、shell)
 - [ ] **收尾**: superpowers:finishing-a-development-branch 合并/提 PR。
 
 ---
