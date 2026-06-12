@@ -61,7 +61,8 @@ def get_vector_store(request: Request):
 
 
 def get_attachment_store(request: Request):
-    """会话级临时附件向量库(attachment_chunks collection,与项目 chunks 同一 db、不同 collection)。
+    """会话级临时附件向量库(attachment_chunks)。**单独一个 milvus-lite 文件**——milvus-lite
+    对每个 db 文件持独占锁,不能和项目库共用一个文件(否则两个 MilvusClient 抢锁)。
     与 get_vector_store 同样保证"先暖 embedder+reranker 再起 Milvus"(macOS fork 段错误)。"""
     store = getattr(request.app.state, "attachment_store", None)
     if store is not None:
@@ -74,7 +75,7 @@ def get_attachment_store(request: Request):
             from epictrace.config import AppConfig
             from epictrace.vectorstore.milvus_lite import MilvusLiteStore, _ATTACHMENT_SCALARS
 
-            store = MilvusLiteStore(db_path=AppConfig().milvus_path, dim=1024,
+            store = MilvusLiteStore(db_path=AppConfig().attachment_milvus_path, dim=1024,
                                     collection="attachment_chunks", scalars=_ATTACHMENT_SCALARS)
             request.app.state.attachment_store = store
     return store

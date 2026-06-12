@@ -36,3 +36,9 @@ class AppConfig:
     @property
     def milvus_path(self) -> str:
         return str(self.data_dir / "epictrace_vectors.db")
+
+    @property
+    def attachment_milvus_path(self) -> str:
+        # 会话级临时附件向量,单独一个 milvus-lite 文件 —— milvus-lite 对每个 db 文件持独占锁,
+        # 不能让项目库与附件库共用一个文件(两个 MilvusClient 会抢锁)。临时、可弃,与永久库分开。
+        return str(self.data_dir / "epictrace_attachment_vectors.db")
