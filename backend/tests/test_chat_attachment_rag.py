@@ -106,3 +106,32 @@ def test_attachment_retriever_factory_called_with_indexed_refs(tmp_path: Path):
                       _EmptyRetriever(), references=_Refs(db), attachment_retriever=lambda: inner)
     list(svc.stream_answer(cid, "讲讲文件"))
     assert inner.calls == [(cid, (rid,))]   # 工厂解析出的 retriever 被调用
+
+
+class _ProjectRetriever:
+    """返回一个可识别的项目 chunk,用于断言"有外部附件时全局项目 RAG 被裁掉"。"""
+    def retrieve(self, *, project_id, query, **kwargs):
+        return [RetrievedChunk(text="项目课程内容TLB", ingest_record_id=99, project_id=project_id,
+                               char_start=0, char_end=8, source_type="folder_scan")]
+
+
+def test_external_attachment_suppresses_global_project_rag(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    rid = _add_indexed_ref(db, cid)
+    attach = _FakeAttachmentRetriever()
+    llm = FakeLLM(route="retrieve", grade="sufficient", answer="见附件[1]。")
+    svc = ChatService(db, llm, _ProjectRetriever(), references=_Refs(db), attachment_retriever=attach)
+    list(svc.stream_answer(cid, "这个文件讲了什么"))
+    sent = " ".join(m["content"] for m in llm.stream_messages[-1])
+    assert "附件相关片段" in sent          # 附件检索结果在
+    assert "项目课程内容TLB" not in sent   # 全局项目 RAG 被裁掉(不掺项目资料)
+    assert attach.calls == [(cid, (rid,))]
+
+
+def test_no_attachment_keeps_global_project_rag(tmp_path: Path):
+    db, cid = _setup(tmp_path)
+    llm = FakeLLM(route="retrieve", grade="sufficient", answer="答[1]。")
+    svc = ChatService(db, llm, _ProjectRetriever(), references=_Refs(db))
+    list(svc.stream_answer(cid, "TLB怎么算"))
+    sent = " ".join(m["content"] for m in llm.stream_messages[-1])
+    assert "项目课程内容TLB" in sent       # 无附件 → 项目 RAG 照常

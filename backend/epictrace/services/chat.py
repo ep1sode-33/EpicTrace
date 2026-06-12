@@ -104,19 +104,25 @@ class ChatService:
             # 否则它会一边总结一边说"没收到文件"。
             attached_names = [r["display_name"] for r in refs
                               if r["kind"] == "external" and r["mode"] in ("fulltext", "indexed")]
+            has_external = any(r["kind"] == "external" for r in refs)
             graph = build_rag_graph(self._llm, self._retriever)
             state = graph.invoke({"project_id": self._project_id(conversation_id),
                                   "question": question, "query": question, "history": history,
                                   "iterations": 0, "focus_ids": focus_ids})
-            # 全文引用恒在最前;其后接项目检索;再接附件临时 RAG 检索(有活跃 indexed 引用时)。
+            route = state.get("route", "retrieve")
+            # 有外部附件在场时,项目检索只保留"显式 pin 的内部文件"(focus,图内已 scope),
+            # 丢弃全局项目检索 —— 用户带了外部文件就聚焦在引用上(像 GPT 网页版),不掺全项目资料。
+            project_chunks = state.get("chunks", []) if (not has_external or focus_ids) else []
+            # 附件临时 RAG 检索(有活跃 indexed 引用、且本轮判为检索;direct 招呼不查)。
             attach_chunks = []
-            if indexed_ext_ids and self._attachment_retriever is not None:
+            if indexed_ext_ids and self._attachment_retriever is not None and route != "direct":
                 ar = (self._attachment_retriever()
                       if callable(self._attachment_retriever)
                       else self._attachment_retriever)
                 attach_chunks = ar.retrieve(
                     conversation_id=conversation_id, reference_ids=indexed_ext_ids, query=question)
-            chunks = [_ref_chunk(r) for r in fulltext_refs] + state.get("chunks", []) + attach_chunks
+            # 全文引用恒在最前;其后接(可能被裁掉全局的)项目检索;再接附件检索。
+            chunks = [_ref_chunk(r) for r in fulltext_refs] + project_chunks + attach_chunks
 
             yield {"event": "status", "data": "生成中"}
             # 有资料 → 带引用作答(GENERATE_SYS + 【资料】);无资料(direct 路由)→ 普通聊天作答。
