@@ -1,3 +1,5 @@
+from langchain_core.messages import AIMessage
+
 from epictrace.interfaces.embedding import EmbeddingProvider
 from epictrace.interfaces.vector_store import VectorStore
 from epictrace.retrieval.types import RetrievedChunk
@@ -128,3 +130,28 @@ class RaisingLLM:
     def stream(self, messages, **kwargs):
         raise self._exc
         yield  # pragma: no cover — 让它成为生成器
+
+
+class FakeChatModel:
+    """LangChain-shaped fake for ChatOpenAI.bind_tools(...).invoke(messages).
+
+    Returns scripted AIMessages in order (each call pops the next); after the
+    script is exhausted, returns `default`. `.bind_tools(tools)` records the
+    tools and returns self so ToolNode executes the real bound tools. Tracks
+    every invoke's messages for assertions."""
+
+    def __init__(self, *, script=None, default=None):
+        self._script = list(script or [])
+        self._default = default or AIMessage(content="假答案")
+        self.bound_tools = None
+        self.invocations: list[list] = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = list(tools)
+        return self
+
+    def invoke(self, messages, **kwargs):
+        self.invocations.append(list(messages))
+        if self._script:
+            return self._script.pop(0)
+        return self._default
