@@ -5,9 +5,12 @@ from collections.abc import Iterator
 
 from sqlalchemy import select
 
+from epictrace.agent.answer import stream_final_answer
 from epictrace.agent.citations import build_citations
 from epictrace.agent.graph import build_rag_graph
 from epictrace.agent.prompts import GENERATE_SYS, format_chunks
+from epictrace.agent.react import FALLBACK, run_react_loop
+from epictrace.agent.tools import ChunkAccumulator, build_tools
 from epictrace.db import Database
 from epictrace.models import Conversation, Message, _utcnow
 from epictrace.retrieval.types import RetrievedChunk
@@ -35,12 +38,17 @@ def _ref_chunk(r: dict) -> RetrievedChunk:
 
 class ChatService:
     def __init__(self, db: Database, llm, retriever, references=None,
-                 attachment_retriever=None) -> None:
+                 attachment_retriever=None, chat_model_factory=None,
+                 supports_tools=None) -> None:
         self._db = db
         self._llm = llm
         self._retriever = retriever
         self._references = references
         self._attachment_retriever = attachment_retriever
+        # agent 路注入点:chat_model_factory()->ChatOpenAI(或 FakeChatModel);
+        # supports_tools()->bool(探测缓存)。任一缺失/返回 False → 走 Plan 5 回退路。
+        self._chat_model_factory = chat_model_factory
+        self._supports_tools = supports_tools
 
     def stream_answer(self, conversation_id: int, question: str) -> Iterator[dict]:
         # 先读历史(本轮 user message 尚未落库,故不会把它算进历史),再落 user message。
@@ -91,6 +99,15 @@ class ChatService:
         is_first_user_turn = not any(m["role"] == "user" for m in history)
         # 首发用中性「思考中」:此刻还没判 route,direct 直答并不真检索,「检索中」会误导。
         yield {"event": "status", "data": "思考中"}
+        # ---- Agent 路(profile 探测=支持工具)----
+        if self._chat_model_factory is not None and self._supports_tools and self._supports_tools():
+            try:
+                produced = yield from self._run_agent_turn(conversation_id, question, history)
+                if produced:
+                    return
+                # produced=False → agent 路发回退信号(第一轮崩+池空),落到下方 Plan 5。
+            except Exception:  # noqa: BLE001 — agent 路任何意外 → 回退 Plan 5(安全带)
+                pass
         # 检索 + 生成全程兜异常:任一步抛错 → 发 error 事件并中止(不落半截 assistant 消息)。
         try:
             # 跑图到拿到最终 chunks(grade/rewrite 在图里),但生成改为这里流式。
@@ -163,6 +180,62 @@ class ChatService:
                 if is_first_user_turn and c.title == _DEFAULT_TITLE:
                     c.title = self._make_title(question)
         yield {"event": "done", "data": ""}
+
+    def _run_agent_turn(self, conversation_id: int, question: str,
+                        history: list[dict]) -> Iterator[dict]:
+        """Agent 路一轮:攒池(含小 fulltext 引用自动注入池)→ run_react_loop → 干净 GENERATE
+        + build_citations。返回 True=已产出并落库;返回 False=发回退信号(调用方走 Plan 5)。
+        以 generator-return 传布尔(`produced = yield from self._run_agent_turn(...)`)。"""
+        is_first_user_turn = not any(m["role"] == "user" for m in history)
+        refs = self._references.list_active(conversation_id) if self._references else []
+        fulltext_refs = [r for r in refs if r["mode"] == "fulltext"]
+        focus_ids = [r["ingest_record_id"] for r in refs
+                     if r["mode"] == "focus" and r.get("ingest_record_id")]
+        indexed_ext_ids = [r["id"] for r in refs
+                           if r["mode"] == "indexed" and r["kind"] == "external"]
+        attached_names = [r["display_name"] for r in refs
+                          if r["kind"] == "external" and r["mode"] in ("fulltext", "indexed")]
+        # read_attachment 的偏移基准:活跃外部引用的缓存 extracted_text。
+        reference_texts = {r["id"]: (r.get("extracted_text") or "")
+                           for r in refs if r["kind"] == "external" and r.get("extracted_text")}
+
+        accumulator = ChunkAccumulator()
+        # 小 fulltext 引用:既注入初始上下文(由 attached_names 提示),又入池保持可引用
+        # (镜像今天「自动注入 + 可引用」);恒在池最前。
+        accumulator.extend([_ref_chunk(r) for r in fulltext_refs])
+
+        tools = build_tools(
+            retriever=self._retriever, project_id=self._project_id(conversation_id),
+            focus_ids=focus_ids, attachment_retriever=self._attachment_retriever,
+            conversation_id=conversation_id, indexed_ext_ids=indexed_ext_ids,
+            reference_texts=reference_texts)
+
+        yield {"event": "status", "data": "检索中"}
+        chat_model = self._chat_model_factory()
+        status = run_react_loop(chat_model, tools, accumulator, question, history=history)
+        if status == FALLBACK:
+            return False  # noqa: B901 — 回退信号:调用方走 Plan 5
+
+        yield {"event": "status", "data": "生成中"}
+        pool = accumulator.chunks
+        answer = ""
+        for ev in stream_final_answer(self._llm, question, pool, history=history,
+                                      attached_names=attached_names):
+            if ev["event"] == "_answer":
+                answer = ev["data"]   # 内部事件:不转发给前端
+                continue
+            yield ev
+        citations = build_citations(answer, pool) if pool else []
+        with self._db.session() as s:
+            s.add(Message(conversation_id=conversation_id, role="assistant", content=answer,
+                          citations_json=json.dumps(citations, ensure_ascii=False)))
+            c = s.get(Conversation, conversation_id)
+            if c is not None:
+                c.updated_at = _utcnow()
+                if is_first_user_turn and c.title == _DEFAULT_TITLE:
+                    c.title = self._make_title(question)
+        yield {"event": "done", "data": ""}
+        return True
 
     def _delete_messages_after(self, conversation_id: int, keep_count: int) -> None:
         """保留按 id 升序的前 keep_count 条消息,删除其后的全部(重生成时清掉旧/失败 assistant 轮次)。"""
