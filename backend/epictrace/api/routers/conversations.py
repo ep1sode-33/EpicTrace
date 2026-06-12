@@ -4,14 +4,29 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sse_starlette.sse import EventSourceResponse
 
-from epictrace.api.deps import get_db, get_llm, get_retriever
+from epictrace.api.deps import (
+    get_db, get_llm, get_retriever, get_embedder, get_reranker, get_attachment_store,
+)
 from epictrace.db import Database
 from epictrace.models import Conversation, Message, Project
+from epictrace.retrieval.attachment import AttachmentRetriever
 from epictrace.schemas import ConversationCreate, ConversationOut, MessageCreate, MessageOut
 from epictrace.services.chat import ChatService
 from epictrace.services.references import ReferenceService
 
 router = APIRouter(tags=["conversations"])  # /api 由 app 工厂统一挂载
+
+
+def _chat_service(request: Request, db: Database) -> ChatService:
+    llm = get_llm(request)
+    if llm is None:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "对话模型未配置:请在设置里填写 OpenAI-Compatible 端点")
+    attach = AttachmentRetriever(get_embedder(request), get_attachment_store(request),
+                                 get_reranker(request))
+    refs = ReferenceService(db, embedder=get_embedder(request),
+                            attachment_store=get_attachment_store(request))
+    return ChatService(db, llm, get_retriever(request), references=refs, attachment_retriever=attach)
 
 
 @router.post("/projects/{project_id}/conversations", response_model=ConversationOut,
@@ -36,12 +51,16 @@ def list_conversations(project_id: int, db: Database = Depends(get_db)):
 
 
 @router.delete("/conversations/{cid}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_conversation(cid: int, db: Database = Depends(get_db)):
+def delete_conversation(cid: int, request: Request, db: Database = Depends(get_db)):
     with db.session() as s:
         c = s.get(Conversation, cid)
         if c is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
         s.delete(c)  # messages 经 cascade="all, delete-orphan" 一并删除
+    # 清理会话级临时附件向量(派生索引,随会话销毁;只清不重建)。
+    store = getattr(request.app.state, "attachment_store", None)
+    if store is not None:
+        store.delete({"conversation_id": cid})
 
 
 @router.get("/conversations/{cid}/messages", response_model=list[MessageOut])
@@ -60,13 +79,7 @@ def send_message(cid: int, payload: MessageCreate, request: Request, db: Databas
     with db.session() as s:
         if s.get(Conversation, cid) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
-    llm = get_llm(request)
-    if llm is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "对话模型未配置:请在设置里填写 OpenAI-Compatible 端点",
-        )
-    svc = ChatService(db, llm, get_retriever(request), references=ReferenceService(db))
+    svc = _chat_service(request, db)
 
     def gen():
         for e in svc.stream_answer(cid, payload.content):
@@ -82,18 +95,12 @@ def edit_message(cid: int, mid: int, payload: MessageCreate, request: Request,
     with db.session() as s:
         if s.get(Conversation, cid) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
-    llm = get_llm(request)
-    if llm is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "对话模型未配置:请在设置里填写 OpenAI-Compatible 端点",
-        )
+    svc = _chat_service(request, db)
     # 目标须是本会话内的一条 user 消息;否则 404(不存在 / 是 assistant / 属别的会话)。
     with db.session() as s:
         m = s.get(Message, mid)
         if m is None or m.conversation_id != cid or m.role != "user":
             raise HTTPException(status.HTTP_404_NOT_FOUND, "editable user message not found")
-    svc = ChatService(db, llm, get_retriever(request), references=ReferenceService(db))
 
     def gen():
         for e in svc.stream_edit(cid, mid, payload.content):
@@ -108,13 +115,7 @@ def regenerate_message(cid: int, request: Request, db: Database = Depends(get_db
     with db.session() as s:
         if s.get(Conversation, cid) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
-    llm = get_llm(request)
-    if llm is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "对话模型未配置:请在设置里填写 OpenAI-Compatible 端点",
-        )
-    svc = ChatService(db, llm, get_retriever(request), references=ReferenceService(db))
+    svc = _chat_service(request, db)
 
     def gen():
         for e in svc.stream_regenerate(cid):

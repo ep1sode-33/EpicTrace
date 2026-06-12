@@ -60,6 +60,26 @@ def get_vector_store(request: Request):
     return store
 
 
+def get_attachment_store(request: Request):
+    """会话级临时附件向量库(attachment_chunks collection,与项目 chunks 同一 db、不同 collection)。
+    与 get_vector_store 同样保证"先暖 embedder+reranker 再起 Milvus"(macOS fork 段错误)。"""
+    store = getattr(request.app.state, "attachment_store", None)
+    if store is not None:
+        return store
+    with _vector_store_lock:
+        store = request.app.state.attachment_store
+        if store is None:
+            get_embedder(request).warmup()
+            get_reranker(request).warmup()
+            from epictrace.config import AppConfig
+            from epictrace.vectorstore.milvus_lite import MilvusLiteStore, _ATTACHMENT_SCALARS
+
+            store = MilvusLiteStore(db_path=AppConfig().milvus_path, dim=1024,
+                                    collection="attachment_chunks", scalars=_ATTACHMENT_SCALARS)
+            request.app.state.attachment_store = store
+    return store
+
+
 def get_llm(request: Request):
     """对话 LLM:优先用注入的 app.state.llm;否则按 SettingsService 判断是否「已配置」——
     存在一个活动 Profile(is_configured)就用其 base_url/key/model 构造 OpenAICompatLLM 并缓存,
