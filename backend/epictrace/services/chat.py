@@ -210,21 +210,22 @@ class ChatService:
         # read_attachment 的偏移基准:活跃外部引用的缓存 extracted_text。
         reference_texts = {r["id"]: (r.get("extracted_text") or "")
                            for r in refs if r["kind"] == "external" and r.get("extracted_text")}
-        # 可读附件清单:把活跃 indexed 外部引用的 id+display_name 告诉模型,它才能调 read_attachment。
+        fulltext_ids = [r["id"] for r in fulltext_refs]
+        # 可读附件清单:把所有可读外部引用(fulltext 与 indexed)的 id+display_name 告诉模型,
+        # 它才知道可以调 read_attachment "打开"哪些附件。
         manifest = "\n".join(
             f"[id={r['id']}] {r['display_name']}"
-            for r in refs if r["mode"] == "indexed" and r["kind"] == "external")
+            for r in refs if r["kind"] == "external" and r["mode"] in ("fulltext", "indexed"))
 
+        # 不再把 fulltext 自动塞进池:小附件改由 read_attachment 工具按需打开,由模型自己决定
+        # 是否调用 —— 这样纯寒暄/无关问题时池保持为空,必要性门控触发 direct 直答(不强行据资料)。
         accumulator = ChunkAccumulator()
-        # 小 fulltext 引用:既注入初始上下文(由 attached_names 提示),又入池保持可引用
-        # (镜像今天「自动注入 + 可引用」);恒在池最前。
-        accumulator.extend([_ref_chunk(r) for r in fulltext_refs])
 
         tools = build_tools(
             retriever=self._retriever, project_id=self._project_id(conversation_id),
             focus_ids=focus_ids, attachment_retriever=self._attachment_retriever,
             conversation_id=conversation_id, indexed_ext_ids=indexed_ext_ids,
-            reference_texts=reference_texts)
+            reference_texts=reference_texts, fulltext_ids=fulltext_ids)
 
         # ---- COLLECT 段(未流式;抛错可向上冒泡 → _run_turn 安全带回退 Plan 5)----
         yield {"event": "status", "data": "检索中"}

@@ -80,15 +80,51 @@ def test_no_factory_falls_back_to_plan5(tmp_path: Path):
     assert "项目TLB片段" in sent
 
 
-def test_fulltext_ref_injected_and_cited_on_agent_path(tmp_path: Path):
+def test_fulltext_ref_greeting_no_toolcall_is_ungrounded(tmp_path: Path):
+    """NEW CONTRACT (was test_fulltext_ref_injected_and_cited_on_agent_path): a small
+    fulltext attachment is no longer auto-seeded into the pool — it's reachable only via the
+    read_attachment tool. So if the model calls NO tools (e.g. a greeting), the pool stays
+    EMPTY → the necessity gate fires → a DIRECT chat answer with NO citation and NO 【资料】
+    framing (ChatGPT-like: the model decides whether to open the file). The fulltext id is
+    still listed in the readable-attachment manifest so the model COULD open it."""
     db, cid = _setup(tmp_path)
     with db.session() as s:
         ref = ConversationReference(conversation_id=cid, kind="external", display_name="report.pdf",
                                     source_path="/x/report.pdf", extracted_text="页表全文内容",
                                     text_chars=6, mode="fulltext")
         s.add(ref); s.flush(); rid = ref.id
-    # agent makes NO tool calls (fulltext already in pool); final GENERATE cites [1].
+    # agent makes NO tool calls (greeting) → pool empty → direct/ungrounded answer.
     chat_model = FakeChatModel(script=[AIMessage(content="不需要搜索")])
+    gen_llm = FakeLLM(answer="你好,有什么可以帮你?")
+    svc = ChatService(db, gen_llm, _EmptyRetriever(), references=_Refs(db),
+                      chat_model_factory=lambda: chat_model, supports_tools=lambda: True)
+    events = list(svc.stream_answer(cid, "你好"))
+    cites = json.loads(next(e for e in events if e["event"] == "citations")["data"])
+    assert cites == []                                  # ungrounded → no citation
+    # direct chat: CHAT_SYS, no 【资料】 framing, the fulltext text is NOT injected.
+    sent_msgs = gen_llm.stream_messages[-1]
+    assert sent_msgs[0]["content"] == "你是有帮助的助手,用中文简洁作答。"
+    sent = " ".join(m["content"] for m in sent_msgs)
+    assert "【资料】" not in sent and "页表全文内容" not in sent
+    # but the fulltext id IS advertised to the model as a readable attachment.
+    loop_sys = chat_model.invocations[0][0].content
+    assert f"id={rid}" in loop_sys and "report.pdf" in loop_sys
+
+
+def test_fulltext_ref_read_via_tool_lands_in_pool_and_cited(tmp_path: Path):
+    """When the model DOES choose to open the fulltext file via read_attachment, the WHOLE
+    file content lands in the pool and the final GENERATE answer cites it [1] (whole-doc
+    attachment reference)."""
+    db, cid = _setup(tmp_path)
+    with db.session() as s:
+        ref = ConversationReference(conversation_id=cid, kind="external", display_name="report.pdf",
+                                    source_path="/x/report.pdf", extracted_text="页表全文内容",
+                                    text_chars=6, mode="fulltext")
+        s.add(ref); s.flush(); rid = ref.id
+    chat_model = FakeChatModel(script=[
+        AIMessage(content="", tool_calls=[_call("read_attachment", {"reference_id": rid})]),
+        AIMessage(content="读完了"),
+    ])
     gen_llm = FakeLLM(answer="见附件[1]。")
     svc = ChatService(db, gen_llm, _EmptyRetriever(), references=_Refs(db),
                       chat_model_factory=lambda: chat_model, supports_tools=lambda: True)

@@ -55,6 +55,35 @@ def test_attachment_tools_only_when_indexed_refs():
         "search_project_library", "search_attachment", "read_attachment"}
 
 
+def test_read_attachment_exposed_for_fulltext_only_no_search():
+    """A fulltext ref (NOT indexed) is readable, so read_attachment must be exposed even
+    with no indexed refs. search_attachment stays gated on indexed_ext_ids (fulltext docs
+    are not embedded → semantic search can't cover them)."""
+    tools = build_tools(retriever=_ProjRetriever(), project_id=3, focus_ids=[],
+                        attachment_retriever=_AttachRetriever(), conversation_id=1,
+                        indexed_ext_ids=[], reference_texts={9: "小文件全文"},
+                        fulltext_ids=[9])
+    assert {t.name for t in tools} == {"search_project_library", "read_attachment"}
+
+
+def test_read_attachment_fulltext_returns_whole_doc_in_one_chunk():
+    """read_attachment on a fulltext ref returns the ENTIRE extracted_text as one chunk
+    (char_start=0, char_end=len, done=True), ignoring cursor — so 'summarize the whole
+    file' is one-shot and pages are never needed for small fulltext docs."""
+    text = "页表内容" * 500   # longer than the paging window, must NOT be paged
+    tools = build_tools(retriever=_ProjRetriever(), project_id=3, focus_ids=[],
+                        attachment_retriever=_AttachRetriever(), conversation_id=1,
+                        indexed_ext_ids=[], reference_texts={9: text}, fulltext_ids=[9])
+    t = {x.name: x for x in tools}["read_attachment"]
+    msg = t.invoke({"name": "read_attachment", "args": {"reference_id": 9, "cursor": 0},
+                    "id": "c1", "type": "tool_call"})
+    chunk = msg.artifact[0]
+    assert chunk.char_start == 0 and chunk.char_end == len(text)   # whole-doc offsets
+    assert chunk.text == text                                      # full content captured
+    assert chunk.source_kind == "attachment" and chunk.reference_id == 9
+    assert "done=True" in msg.content                              # one-shot, no more pages
+
+
 def test_search_attachment_filters_by_indexed_refs():
     ar = _AttachRetriever()
     tools = build_tools(retriever=_ProjRetriever(), project_id=3, focus_ids=[],
