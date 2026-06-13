@@ -118,3 +118,43 @@ def get_retriever(request: Request):
         get_vector_store(request),
         get_reranker(request),
     )
+
+
+def _active_profile(request: Request) -> dict | None:
+    """活动 Profile 的完整字典(含 id/base_url/api_key/model)——agent 路探测 + 构造用。
+    用 app.state.config(测试隔离),无活动 Profile → None。"""
+    from epictrace.config import AppConfig
+    from epictrace.services.settings import SettingsService
+
+    config = getattr(request.app.state, "config", None) or AppConfig()
+    return SettingsService(config).get_active_profile()
+
+
+def get_chat_model_factory(request: Request):
+    """返回一个 ()->ChatOpenAI 工厂(基于活动 Profile),供 ChatService 的 agent 路懒构造;
+    无活动 Profile → None(ChatService 据此只走 Plan 5)。"""
+    profile = _active_profile(request)
+    if profile is None:
+        return None
+    from epictrace.agent.chat_model import make_chat_model
+
+    return lambda: make_chat_model(profile)
+
+
+def get_supports_tools(request: Request):
+    """返回 ()->bool:活动 Profile 是否支持工具调用(探测结果缓存在 app.state)。
+    无活动 Profile / 探测失败 → 视为不支持(走 Plan 5)。"""
+    profile = _active_profile(request)
+    if profile is None:
+        return lambda: False
+    from epictrace.agent.chat_model import make_chat_model
+    from epictrace.agent.tool_probe import cached_supports_tools
+
+    def supports() -> bool:
+        try:
+            return cached_supports_tools(
+                request.app.state, profile, lambda p: make_chat_model(p))
+        except Exception:  # noqa: BLE001 — 探测/构造任何故障 → 不支持
+            return False
+
+    return supports

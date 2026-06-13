@@ -20,6 +20,7 @@ dependencies = [
   "jieba",
   "rank_bm25",
   "langgraph",
+  "langchain-openai",
   "sse-starlette",
 ]
 
