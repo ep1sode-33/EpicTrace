@@ -19,7 +19,10 @@ _DEFAULT_TITLE = "新对话"
 _TITLE_MAX = 30
 # 直答路径(图判定 route=direct,无 chunk):像普通聊天助手作答,不带【资料】、不产生引用。
 CHAT_SYS = "你是有帮助的助手,用中文简洁作答。"
-TITLE_SYS = "给这段对话起一个不超过 12 字的简短中文标题,只回标题本身。"
+TITLE_SYS = (
+    "你是对话标题生成器。为下面这段问答起一个不超过 12 字的简短中文标题,"
+    "概括它们在聊什么。只输出标题本身,不要回答问题、不要加引号、不要解释。"
+)
 
 
 def _ref_chunk(r: dict) -> RetrievedChunk:
@@ -186,7 +189,7 @@ class ChatService:
             if c is not None:
                 c.updated_at = _utcnow()
                 if is_first_user_turn and c.title == _DEFAULT_TITLE:
-                    c.title = self._make_title(question)
+                    c.title = self._make_title(question, answer)
         yield {"event": "done", "data": ""}
 
     def _run_agent_turn(self, conversation_id: int, question: str,
@@ -257,7 +260,7 @@ class ChatService:
                 if c is not None:
                     c.updated_at = _utcnow()
                     if is_first_user_turn and c.title == _DEFAULT_TITLE:
-                        c.title = self._make_title(question)
+                        c.title = self._make_title(question, answer)
             yield {"event": "done", "data": ""}
             return True
         except Exception:  # noqa: BLE001 — ANSWER 段故障
@@ -277,13 +280,14 @@ class ChatService:
             for m in rows[keep_count:]:
                 s.delete(m)
 
-    def _make_title(self, question: str) -> str:
-        """首轮自动命名:一次廉价 LLM 调用产出简短标题;失败/为空 → 回退到问题首段。"""
+    def _make_title(self, question: str, answer: str) -> str:
+        """首轮自动命名:用『问题 + 首轮答案』做一次廉价 LLM 调用产出简短标题;
+        失败/为空 → 回退到问题首段。答案截断到 500 字,避免标题调用吃满上下文。"""
         fallback = question[:20]
         try:
             title = self._llm.complete([
                 {"role": "system", "content": TITLE_SYS},
-                {"role": "user", "content": question},
+                {"role": "user", "content": f"问题:{question}\n回答:{answer[:500]}"},
             ]).strip().strip("\"'“”‘’ ")
         except Exception:  # noqa: BLE001 — 标题失败不该影响主回答
             return fallback
