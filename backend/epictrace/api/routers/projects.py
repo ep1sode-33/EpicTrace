@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from epictrace.api.deps import get_db, get_embedder, get_vector_store
 from epictrace.db import Database
-from epictrace.schemas import IndexStatusOut, ProjectCreate, ProjectOut, ScanResultOut
+from epictrace.schemas import IndexStatusOut, ProjectCreate, ProjectOut, RenameIn, ScanResultOut
 from epictrace.services.index import IndexService
 from epictrace.services.projects import ProjectService
 from epictrace.services.scan import ScanService
@@ -50,6 +50,20 @@ def create_project(payload: ProjectCreate, db: Database = Depends(get_db)) -> Pr
 @router.get("", response_model=list[ProjectOut])
 def list_projects(db: Database = Depends(get_db)) -> list[ProjectOut]:
     return [ProjectOut.model_validate(p) for p in ProjectService(db).list()]
+
+
+@router.patch("/{project_id}", response_model=ProjectOut)
+def rename_project(project_id: int, payload: RenameIn, db: Database = Depends(get_db)) -> ProjectOut:
+    # 仅改显示标题:去首尾空白 → 非空校验 → 钳到 _TITLE_MAX;绝不触碰 folder_path / 磁盘。
+    from epictrace.services.chat import _TITLE_MAX
+
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="title must not be empty")
+    proj = ProjectService(db).rename(project_id, title[:_TITLE_MAX])
+    if proj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project not found")
+    return ProjectOut.model_validate(proj)
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_200_OK)

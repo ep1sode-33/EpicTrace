@@ -64,3 +64,43 @@ def test_rename_conversation_clamps_maxlen(client, tmp_path):
 
 def test_rename_unknown_conversation_404(client):
     assert client.patch("/api/conversations/999999", json={"title": "x"}).status_code == 404
+
+
+# ---- project rename ----
+
+def test_rename_project_updates_title(client, tmp_path):
+    folder = str(tmp_path / "P")
+    pid = client.post("/api/projects", json={"title": "P", "folder_path": folder}).json()["id"]
+    resp = client.patch(f"/api/projects/{pid}", json={"title": "重命名后的项目"})
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "重命名后的项目"
+    assert resp.json()["folder_path"] == folder   # 路径不变
+
+
+def test_rename_project_keeps_folder_path_unchanged(client, tmp_path):
+    folder = str(tmp_path / "P")
+    pid = client.post("/api/projects", json={"title": "P", "folder_path": folder}).json()["id"]
+    client.patch(f"/api/projects/{pid}", json={"title": "新名字"})
+    listed = client.get("/api/projects").json()
+    assert listed[0]["title"] == "新名字"
+    assert listed[0]["folder_path"] == folder      # 磁盘路径一字未改
+    assert Path(folder).exists()                    # 文件夹仍在原处
+
+
+def test_rename_project_trims_and_rejects_empty(client, tmp_path):
+    folder = str(tmp_path / "P")
+    pid = client.post("/api/projects", json={"title": "P", "folder_path": folder}).json()["id"]
+    assert client.patch(f"/api/projects/{pid}", json={"title": "  整理  "}).json()["title"] == "整理"
+    assert client.patch(f"/api/projects/{pid}", json={"title": "   "}).status_code == 400
+
+
+def test_rename_project_clamps_maxlen(client, tmp_path):
+    folder = str(tmp_path / "P")
+    pid = client.post("/api/projects", json={"title": "P", "folder_path": folder}).json()["id"]
+    resp = client.patch(f"/api/projects/{pid}", json={"title": "项" * 100})
+    assert resp.status_code == 200
+    assert len(resp.json()["title"]) == 30
+
+
+def test_rename_unknown_project_404(client):
+    assert client.patch("/api/projects/999999", json={"title": "x"}).status_code == 404

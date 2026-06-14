@@ -30,6 +30,19 @@ class ProjectService:
                 s.expunge(r)
             return list(rows)
 
+    def rename(self, project_id: int, title: str) -> Project | None:
+        """仅改显示标题(绝不动 folder_path / 磁盘文件夹)。项目不存在则返回 None。
+        标题的 trim / 非空 / 钳长由调用方(路由)负责;本方法只写 title。"""
+        with self._db.session() as s:
+            proj = s.get(Project, project_id)
+            if proj is None:
+                return None
+            proj.title = title
+            s.flush()
+            s.refresh(proj)
+            s.expunge(proj)
+            return proj
+
     def delete(self, project_id: int, delete_folder: bool = False) -> str | None:
         """删除项目 DB 行(IngestRecord 随 cascade 一并删除)。
 
