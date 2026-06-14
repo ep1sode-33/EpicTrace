@@ -24,6 +24,9 @@ class AppConfig:
     # 预留:agent / chat / caption 各自端点+key+模型(后续 Plan 用)
     agent_llm: LLMRoleConfig = field(default_factory=LLMRoleConfig)
     chat_llm: LLMRoleConfig = field(default_factory=LLMRoleConfig)
+    # 高质量提取(MinerU):模型源 + 子进程超时(秒)。
+    model_source: str = "modelscope"
+    extraction_timeout: int = 600
 
     @property
     def db_path(self) -> Path:
