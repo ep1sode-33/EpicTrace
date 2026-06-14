@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   ChevronRight,
   FolderClosed,
   MoreHorizontal,
+  Pencil,
   PenLine,
   Plus,
   RefreshCw,
@@ -17,6 +18,59 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+
+/**
+ * 行内重命名输入框:受控、挂载即聚焦并全选;Enter / 失焦提交,Esc 取消。
+ * 是否真正发请求(空 / 未变 → 不发)由父级回调决定;本组件只负责编辑交互。
+ */
+function InlineRename({
+  initial,
+  onSubmit,
+  onCancel,
+  className,
+}: {
+  initial: string;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+  className?: string;
+}) {
+  const [value, setValue] = useState(initial);
+  // 用 ref 防止「失焦提交」与「Enter/Esc 已结束编辑」重复触发。
+  const doneRef = useRef(false);
+  const submit = () => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    onSubmit(value);
+  };
+  const cancel = () => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    onCancel();
+  };
+  return (
+    <input
+      autoFocus
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onFocus={(e) => e.currentTarget.select()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          submit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          cancel();
+        }
+      }}
+      onBlur={submit}
+      onClick={(e) => e.stopPropagation()}
+      className={cn(
+        "min-w-0 flex-1 rounded-md border border-ring/60 bg-background px-1.5 py-0.5 text-sm text-foreground outline-none",
+        className,
+      )}
+    />
+  );
+}
 
 /**
  * 统一的「项目 → 对话」树(Codex/ChatGPT 式)。
@@ -45,6 +99,8 @@ export function ProjectSidebar({
   onCreateProject,
   onDeleteProject,
   onReindexProject,
+  onRenameProject,
+  onRenameConversation,
 }: {
   projects: Project[];
   selectedProjectId: number | null;
@@ -71,6 +127,10 @@ export function ProjectSidebar({
   onDeleteProject: (project: Project) => void;
   /** 用户在某个项目行选择「重建索引」时调用:父级确认 + 触发重建,并跳到入库页看进度。 */
   onReindexProject: (project: Project) => void;
+  /** 重命名项目(仅显示名):行内编辑提交时调用。 */
+  onRenameProject: (project: Project, title: string) => void;
+  /** 重命名对话:行内编辑提交时调用。 */
+  onRenameConversation: (conversation: Conversation, title: string) => void;
 }) {
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-border/70 bg-sidebar">
@@ -121,6 +181,8 @@ export function ProjectSidebar({
                 onDeleteConversation={onDeleteConversation}
                 onDeleteProject={onDeleteProject}
                 onReindexProject={onReindexProject}
+                onRenameProject={onRenameProject}
+                onRenameConversation={onRenameConversation}
               />
             ))}
           </ul>
@@ -170,6 +232,8 @@ function ProjectNode({
   onDeleteConversation,
   onDeleteProject,
   onReindexProject,
+  onRenameProject,
+  onRenameConversation,
 }: {
   project: Project;
   selected: boolean;
@@ -185,9 +249,12 @@ function ProjectNode({
   onDeleteConversation: (conversation: Conversation) => void;
   onDeleteProject: (project: Project) => void;
   onReindexProject: (project: Project) => void;
+  onRenameProject: (project: Project, title: string) => void;
+  onRenameConversation: (conversation: Conversation, title: string) => void;
 }) {
   // 菜单打开时让行内操作保持可见(否则鼠标移开行后会随 hover 消失)。
   const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   return (
     <li>
@@ -211,30 +278,45 @@ function ProjectNode({
         </button>
 
         {/* 主点击区:选中并展开该项目。右侧留出空间给行内操作,避免按钮套按钮。 */}
-        <button
-          type="button"
-          aria-current={selected ? "true" : undefined}
-          onClick={() => onSelectProject(project)}
-          className="flex min-w-0 flex-1 items-center gap-2 py-2 pr-16 text-left outline-none"
-        >
-          <FolderClosed
-            className={cn(
-              "size-4 shrink-0 transition-colors",
-              selected
-                ? "text-foreground"
-                : "text-muted-foreground group-hover/row:text-foreground",
-            )}
-            strokeWidth={selected ? 2.25 : 2}
-          />
-          <span
-            className={cn(
-              "truncate font-medium",
-              selected && "text-foreground",
-            )}
+        {editing ? (
+          <div className="flex min-w-0 flex-1 items-center gap-2 py-2 pr-16">
+            <FolderClosed className="size-4 shrink-0 text-foreground" strokeWidth={2.25} />
+            <InlineRename
+              initial={project.title}
+              onSubmit={(v) => {
+                setEditing(false);
+                onRenameProject(project, v);
+              }}
+              onCancel={() => setEditing(false)}
+            />
+          </div>
+        ) : (
+          <button
+            type="button"
+            aria-current={selected ? "true" : undefined}
+            onClick={() => onSelectProject(project)}
+            onDoubleClick={() => setEditing(true)}
+            className="flex min-w-0 flex-1 items-center gap-2 py-2 pr-16 text-left outline-none"
           >
-            {project.title}
-          </span>
-        </button>
+            <FolderClosed
+              className={cn(
+                "size-4 shrink-0 transition-colors",
+                selected
+                  ? "text-foreground"
+                  : "text-muted-foreground group-hover/row:text-foreground",
+              )}
+              strokeWidth={selected ? 2.25 : 2}
+            />
+            <span
+              className={cn(
+                "truncate font-medium",
+                selected && "text-foreground",
+              )}
+            >
+              {project.title}
+            </span>
+          </button>
+        )}
 
         {/* 行内操作:与主按钮并列(绝对定位、不嵌套)。默认隐形,hover/聚焦/菜单打开时显现。 */}
         <div
@@ -270,6 +352,10 @@ function ProjectNode({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" sideOffset={4}>
+              <DropdownMenuItem onSelect={() => setEditing(true)}>
+                <Pencil />
+                重命名
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => onReindexProject(project)}>
                 <RefreshCw />
                 重建索引
@@ -296,6 +382,7 @@ function ProjectNode({
             selectedConversationId={selectedConversationId}
             onSelectConversation={onSelectConversation}
             onDeleteConversation={onDeleteConversation}
+            onRenameConversation={onRenameConversation}
           />
         </div>
       )}
@@ -315,6 +402,7 @@ function ChatChildren({
   selectedConversationId,
   onSelectConversation,
   onDeleteConversation,
+  onRenameConversation,
 }: {
   conversations: Conversation[] | undefined;
   loading: boolean;
@@ -322,6 +410,7 @@ function ChatChildren({
   selectedConversationId: number | null;
   onSelectConversation: (conversation: Conversation) => void;
   onDeleteConversation: (conversation: Conversation) => void;
+  onRenameConversation: (conversation: Conversation, title: string) => void;
 }) {
   // 首次展开尚未拉到数据(且在加载):骨架。
   if (loading && conversations === undefined) {
@@ -361,6 +450,7 @@ function ChatChildren({
             active={c.id === selectedConversationId}
             onSelect={onSelectConversation}
             onDelete={onDeleteConversation}
+            onRename={onRenameConversation}
           />
         ))
       )}
@@ -374,13 +464,16 @@ function ChatRow({
   active,
   onSelect,
   onDelete,
+  onRename,
 }: {
   conversation: Conversation;
   active: boolean;
   onSelect: (conversation: Conversation) => void;
   onDelete: (conversation: Conversation) => void;
+  onRename: (conversation: Conversation, title: string) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   return (
     <li>
@@ -390,14 +483,28 @@ function ChatRow({
           conversationRowClass(active),
         )}
       >
-        <button
-          type="button"
-          aria-current={active ? "true" : undefined}
-          onClick={() => onSelect(conversation)}
-          className="flex min-w-0 flex-1 items-center px-2.5 py-1.5 pr-8 text-left outline-none"
-        >
-          <span className="truncate">{conversation.title}</span>
-        </button>
+        {editing ? (
+          <div className="flex min-w-0 flex-1 items-center px-2.5 py-1.5 pr-8">
+            <InlineRename
+              initial={conversation.title}
+              onSubmit={(v) => {
+                setEditing(false);
+                onRename(conversation, v);
+              }}
+              onCancel={() => setEditing(false)}
+            />
+          </div>
+        ) : (
+          <button
+            type="button"
+            aria-current={active ? "true" : undefined}
+            onClick={() => onSelect(conversation)}
+            onDoubleClick={() => setEditing(true)}
+            className="flex min-w-0 flex-1 items-center px-2.5 py-1.5 pr-8 text-left outline-none"
+          >
+            <span className="truncate">{conversation.title}</span>
+          </button>
+        )}
 
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
@@ -417,6 +524,10 @@ function ChatRow({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" sideOffset={4}>
+            <DropdownMenuItem onSelect={() => setEditing(true)}>
+              <Pencil />
+              重命名
+            </DropdownMenuItem>
             <DropdownMenuItem
               variant="destructive"
               onSelect={() => onDelete(conversation)}

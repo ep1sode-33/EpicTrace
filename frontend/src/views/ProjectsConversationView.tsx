@@ -269,6 +269,58 @@ export function ProjectsConversationView({
     [onReindexStarted],
   );
 
+  // 重命名项目(仅显示名,后端不动磁盘):乐观更新列表 + 选中项,失败回滚到原标题。
+  const handleRenameProject = useCallback(
+    async (project: Project, title: string) => {
+      const next = title.trim();
+      if (!next || next === project.title) return;
+      const prevTitle = project.title;
+      setProjects((prev) =>
+        prev.map((p) => (p.id === project.id ? { ...p, title: next } : p)),
+      );
+      setSelected((cur) => (cur && cur.id === project.id ? { ...cur, title: next } : cur));
+      try {
+        await api.renameProject(project.id, next);
+      } catch {
+        // 失败回滚到原标题(列表 + 选中项)。
+        setProjects((prev) =>
+          prev.map((p) => (p.id === project.id ? { ...p, title: prevTitle } : p)),
+        );
+        setSelected((cur) =>
+          cur && cur.id === project.id ? { ...cur, title: prevTitle } : cur,
+        );
+      }
+    },
+    [],
+  );
+
+  // 重命名对话:乐观更新该项目的对话缓存,失败回滚到原标题。
+  const handleRenameConversation = useCallback(
+    async (conversation: Conversation, title: string) => {
+      const next = title.trim();
+      if (!next || next === conversation.title) return;
+      const prevTitle = conversation.title;
+      const patch = (t: string) =>
+        setConversationsByProject((prev) => {
+          const list = prev[conversation.project_id];
+          if (!list) return prev;
+          return {
+            ...prev,
+            [conversation.project_id]: list.map((c) =>
+              c.id === conversation.id ? { ...c, title: t } : c,
+            ),
+          };
+        });
+      patch(next);
+      try {
+        await api.renameConversation(conversation.id, next);
+      } catch {
+        patch(prevTitle);
+      }
+    },
+    [],
+  );
+
   const handleCreated = async (project: Project) => {
     // 重新拉取权威列表,避免较慢的初始 listProjects 响应覆盖乐观插入的新项目;
     // 随后按 id 选中并展开新项目。
@@ -328,6 +380,8 @@ export function ProjectsConversationView({
         onCreateProject={() => setCreateOpen(true)}
         onDeleteProject={setPendingDelete}
         onReindexProject={handleReindexProject}
+        onRenameProject={handleRenameProject}
+        onRenameConversation={handleRenameConversation}
       />
 
       <section className="flex min-w-0 flex-1 flex-col">

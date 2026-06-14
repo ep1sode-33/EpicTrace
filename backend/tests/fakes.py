@@ -94,6 +94,7 @@ class FakeLLM:
         self._title = title
         self._answer = answer
         self.stream_messages: list[list[dict]] = []   # 记录每次 stream 收到的完整 message 列表(供多轮断言)
+        self.complete_messages: list[list[dict]] = []  # 记录每次 complete 收到的完整 message 列表(供标题断言)
 
     def _route(self, messages):
         sys = messages[0]["content"]
@@ -110,6 +111,7 @@ class FakeLLM:
         return self._answer  # GENERATE_SYS
 
     def complete(self, messages, **kwargs):
+        self.complete_messages.append(list(messages))
         return self._route(messages)
 
     def stream(self, messages, **kwargs):

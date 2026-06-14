@@ -40,3 +40,21 @@ def test_delete_removes_row_and_returns_path(tmp_path: Path):
 def test_delete_unknown_returns_none(tmp_path: Path):
     svc = ProjectService(_db(tmp_path))
     assert svc.delete(99999, delete_folder=False) is None
+
+
+def test_rename_updates_title_and_keeps_folder(tmp_path: Path):
+    db = _db(tmp_path)
+    folder = tmp_path / "CS 2506"
+    svc = ProjectService(db)
+    proj = svc.create(title="CS 2506", folder_path=str(folder))
+
+    renamed = svc.rename(proj.id, "操作系统 2506")
+    assert renamed is not None
+    assert renamed.title == "操作系统 2506"
+    assert renamed.folder_path == str(folder)   # 磁盘路径不变
+    assert folder.exists()                       # 不移动/重命名文件夹
+    assert [p.title for p in svc.list()] == ["操作系统 2506"]
+
+
+def test_rename_unknown_returns_none(tmp_path: Path):
+    assert ProjectService(_db(tmp_path)).rename(99999, "x") is None

@@ -12,7 +12,9 @@ from epictrace.api.routers.references import _Lazy
 from epictrace.db import Database
 from epictrace.models import Conversation, Message, Project
 from epictrace.retrieval.attachment import AttachmentRetriever
-from epictrace.schemas import ConversationCreate, ConversationOut, MessageCreate, MessageOut
+from epictrace.schemas import (
+    ConversationCreate, ConversationOut, MessageCreate, MessageOut, RenameIn,
+)
 from epictrace.services.chat import ChatService
 from epictrace.services.references import ReferenceService
 
@@ -72,6 +74,23 @@ def delete_conversation(cid: int, request: Request, db: Database = Depends(get_d
             store.delete({"conversation_id": cid})
         except Exception:  # noqa: BLE001 — 清理失败不应让删除请求 500;残留向量无害
             pass
+
+
+@router.patch("/conversations/{cid}", response_model=ConversationOut)
+def rename_conversation(cid: int, payload: RenameIn, db: Database = Depends(get_db)):
+    # 仅改显示标题:去首尾空白 → 非空校验 → 钳到 _TITLE_MAX。
+    from epictrace.services.chat import _TITLE_MAX
+
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "title must not be empty")
+    with db.session() as s:
+        c = s.get(Conversation, cid)
+        if c is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+        c.title = title[:_TITLE_MAX]
+        s.flush(); s.refresh(c)
+        return ConversationOut.model_validate(c)
 
 
 @router.get("/conversations/{cid}/messages", response_model=list[MessageOut])
