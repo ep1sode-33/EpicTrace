@@ -152,3 +152,28 @@ def test_corrupt_content_list_succeeds_with_empty_and_warns(tmp_path: Path, capl
     assert md == "# real text\n\nbody"
     assert cl == []
     assert any("content_list" in r.message for r in caplog.records)
+
+
+def test_finds_md_in_backend_subdir(tmp_path: Path):
+    """真实布局回归:mineru 把输出写在 <out>/<stem>/hybrid_auto/ 这个 backend 模式
+    子目录里(名字随后端变:pipeline→auto、vlm→vlm、hybrid→hybrid_auto),不是直接
+    <out>/<stem>/<stem>.md。runner 必须能在子目录里找到 .md + content_list,
+    否则真实 PDF 一律报 'produced no markdown'(就是线上那个 400)。"""
+    pdf = tmp_path / "the-illusion-of-thinking.pdf"
+    pdf.write_bytes(b"%PDF")
+    out = tmp_path / "o"
+    stem = "the-illusion-of-thinking"
+    content = [{"type": "text", "text": "abstract", "page_idx": 0}]
+
+    def runner(cmd, timeout):
+        d = out / stem / "hybrid_auto"  # ← 真实的 backend 子目录层级
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{stem}.md").write_text("# The Illusion\n\nbody", encoding="utf-8")
+        (d / f"{stem}_content_list.json").write_text(
+            json.dumps(content), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    md, cl = run_mineru(pdf, out, mineru_bin="mineru",
+                        model_source="modelscope", timeout=600, runner=runner)
+    assert md == "# The Illusion\n\nbody"
+    assert cl == content

@@ -57,11 +57,15 @@ def run_mineru(
         raise ExtractionFailed(
             f"mineru exited {proc.returncode}: {(proc.stderr or '').strip()[:500]}"
         )
-    result_dir = out_dir / stem
-    md_path = result_dir / f"{stem}.md"
-    cl_path = result_dir / f"{stem}_content_list.json"
-    if not md_path.exists():
-        raise ExtractionFailed(f"mineru produced no markdown at {md_path}")
+    # MinerU 把输出写在 backend 模式子目录里(hybrid→hybrid_auto、pipeline→auto、
+    # vlm→vlm,名字随后端/版本变),不是直接在 <out>/<stem>/<stem>.md。递归找名为
+    # <stem>.md 的文件才稳;按文件名精确匹配,避免 stem 里的 []/* 等被当 glob 模式。
+    md_path = next(
+        (p for p in out_dir.rglob("*.md") if p.name == f"{stem}.md"), None
+    )
+    if md_path is None:
+        raise ExtractionFailed(f"mineru produced no markdown under {out_dir}")
+    cl_path = md_path.parent / f"{stem}_content_list.json"
     markdown = md_path.read_text(encoding="utf-8", errors="replace")
     if not markdown.strip():
         raise ExtractionFailed("mineru produced empty markdown")
