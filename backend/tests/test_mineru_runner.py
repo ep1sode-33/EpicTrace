@@ -1,5 +1,6 @@
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -221,24 +222,31 @@ def test_default_runner_path_streams_stderr_to_progress_cb(tmp_path: Path, monke
     class _FakePopen:
         def __init__(self, cmd, **kwargs):
             self._cmd = cmd
+            # stdout 不再被 runner 读取(stdout=DEVNULL,避免管道死锁);进度全走 stderr。
+            assert kwargs.get("stdout") is subprocess.DEVNULL
             self.returncode = None
-            self.stdout = iter([])  # mineru 进度走 stderr
-            self.stderr = iter([
-                "Loading models...\n",
-                "Predict:  41%|████| 12/29 [00:30<00:42,  2.40s/it]\n",
-                "Predict: 100%|████| 29/29 [01:10<00:00,  2.40s/it]\n",
-            ])
 
-        def communicate(self, timeout=None):
-            # 子进程收尾:写出 mineru 期望的产物树,置 returncode=0。
-            d = out / "paper"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "paper.md").write_text("# Hello\n\nworld", encoding="utf-8")
-            (d / "paper_content_list.json").write_text(
-                json.dumps([{"type": "text", "text": "hi", "page_idx": 0}]),
-                encoding="utf-8")
+            def _gen():
+                # mineru 收尾:在 stderr 流结束(EOF)前写出期望的产物树,
+                # 这样 runner 在 stderr 耗尽后 wait() + 读输出文件即得 markdown。
+                yield "Loading models...\n"
+                yield "Predict:  41%|████| 12/29 [00:30<00:42,  2.40s/it]\n"
+                yield "Predict: 100%|████| 29/29 [01:10<00:00,  2.40s/it]\n"
+                d = out / "paper"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "paper.md").write_text("# Hello\n\nworld", encoding="utf-8")
+                (d / "paper_content_list.json").write_text(
+                    json.dumps([{"type": "text", "text": "hi", "page_idx": 0}]),
+                    encoding="utf-8")
+
+            self.stderr = _gen()
+
+        def wait(self, timeout=None):
             self.returncode = 0
-            return ("stdout text", "")
+            return 0
+
+        def kill(self):
+            self.returncode = -9
 
     monkeypatch.setattr("epictrace.media.mineru_runner.subprocess.Popen", _FakePopen)
 
@@ -250,6 +258,120 @@ def test_default_runner_path_streams_stderr_to_progress_cb(tmp_path: Path, monke
     assert md == "# Hello\n\nworld"
     assert cl == [{"type": "text", "text": "hi", "page_idx": 0}]
     assert seen == ["解析中 12/29", "解析中 29/29"]
+
+
+def test_streaming_runner_uses_devnull_stdout_and_returns_rc_stderr(tmp_path: Path, monkeypatch):
+    """FIX 1:_streaming_runner 必须 stdout=DEVNULL(消除 stdout 管道死锁),且在 stderr
+    EOF 后用 wait() 收 returncode、把累积的 stderr 原样带回(供错误消息/上层用)。
+    这里 mineru 非零退出(无输出文件)→ run_mineru 据 returncode 抛 ExtractionFailed,
+    错误消息里带回 stderr 内容,证明 stderr 被收齐。"""
+    pdf = tmp_path / "p.pdf"; pdf.write_bytes(b"%PDF")
+    out = tmp_path / "out"
+    captured_kwargs: dict = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured_kwargs.update(kwargs)
+            self.returncode = None
+            self.stderr = iter([
+                "Loading models...\n",
+                "boom: something failed\n",
+            ])
+
+        def wait(self, timeout=None):
+            self.returncode = 2  # 非零退出
+            return 2
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("epictrace.media.mineru_runner.subprocess.Popen", _FakePopen)
+
+    with pytest.raises(ExtractionFailed) as ei:
+        run_mineru(pdf, out, mineru_bin="mineru", model_source="modelscope",
+                   timeout=600, progress_cb=lambda _m: None)
+    assert captured_kwargs.get("stdout") is subprocess.DEVNULL
+    assert "exited 2" in str(ei.value)
+    assert "boom" in str(ei.value)  # 累积的 stderr 被带回错误消息
+
+
+def test_streaming_runner_enforces_timeout(tmp_path: Path, monkeypatch):
+    """FIX 1:阻塞读 stderr 期间 communicate(timeout) 触发不了,必须靠 threading.Timer
+    强制超时。这里用一个超短 timeout 和一个会阻塞到被 kill 的 stderr 流(确定性:用一个
+    Event 让生成器卡住,直到被 kill() 释放),证明 timeout 触发 → ExtractionFailed(timed out)。"""
+    pdf = tmp_path / "p.pdf"; pdf.write_bytes(b"%PDF")
+    out = tmp_path / "out"
+    killed = threading.Event()
+
+    class _HangingPopen:
+        def __init__(self, cmd, **kwargs):
+            self.returncode = None
+
+        @property
+        def stderr(self):
+            def _gen():
+                yield "Loading models...\n"
+                # 阻塞,直到 timer 到点调用 kill()(确定性,无真实 sleep 竞争)。
+                killed.wait(timeout=5)
+            return _gen()
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+            killed.set()  # 释放卡住的 stderr 生成器,让读循环 EOF 退出
+
+    monkeypatch.setattr("epictrace.media.mineru_runner.subprocess.Popen", _HangingPopen)
+
+    with pytest.raises(ExtractionFailed) as ei:
+        run_mineru(pdf, out, mineru_bin="mineru", model_source="modelscope",
+                   timeout=0.05, progress_cb=lambda _m: None)
+    assert "timed out" in str(ei.value)
+    assert killed.is_set()  # 确实走了 kill 路径
+
+
+def test_streaming_runner_cancel_kills_and_raises(tmp_path: Path, monkeypatch):
+    """FIX 2:cancel 事件在每读完一行 stderr 后被检查;一旦 set → proc.kill() 并
+    抛 ExtractionFailed('cancelled')。这里第一行后即取消,证明 mineru 被杀、且不再继续读。"""
+    pdf = tmp_path / "p.pdf"; pdf.write_bytes(b"%PDF")
+    out = tmp_path / "out"
+    cancel = threading.Event()
+    killed = threading.Event()
+    read_lines: list[str] = []
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self.returncode = None
+
+        @property
+        def stderr(self):
+            def _gen():
+                read_lines.append("a")
+                yield "Predict:  10%|█| 1/29 [..]\n"
+                # 上层在第一行后会 cancel;若实现正确,这第二行不应被读到。
+                read_lines.append("b")
+                yield "Predict:  20%|██| 2/29 [..]\n"
+            return _gen()
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+            killed.set()
+
+    monkeypatch.setattr("epictrace.media.mineru_runner.subprocess.Popen", _FakePopen)
+
+    def _cb(_msg: str) -> None:
+        cancel.set()  # 收到首条进度即模拟「客户端断开」
+
+    with pytest.raises(ExtractionFailed) as ei:
+        run_mineru(pdf, out, mineru_bin="mineru", model_source="modelscope",
+                   timeout=600, progress_cb=_cb, cancel=cancel)
+    assert "cancelled" in str(ei.value)
+    assert killed.is_set()
+    assert read_lines == ["a"]  # 取消后没有继续读下一行
 
 
 def test_finds_md_in_backend_subdir(tmp_path: Path):

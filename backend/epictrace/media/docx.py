@@ -11,7 +11,7 @@ class DocxMediaProcessor(MediaProcessor):
     def supports(self, path: Path) -> bool:
         return path.suffix.lower() == ".docx"
 
-    def process(self, path: Path, *, progress_cb=None) -> MediaResult:
+    def process(self, path: Path, *, progress_cb=None, cancel=None) -> MediaResult:
         document = docx.Document(str(path))
         text = "\n".join(p.text for p in document.paragraphs)
         return MediaResult(text=text, metadata={"paragraphs": len(document.paragraphs)})

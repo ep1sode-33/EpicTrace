@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import queue
 import threading
 
@@ -102,32 +103,55 @@ def add_reference_stream(cid: int, payload: ReferenceCreate, request: Request,
     svc = ReferenceService(db, embedder=_Lazy(lambda: get_embedder(request)),
                            attachment_store=_Lazy(lambda: get_attachment_store(request)))
     cw = _context_window(request)
-    q: queue.Queue = queue.Queue()
+    # 有界队列:客户端断开后生成器停止 drain,worker 仍可能短暂 put 进度——
+    # 用 put_nowait 丢弃满时的进度(不阻塞 worker),保证 worker 在 cancel 后能尽快退出。
+    q: queue.Queue = queue.Queue(maxsize=256)
+    cancel = threading.Event()
+
+    def _emit(msg: str) -> None:
+        try:
+            q.put_nowait(("status", msg))
+        except queue.Full:
+            pass  # 进度是可丢弃的瞬态;丢一条不影响最终 done/error
 
     def _work() -> None:
         # worker:跑阻塞提取,进度→队列;结束放 (_DONE, result_or_None, error_or_None)。
+        # cancel(客户端断开时由生成器 set)透传到提取层,及时停掉 mineru 子进程。
         try:
             ref = svc.add_external(cid, payload.source_path, cw,
-                                   progress_cb=lambda msg: q.put(("status", msg)))
-            q.put((_DONE, ref, None))
+                                   progress_cb=_emit, cancel=cancel)
+            _put_done(q, (_DONE, ref, None))
         except Exception as e:  # noqa: BLE001 — 任意失败 → 经队列转成 error 事件
-            q.put((_DONE, None, str(e)))
+            _put_done(q, (_DONE, None, str(e)))
 
-    def gen():
+    async def gen():
         worker = threading.Thread(target=_work, daemon=True)
         worker.start()
-        while True:
-            kind, a, b = _unpack(q.get())
-            if kind == "status":
-                yield {"event": "status", "data": a}
-                continue
-            # kind is _DONE: a=created ref dict (or None), b=error message (or None)
-            if b is not None:
-                yield {"event": "error", "data": b}
-            else:
-                yield {"event": "done",
-                       "data": ReferenceOut.model_validate(a).model_dump_json()}
-            return
+        try:
+            while True:
+                try:
+                    kind, a, b = _unpack(q.get_nowait())
+                except queue.Empty:
+                    # 没有待发事件:检查客户端是否断开;断开则取消 worker 并收尾。
+                    if await request.is_disconnected():
+                        cancel.set()
+                        return
+                    await asyncio.sleep(0.05)
+                    continue
+                if kind == "status":
+                    yield {"event": "status", "data": a}
+                    continue
+                # kind is _DONE: a=created ref dict (or None), b=error message (or None)
+                if b is not None:
+                    yield {"event": "error", "data": b}
+                else:
+                    yield {"event": "done",
+                           "data": ReferenceOut.model_validate(a).model_dump_json()}
+                return
+        finally:
+            # 正常结束或客户端中途断开(GeneratorExit)都置 cancel:让 worker 停掉
+            # 并杀掉 mineru 子进程,不再空跑数分钟、不再无界堆积队列。
+            cancel.set()
 
     return EventSourceResponse(gen())
 
@@ -137,6 +161,16 @@ def _unpack(item):
     if item[0] == "status":
         return ("status", item[1], None)
     return item  # (_DONE, ref_or_None, err_or_None)
+
+
+def _put_done(q: queue.Queue, item) -> None:
+    """投递终态(done/error)。短超时阻塞:正常情况下消费者在持续 drain,队列必有空位;
+    若客户端已断开(消费者停 drain、队列被进度占满),超时后丢弃即可——没有读者再关心终态,
+    关键是不让 worker 永久阻塞在 put 上(否则线程泄漏)。"""
+    try:
+        q.put(item, timeout=1.0)
+    except queue.Full:
+        pass
 
 
 @router.delete("/conversations/{cid}/references/{rid}", status_code=status.HTTP_204_NO_CONTENT)

@@ -51,7 +51,7 @@ class MinerUMediaProcessor(MediaProcessor):
     def supports(self, path: Path) -> bool:
         return path.suffix.lower() in _RICH_SUFFIXES
 
-    def process(self, path: Path, *, progress_cb=None) -> MediaResult:
+    def process(self, path: Path, *, progress_cb=None, cancel=None) -> MediaResult:
         if not self._provisioner.is_ready():
             raise ExtractionEngineNotReady(
                 "高质量提取引擎尚未安装,请先在设置中安装 MinerU。"
@@ -64,6 +64,7 @@ class MinerUMediaProcessor(MediaProcessor):
                 timeout=self._timeout,
                 effort=self._effort,
                 progress_cb=progress_cb,
+                cancel=cancel,
             )
         return MediaResult(
             text=markdown,

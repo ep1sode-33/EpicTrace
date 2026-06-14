@@ -130,7 +130,7 @@ def test_add_external_forwards_progress_cb_to_processor(tmp_path: Path, monkeypa
         def supports(self, _path):
             return True
 
-        def process(self, _path, *, progress_cb=None):
+        def process(self, _path, *, progress_cb=None, cancel=None):
             if progress_cb is not None:
                 progress_cb("解析中 12/29")
                 progress_cb("解析中 29/29")
@@ -145,6 +145,32 @@ def test_add_external_forwards_progress_cb_to_processor(tmp_path: Path, monkeypa
     assert seen == ["解析中 12/29", "解析中 29/29"]
 
 
+def test_add_external_forwards_cancel_to_processor(tmp_path: Path, monkeypatch):
+    """FIX 2:add_external 把 cancel 事件透传给 processor.process —— SSE 端点据此在
+    客户端断开时停掉 mineru。"""
+    import threading
+
+    db, cid, _ = _setup(tmp_path)
+    path = _write(tmp_path, "paper.pdf", "x")
+    ev = threading.Event()
+    captured = {}
+
+    from epictrace.interfaces.media import MediaResult
+
+    class _PdfProc:
+        def supports(self, _path):
+            return True
+
+        def process(self, _path, *, progress_cb=None, cancel=None):
+            captured["cancel"] = cancel
+            return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: _PdfProc())
+    ReferenceService(db).add_external(cid, path, context_window=1_000_000, cancel=ev)
+    assert captured["cancel"] is ev
+
+
 def test_add_external_succeeds_even_if_provenance_write_fails(tmp_path: Path, monkeypatch):
     """provenance(content_list sidecar)派生/可选:DB 行已 commit 后写失败不得向上传播。"""
     db, cid, _ = _setup(tmp_path)
@@ -156,7 +182,7 @@ def test_add_external_succeeds_even_if_provenance_write_fails(tmp_path: Path, mo
         def supports(self, _path):
             return True
 
-        def process(self, _path, *, progress_cb=None):
+        def process(self, _path, *, progress_cb=None, cancel=None):
             return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={
                 "backend": "mineru-hybrid",
                 "content_list": [{"type": "text", "text": "hi", "page_idx": 0}],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +22,14 @@ class MediaProcessor(ABC):
     def supports(self, path: Path) -> bool: ...
 
     @abstractmethod
-    def process(self, path: Path, *, progress_cb: ProgressCb | None = None) -> MediaResult:
+    def process(
+        self,
+        path: Path,
+        *,
+        progress_cb: ProgressCb | None = None,
+        cancel: threading.Event | None = None,
+    ) -> MediaResult:
         """提取文本。progress_cb 给定时,长耗时实现(MinerU)应逐条上报进度;
-        瞬时实现忽略即可(签名统一便于调用方一律传)。"""
+        cancel 给定且被 set 时,长耗时实现应尽快中止(杀子进程并抛错),供调用方
+        在客户端断开时停掉提取。瞬时实现忽略二者即可(签名统一便于调用方一律传)。"""
         ...

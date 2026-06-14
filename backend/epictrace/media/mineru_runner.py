@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Callable
@@ -81,17 +82,33 @@ def _default_runner(cmd: list[str], timeout: int) -> subprocess.CompletedProcess
 
 
 def _streaming_runner(
-    cmd: list[str], timeout: int, progress_cb: ProgressCb
+    cmd: list[str], timeout: int, progress_cb: ProgressCb,
+    cancel: threading.Event | None = None,
 ) -> subprocess.CompletedProcess:
     """跑 mineru 并逐行流式读取 stderr(tqdm 进度 + 阶段日志走 stderr),边读边回调进度。
 
-    仍把完整 stdout/stderr 收齐返回(供最终结果/错误消息用),行为与 _default_runner
-    的返回结构一致(returncode/stdout/stderr)。仅当传入 progress_cb 时走此路。
+    stdout 不承载任何结果(markdown/content_list 来自输出文件,错误消息来自 stderr),
+    故 stdout=DEVNULL —— 否则 PIPE 缓冲(~64KB)在 stderr EOF 前被 mineru 写满就会死锁
+    (我们只在循环里 drain stderr)。返回结构与 _default_runner 一致(returncode/stdout/stderr)。
+
+    timeout 由 threading.Timer 真正强制:阻塞读 stderr 期间无法靠 communicate(timeout) 触发,
+    故起一个定时器到点 proc.kill(),让 stderr 读循环因 EOF 退出,再据 _timed_out 标志抛出
+    与非流式路径同义的 "mineru timed out after {timeout}s"。
+    cancel 给定时:每读完一行 stderr 检查一次,被 set 则 proc.kill() 并抛 ExtractionFailed("cancelled"),
+    供上层(SSE 客户端断开)及时停掉 worker + 杀掉 mineru 子进程,不再空跑数分钟。
     """
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1
     )
     err_lines: list[str] = []
+    timed_out = threading.Event()
+
+    def _on_timeout() -> None:
+        timed_out.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout, _on_timeout)
+    timer.start()
 
     def _consume() -> Iterable[str]:
         # 边消费 stderr 边喂给上层解析,同时留底以拼回完整 stderr。
@@ -99,16 +116,22 @@ def _streaming_runner(
         for line in proc.stderr:
             err_lines.append(line)
             yield line
+            # 在 yield 返回后(本行已被上层解析/回调消费)再检查取消:客户端断开 →
+            # 杀子进程并中止(由 run_mineru 透传为 ExtractionFailed),不再读下一行。
+            if cancel is not None and cancel.is_set():
+                proc.kill()
+                raise ExtractionFailed("cancelled")
 
     try:
         stream_progress(_consume(), progress_cb)
-        out, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        raise
+    finally:
+        timer.cancel()
+    # stderr 已 EOF:子进程已结束或刚被(timeout/cancel)kill;reap 拿到 returncode。
+    proc.wait()
+    if timed_out.is_set():
+        raise ExtractionFailed(f"mineru timed out after {timeout}s")
     return subprocess.CompletedProcess(
-        cmd, proc.returncode, stdout=out or "", stderr="".join(err_lines)
+        cmd, proc.returncode, stdout="", stderr="".join(err_lines)
     )
 
 
@@ -122,6 +145,7 @@ def run_mineru(
     effort: str = "high",
     runner: Runner | None = None,
     progress_cb: ProgressCb | None = None,
+    cancel: threading.Event | None = None,
 ) -> tuple[str, list]:
     """跑 MinerU 子进程(hybrid-engine,解析力度由 effort 决定;默认 high),读 markdown + content_list。
 
@@ -148,7 +172,7 @@ def run_mineru(
     if runner is not None:
         run: Runner = runner
     elif progress_cb is not None:
-        run = lambda c, t: _streaming_runner(c, t, progress_cb)  # noqa: E731
+        run = lambda c, t: _streaming_runner(c, t, progress_cb, cancel)  # noqa: E731
     else:
         run = _default_runner
     try:
