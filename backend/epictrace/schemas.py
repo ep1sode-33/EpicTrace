@@ -135,6 +135,12 @@ class SettingsOut(BaseModel):
     profiles: list[ProfileView]
 
 
+class ExtractionStatusOut(BaseModel):
+    state: str            # not_installed | installing | ready | failed
+    ready: bool
+    error: str | None = None
+
+
 class ReferenceCreate(BaseModel):
     kind: Literal["external", "internal"]
     source_path: str | None = None       # external 必填
