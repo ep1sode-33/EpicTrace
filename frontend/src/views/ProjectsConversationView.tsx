@@ -539,6 +539,8 @@ function Conversation({
   const [attachError, setAttachError] = useState<string | null>(null);
   // 正在附加(后端对大文件同步索引,较慢)时显示瞬态提示。
   const [attaching, setAttaching] = useState(false);
+  // 附加进行中的实时进度文案(如「正在用 MinerU 解析 report.pdf:解析中 12/29」);null 表示暂无进度文案。
+  const [attachProgress, setAttachProgress] = useState<string | null>(null);
   // 右侧「引用」侧栏开关(类 Claude Desktop 的 Context 面板)。默认收起。
   const [refSidebarOpen, setRefSidebarOpen] = useState(false);
   // 拖放覆盖层:在整个对话区拖动文件时显示半透明提示。
@@ -722,18 +724,23 @@ function Conversation({
       const cid = await ensureConversation();
       setAttaching(true);
       const failures: string[] = [];
+      // 顺序逐个解析:阻塞直到每个文件 done/error(MinerU 解析较慢),
+      // 期间用 attachProgress 把后端的实时进度文案直出到指示器。
       for (const p of paths) {
-        try {
-          await api.addExternalReference(cid, p);
-        } catch (e) {
-          // 单文件失败不阻塞其余;收集后统一以内联提示呈现。
-          const name = p.split("/").pop() || p;
-          failures.push(`${name}(${e instanceof Error ? e.message : String(e)})`);
-        }
+        const name = p.split("/").pop() || p;
+        let failed: string | null = null;
+        await api.attachExternalStream(cid, p, {
+          onStatus: (text) => setAttachProgress(`正在用 MinerU 解析 ${name}:${text}`),
+          // done 由下面统一 refreshRefs 以服务端为准重拉,这里无需手动并入。
+          onError: (message) => { failed = message; },
+        });
+        // 单文件失败不阻塞其余;收集后统一以内联提示呈现。
+        if (failed) failures.push(`${name}(${failed})`);
       }
-      // 先收起进行态,再呈现失败提示,最后刷新引用列表——
+      // 先收起进行态、清进度文案,再呈现失败提示,最后刷新引用列表——
       // 这样即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
       setAttaching(false);
+      setAttachProgress(null);
       setAttachError(failures.length ? `部分文件未能添加:${failures.join("；")}` : null);
       await refreshRefs(cid);
     },
@@ -978,7 +985,9 @@ function Conversation({
           )}
 
           {inConversation && attaching && (
-            <p className="mx-auto w-full max-w-2xl px-6 text-xs text-muted-foreground">正在索引附件…</p>
+            <p className="mx-auto w-full max-w-2xl px-6 text-xs text-muted-foreground">
+              {attachProgress ?? "正在索引附件…"}
+            </p>
           )}
 
           {inConversation && attachError && (
