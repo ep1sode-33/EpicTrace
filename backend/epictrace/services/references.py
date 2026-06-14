@@ -7,6 +7,7 @@ from sqlalchemy import select
 from epictrace.db import Database
 from epictrace.indexing.chunker import chunk_text
 from epictrace.media import get_processor
+from epictrace.media.provenance import write_provenance
 from epictrace.models import Conversation, ConversationReference, IngestRecord
 from epictrace.services.budget import estimate_tokens, fits_fulltext
 
@@ -43,9 +44,10 @@ class ReferenceService:
         if proc is None:
             raise ValueError("unsupported file type")
         try:
-            text = proc.process(p).text
+            result = proc.process(p)
         except Exception as e:  # noqa: BLE001 — 提取失败转成可读的 400(由路由映射)
             raise ValueError(f"extract failed: {e}")
+        text = result.text
         if not text.strip():
             raise ValueError("empty file")
         used = self._used_fulltext_tokens(conversation_id)
@@ -58,6 +60,11 @@ class ReferenceService:
             s.add(ref); s.flush(); s.refresh(ref)
             out = _to_dict(ref)
             ref_id = ref.id
+        if result.metadata.get("content_list"):
+            write_provenance(
+                self._db.config.data_dir, "reference", ref_id,
+                result.metadata["content_list"],
+            )
         # 大文件:尝试切块+embed 进会话级临时集合(失败保持 deferred,不阻塞)。
         if mode == "deferred" and self._embedder is not None and self._attachment_store is not None:
             if self._index_attachment(conversation_id, ref_id, text):

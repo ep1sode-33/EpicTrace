@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from epictrace.db import Database
 from epictrace.media import get_processor
+from epictrace.media.provenance import write_provenance
 from epictrace.models import IngestRecord, Project
 from epictrace.services.errors import (
     InvalidSourcePath,
@@ -67,7 +68,8 @@ class IngestService:
 
             try:
                 proc = get_processor(dest, self._db.config)
-                extracted = proc.process(dest).text if proc is not None else ""
+                result = proc.process(dest) if proc is not None else None
+                extracted = result.text if result is not None else ""
 
                 rec = IngestRecord(
                     project_id=project_id,
@@ -83,6 +85,11 @@ class IngestService:
                 s.add(rec)
                 s.flush()
                 s.refresh(rec)
+                if result is not None and result.metadata.get("content_list"):
+                    write_provenance(
+                        self._db.config.data_dir, "ingest", rec.id,
+                        result.metadata["content_list"],
+                    )
                 s.expunge(rec)
                 return rec
             except Exception:
