@@ -2,9 +2,9 @@
 
 > **致 agentic workers:** 必备子技能:使用 superpowers:subagent-driven-development(推荐)或 superpowers:executing-plans 逐任务实现本计划。各步骤用 checkbox(`- [ ]`)语法跟踪进度。
 
-**Goal:** 在现有 `MediaProcessor` 接口缝后,用 MinerU(hybrid-engine, effort=high)子进程后端替换 pypdf 的 PDF 处理器 —— 包括应用内用 `uv` provision 一个隔离的 `.MinerU-venv`、无回退的错误语义,以及一个 content_list provenance sidecar —— 让下游切割/索引/引用拿到更好的文本,且对 Plan 5/6 零改动。
+**Goal:** 在现有 `MediaProcessor` 接口缝后,用 MinerU(hybrid-engine, effort=high)子进程后端替换 pypdf/python-docx/python-pptx 的 pdf/docx/pptx 处理器 —— 包括应用内用 `uv` provision 一个隔离的 `.MinerU-venv`、无回退的错误语义,以及一个 content_list provenance sidecar —— 让下游切割/索引/引用拿到更好的文本,且对 Plan 5/6 零改动。
 
-**Architecture:** `get_processor(path, config)` 为 `.pdf` 返回 `MinerUMediaProcessor`(由 `config` 构造,带一个作用于 `<data_dir>/.MinerU-venv` 的 `MinerUProvisioner`)。就绪时,`process()` 在独立子进程中调用 `<.MinerU-venv>/bin/mineru`(从结构上规避 macOS gRPC-fork segfault),解析 `<stem>.md` + `<stem>_content_list.json`,并返回 `MediaResult`;未就绪时抛 `ExtractionEngineNotReady`,任何子进程失败/超时/缺输出则抛 `ExtractionFailed`(无 pypdf 回退)。四个提取调用点(ingest/references/index/source)通过 `self._db.config` 把 `config` 传下去,ingest + reference 两个调用点会持久化一个 `content_list` provenance sidecar。新增 `extraction/status` + `extraction/provision` API 端点驱动一个极简的"高质量提取"设置区块。
+**Architecture:** `get_processor(path, config)` 为 `.pdf`/`.docx`/`.pptx` 返回 `MinerUMediaProcessor`(由 `config` 构造,带一个作用于 `<data_dir>/.MinerU-venv` 的 `MinerUProvisioner`)。就绪时,`process()` 在独立子进程中调用 `<.MinerU-venv>/bin/mineru`(从结构上规避 macOS gRPC-fork segfault),解析 `<stem>.md` + `<stem>_content_list.json`,并返回 `MediaResult`;`mineru -p <file>` 按文件路径自动识别格式,pdf/docx/pptx 走同一条命令(无格式分支)。未就绪时抛 `ExtractionEngineNotReady`,任何子进程失败/超时/缺输出则抛 `ExtractionFailed`(无 pypdf/python-docx/python-pptx 回退)。四个提取调用点(ingest/references/index/source)通过 `self._db.config` 把 `config` 传下去,ingest + reference 两个调用点会持久化一个 `content_list` provenance sidecar。新增 `extraction/status` + `extraction/provision` API 端点驱动一个极简的"高质量提取"设置区块。本期把 MinerU 写死为唯一富媒体引擎;引擎选择器 + 模型预下载选项留给后续 plan。
 
 **Tech Stack:** Python 3.11(FastAPI 后端,venv 在 `backend/.venv`),MinerU CLI(`mineru[all]`)经 `uv` provision 进 `<data_dir>/.MinerU-venv`,pytest 注入假 subprocess/uv runner(不碰真实 mineru/uv/网络),React + shadcn/ui + Tailwind 前端。
 
@@ -17,16 +17,16 @@
 | File | 职责 |
 | --- | --- |
 | `backend/epictrace/media/errors.py` | `ExtractionEngineNotReady` + `ExtractionFailed` 异常(media 层)。 |
-| `backend/epictrace/media/mineru_runner.py` | `run_mineru(...)` —— 拼出 `mineru` 命令,带 timeout 运行它(runner 可注入),读 `<stem>.md` + `<stem>_content_list.json`,返回 `(markdown, content_list)`;失败/超时/缺失/空 → `ExtractionFailed`。 |
+| `backend/epictrace/media/mineru_runner.py` | `run_mineru(...)` —— 拼出 `mineru` 命令(对 pdf/docx/pptx 一致,格式由 mineru 自动识别),带 timeout 运行它(runner 可注入),读 `<stem>.md` + `<stem>_content_list.json`,返回 `(markdown, content_list)`;失败/超时/缺失/空 → `ExtractionFailed`。 |
 | `backend/epictrace/media/mineru_provisioner.py` | `MinerUProvisioner` —— 管理 `<data_dir>/.MinerU-venv`:`is_ready()`、`provision(progress_cb)`、`mineru_bin()`、`uv_bin()`、`state` 状态机(not_installed/installing/ready/failed);uv 调用可注入。 |
-| `backend/epictrace/media/mineru.py` | `MinerUMediaProcessor(MediaProcessor)` —— 永远支持 `.pdf`;`process()` → 未就绪抛 `ExtractionEngineNotReady`,就绪则调用注入的 runner → `MediaResult`,runner 失败透传 `ExtractionFailed`。 |
+| `backend/epictrace/media/mineru.py` | `MinerUMediaProcessor(MediaProcessor)` —— 支持 `.pdf`/`.docx`/`.pptx`;`process()` → 未就绪抛 `ExtractionEngineNotReady`,就绪则调用注入的 runner → `MediaResult`,runner 失败透传 `ExtractionFailed`。 |
 | `backend/epictrace/media/provenance.py` | `write_provenance(data_dir, kind, item_id, content_list)` —— 写 `<data_dir>/provenance/<kind>-<id>.json`。 |
 
 ### 后端 —— 修改
 
 | File | 职责 |
 | --- | --- |
-| `backend/epictrace/media/__init__.py` | `get_processor(path, config)` 签名;由 `config` 把 PDF 槽构造成 `MinerUMediaProcessor`;从 `_PROCESSORS` 移除 `PdfMediaProcessor`(保留 `pdf.py`)。 |
+| `backend/epictrace/media/__init__.py` | `get_processor(path, config)` 签名;由 `config` 把 pdf/docx/pptx 三槽构造成 `MinerUMediaProcessor`;从 `_PROCESSORS` 移除 `PdfMediaProcessor`/`DocxMediaProcessor`/`PptxMediaProcessor`(保留 `pdf.py`/`docx.py`/`pptx.py`,休眠不引用);`TextMediaProcessor` 仍在表内。 |
 | `backend/epictrace/config.py` | 给 `AppConfig` 加 `model_source`(默认 `"modelscope"`)和 `extraction_timeout`(默认 `600`);`mineru_venv_dir` + `provenance_dir` 属性。 |
 | `backend/epictrace/services/ingest.py` | `get_processor(dest, self._db.config)`;metadata 里有 `content_list` 时,在 flush 之后写 `ingest` provenance。 |
 | `backend/epictrace/services/references.py` | `get_processor(p, self._db.config)`(x2);为携带 `content_list` 的外部附件写 `reference` provenance。 |
@@ -45,7 +45,7 @@
 | `backend/tests/test_media_errors.py` | 两个异常存在、继承 `Exception`、携带消息。 |
 | `backend/tests/test_mineru_runner.py` | 借假 subprocess runner 验命令拼装 + 输出解析;非零/超时/缺失/空 → `ExtractionFailed`。 |
 | `backend/tests/test_mineru_provisioner.py` | 假 uv 的命令拼装(`uv venv` / `uv pip install`)、状态机、`is_ready()` 探测。 |
-| `backend/tests/test_mineru_processor.py` | `supports(.pdf)`;未就绪 → `ExtractionEngineNotReady`;就绪 → `MediaResult` 文本/metadata;runner 失败 → `ExtractionFailed`(无 pypdf 文本)。 |
+| `backend/tests/test_mineru_processor.py` | `supports(.pdf/.docx/.pptx)`;未就绪 → `ExtractionEngineNotReady`;就绪 → `MediaResult` 文本/metadata;runner 失败 → `ExtractionFailed`(无 python 处理器文本)。 |
 | `backend/tests/test_media_provenance.py` | `write_provenance` 路径 + 内容。 |
 | `backend/tests/test_extraction_api.py` | `GET /extraction/status` + `POST /extraction/provision`(假 provisioner)。 |
 | `backend/tests/test_mineru_slow.py` | 可选开启(`EPICTRACE_RUN_SLOW=1`)的真 mineru 测试;除非已 provision `.MinerU-venv`,否则 skip。 |
@@ -54,7 +54,7 @@
 
 | File | 职责 |
 | --- | --- |
-| `backend/tests/test_media_docs.py` | `get_processor(p, config)`;断言 PDF → `MinerUMediaProcessor`,而非 pypdf。 |
+| `backend/tests/test_media_docs.py` | `get_processor(p, config)`;断言 pdf/docx/pptx → `MinerUMediaProcessor`,而非 pypdf/python-docx/python-pptx。 |
 | `backend/tests/test_media_text.py` | `get_processor(f, config)` 两参调用。 |
 | `backend/tests/test_ingest_service.py` | 用 2 参 lambda monkeypatch `get_processor`;加一个 pdf 上 provenance 已持久化的测试。 |
 | `backend/tests/test_index_service.py` | `boom(p, config)` 2 参 monkeypatch。 |
@@ -106,7 +106,7 @@
 
 
   class ExtractionEngineNotReady(Exception):
-      """PDF 提取引擎(MinerU)尚未 provision/就绪。调用方应提示用户先安装高质量提取引擎。"""
+      """富文档(pdf/docx/pptx)提取引擎(MinerU)尚未 provision/就绪。调用方应提示用户先安装高质量提取引擎。"""
 
 
   class ExtractionFailed(Exception):
@@ -118,8 +118,9 @@
   git add backend/epictrace/media/errors.py backend/tests/test_media_errors.py && git commit -m "$(cat <<'EOF'
   Add media-layer extraction exceptions
 
-  ExtractionEngineNotReady / ExtractionFailed for the MinerU PDF backend
-  (no-fallback semantics; callers map to existing failure paths).
+  ExtractionEngineNotReady / ExtractionFailed for the MinerU rich-document
+  backend (pdf/docx/pptx; no-fallback semantics; callers map to existing
+  failure paths).
 
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
   EOF
@@ -130,7 +131,7 @@
 
 ## Task 2:`get_processor(path, config)` 签名变更 + 把 config 穿过所有调用点
 
-> **集成风险任务。** `get_processor` 在 4 个 service 中共 5 处调用:`ingest.py`(1)、`references.py`(2)、`index.py`(2)、`source.py`(2)。所有 service 都已持有 `self._db`,而 `Database` 暴露了 `.config` 属性(`backend/epictrace/db.py`),所以穿参就是 `get_processor(path, self._db.config)` —— **无需改 service 构造器或 router**。PDF 槽暂时仍返回当前的 pypdf 处理器(在 Task 6 才换成 MinerU);本任务纯粹是签名/穿参改动,让套件在任务之间保持绿。
+> **集成风险任务。** `get_processor` 在 4 个 service 中共 5 处调用:`ingest.py`(1)、`references.py`(2)、`index.py`(2)、`source.py`(2)。所有 service 都已持有 `self._db`,而 `Database` 暴露了 `.config` 属性(`backend/epictrace/db.py`),所以穿参就是 `get_processor(path, self._db.config)` —— **无需改 service 构造器或 router**。pdf/docx/pptx 三槽暂时仍返回当前的 python 处理器(pypdf/python-docx/python-pptx)(在 Task 6 才统一换成 MinerU);本任务纯粹是签名/穿参改动,让套件在任务之间保持绿。
 
 **文件:**
 - 修改 `backend/epictrace/media/__init__.py`
@@ -151,7 +152,7 @@
   - `proc = get_processor(f)` → `proc = get_processor(f, AppConfig(data_dir=tmp_path))`
   - `proc = get_processor(f)`(循环里那处) → `proc = get_processor(f, AppConfig(data_dir=tmp_path))`
   - `assert get_processor(tmp_path / "a.png") is None` → `assert get_processor(tmp_path / "a.png", AppConfig(data_dir=tmp_path)) is None`
-- [ ] 更新测试 `backend/tests/test_media_docs.py`:加 `from epictrace.config import AppConfig`,并把每处 `get_processor(p)` / `get_processor(tmp_path / "...")` 都改成把 `AppConfig(data_dir=tmp_path)` 作为第二个参数传入。对 PDF 测试,暂时保留 `assert proc is not None` 和 `assert "Hello PDF" in proc.process(p).text`(Task 6 会把它改成断言没有 pypdf 文本)。具体:
+- [ ] 更新测试 `backend/tests/test_media_docs.py`:加 `from epictrace.config import AppConfig`,并把每处 `get_processor(p)` / `get_processor(tmp_path / "...")` 都改成把 `AppConfig(data_dir=tmp_path)` 作为第二个参数传入。本任务只做签名穿参,暂时保留 docx/pptx/pdf 三处的 `assert proc is not None` 与现有 `.text` 断言(Task 6 会把这三处都改成断言选中 MinerU、且未 provision 时抛错而非返回 python 处理器文本)。具体:
   - `proc = get_processor(p)`(docx) → `proc = get_processor(p, AppConfig(data_dir=tmp_path))`
   - `proc = get_processor(p)`(pptx) → `proc = get_processor(p, AppConfig(data_dir=tmp_path))`
   - `proc = get_processor(p)`(pdf) → `proc = get_processor(p, AppConfig(data_dir=tmp_path))`
@@ -172,7 +173,7 @@
       def provenance_dir(self) -> Path:
           return self.data_dir / "provenance"
   ```
-- [ ] 把 `backend/epictrace/media/__init__.py` 重写成新签名(本任务 PDF 槽仍是 pypdf;MinerU 替换在 Task 6):
+- [ ] 把 `backend/epictrace/media/__init__.py` 重写成新签名(本任务 pdf/docx/pptx 三槽仍是各自的 python 处理器;MinerU 替换在 Task 6):
   ```python
   from __future__ import annotations
 
@@ -185,26 +186,30 @@
   from epictrace.media.docx import DocxMediaProcessor
   from epictrace.media.pptx import PptxMediaProcessor
 
-  # 非 PDF 的静态处理器(无需 config)。PDF 槽由 config 构造(见 _pdf_processor)。
+  # 纯文本静态处理器(无需 config)。富文档(pdf/docx/pptx)三槽由 config 构造
+  # (见 _rich_processors)。
   _STATIC_PROCESSORS: list[MediaProcessor] = [
       TextMediaProcessor(),
-      DocxMediaProcessor(),
-      PptxMediaProcessor(),
   ]
 
 
-  def _pdf_processor(config: AppConfig) -> MediaProcessor:
-      # Task 6 起改为从 config 构造 MinerUMediaProcessor;暂时仍用 pypdf 以保持套件绿。
-      return PdfMediaProcessor()
+  def _rich_processors(config: AppConfig) -> list[MediaProcessor]:
+      # Task 6 起统一改为从 config 构造单个 MinerUMediaProcessor(同时承接
+      # pdf/docx/pptx);暂时仍用各自的 python 处理器以保持套件绿。
+      return [
+          PdfMediaProcessor(),
+          DocxMediaProcessor(),
+          PptxMediaProcessor(),
+      ]
 
 
   def get_processor(path: Path, config: AppConfig) -> MediaProcessor | None:
       for proc in _STATIC_PROCESSORS:
           if proc.supports(path):
               return proc
-      pdf = _pdf_processor(config)
-      if pdf.supports(path):
-          return pdf
+      for proc in _rich_processors(config):
+          if proc.supports(path):
+              return proc
       return None
   ```
 - [ ] 编辑 `backend/epictrace/services/ingest.py` line 69:`proc = get_processor(dest)` → `proc = get_processor(dest, self._db.config)`。
@@ -225,9 +230,9 @@
   Thread config through get_processor(path, config)
 
   get_processor now takes AppConfig; all four extraction call sites
-  (ingest/references/index/source) pass self._db.config. PDF slot still
-  pypdf for now; swapped to MinerU in a later task. Add provenance_dir /
-  mineru_venv_dir config properties.
+  (ingest/references/index/source) pass self._db.config. pdf/docx/pptx
+  slots still use their python processors for now; swapped to MinerU in a
+  later task. Add provenance_dir / mineru_venv_dir config properties.
 
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
   EOF
@@ -299,6 +304,30 @@
       assert seen["timeout"] == 600
 
 
+  @pytest.mark.parametrize("name", ["paper.pdf", "notes.docx", "deck.pptx"])
+  def test_command_is_format_agnostic(tmp_path: Path, name: str):
+      # mineru -p <file> 按路径自动识别格式;pdf/docx/pptx 走同一条命令。
+      src = tmp_path / name
+      src.write_bytes(b"x")
+      out = tmp_path / "out"
+      stem = src.stem
+      seen = {}
+
+      def runner(cmd, timeout):
+          seen["cmd"] = cmd
+          return _fake_ok(out, stem, "# ok\n\nbody",
+                          [{"type": "text", "text": "ok", "page_idx": 0}])(cmd, timeout)
+
+      md, cl = run_mineru(
+          src, out, mineru_bin="mineru",
+          model_source="modelscope", timeout=600, runner=runner,
+      )
+      assert md == "# ok\n\nbody"
+      cmd = seen["cmd"]
+      assert "-p" in cmd and str(src) in cmd
+      assert "-b" in cmd and "hybrid-engine" in cmd  # 三类格式标志一致
+
+
   def test_nonzero_exit_raises(tmp_path: Path):
       pdf = tmp_path / "p.pdf"; pdf.write_bytes(b"%PDF")
       def runner(cmd, timeout):
@@ -359,7 +388,7 @@
 
 
   def run_mineru(
-      pdf_path: Path,
+      src_path: Path,
       out_dir: Path,
       *,
       mineru_bin: str,
@@ -369,15 +398,17 @@
   ) -> tuple[str, list]:
       """跑 MinerU 子进程(hybrid-engine, effort=high),读 markdown + content_list。
 
+      src_path 可为 pdf/docx/pptx —— mineru 按文件路径自动识别格式,命令对三类完全
+      一致(此函数不分支)。
       失败语义(无回退):非零退出 / 超时 / 缺输出 / 空文本 → ExtractionFailed。
       runner 注入便于测试(默认 subprocess.run)。
       """
       run = runner or _default_runner
       out_dir.mkdir(parents=True, exist_ok=True)
-      stem = pdf_path.stem
+      stem = src_path.stem
       cmd = [
           mineru_bin,
-          "-p", str(pdf_path),
+          "-p", str(src_path),
           "-o", str(out_dir),
           "-b", "hybrid-engine",
           "--effort", "high",
@@ -661,12 +692,17 @@
           return "/venv/bin/mineru"
 
 
-  def test_supports_pdf_always(tmp_path: Path):
+  def test_supports_rich_documents_always(tmp_path: Path):
       proc = MinerUMediaProcessor(_FakeProvisioner(ready=False),
                                   model_source="modelscope", timeout=600)
       assert proc.supports(Path("x.pdf")) is True
       assert proc.supports(Path("X.PDF")) is True
-      assert proc.supports(Path("x.docx")) is False
+      assert proc.supports(Path("x.docx")) is True
+      assert proc.supports(Path("x.DOCX")) is True
+      assert proc.supports(Path("x.pptx")) is True
+      assert proc.supports(Path("x.PPTX")) is True
+      assert proc.supports(Path("x.txt")) is False
+      assert proc.supports(Path("x.png")) is False
 
 
   def test_not_ready_raises_engine_not_ready(tmp_path: Path):
@@ -742,9 +778,14 @@
       return (max(pages) + 1) if pages else 0
 
 
+  # MinerU 承接的富文档格式(pdf/docx/pptx;mineru 自动识别格式)。
+  _RICH_SUFFIXES = {".pdf", ".docx", ".pptx"}
+
+
   class MinerUMediaProcessor(MediaProcessor):
-      """PDF 唯一引擎(无回退)。未就绪 → ExtractionEngineNotReady;子进程失败 →
-      ExtractionFailed(由 runner 抛出,直接透传,不退回 pypdf)。"""
+      """富文档(pdf/docx/pptx)唯一引擎(无回退)。未就绪 → ExtractionEngineNotReady;
+      子进程失败 → ExtractionFailed(由 runner 抛出,直接透传,不退回
+      pypdf/python-docx/python-pptx)。"""
 
       def __init__(
           self,
@@ -760,7 +801,7 @@
           self._runner = runner or run_mineru
 
       def supports(self, path: Path) -> bool:
-          return path.suffix.lower() == ".pdf"
+          return path.suffix.lower() in _RICH_SUFFIXES
 
       def process(self, path: Path) -> MediaResult:
           if not self._provisioner.is_ready():
@@ -789,10 +830,10 @@
   git add backend/epictrace/media/mineru.py backend/tests/test_mineru_processor.py && git commit -m "$(cat <<'EOF'
   Add MinerUMediaProcessor
 
-  Implements MediaProcessor for PDF: not-ready -> ExtractionEngineNotReady;
-  ready -> run injected mineru runner -> MediaResult(text=md, metadata with
-  backend/content_list/pages); runner ExtractionFailed propagates (no pypdf
-  fallback).
+  Implements MediaProcessor for pdf/docx/pptx: not-ready ->
+  ExtractionEngineNotReady; ready -> run injected mineru runner ->
+  MediaResult(text=md, metadata with backend/content_list/pages); runner
+  ExtractionFailed propagates (no pypdf/python-docx/python-pptx fallback).
 
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
   EOF
@@ -801,62 +842,69 @@
 
 ---
 
-## Task 6:注册表接线(把 PDF 槽换成 MinerU)
+## Task 6:注册表接线(把 pdf/docx/pptx 三槽换成 MinerU)
 
-> 现在 `media/__init__.py` 由 `config` 把 PDF 槽构造成 `MinerUMediaProcessor`(provisioner 作用于 `config.mineru_venv_dir`);`PdfMediaProcessor` 从生效的注册表中移除(`pdf.py` 文件保留)。这需要 config 上的 `model_source`/`extraction_timeout` —— 但那俩要到 Task 8 才落地。为让本任务自洽,用 `getattr(config, ..., default)` 读取,这样无论 Task 8 是否跑过都能工作,然后由 Task 8 把它们升为一等字段。
+> 现在 `media/__init__.py` 由 `config` 把 pdf/docx/pptx 三槽统一构造成**单个** `MinerUMediaProcessor`(provisioner 作用于 `config.mineru_venv_dir`);`PdfMediaProcessor`/`DocxMediaProcessor`/`PptxMediaProcessor` 都从生效的注册表中移除(`pdf.py`/`docx.py`/`pptx.py` 文件保留、休眠)。`TextMediaProcessor` 仍在表内。这需要 config 上的 `model_source`/`extraction_timeout` —— 但那俩要到 Task 8 才落地。为让本任务自洽,用 `getattr(config, ..., default)` 读取,这样无论 Task 8 是否跑过都能工作,然后由 Task 8 把它们升为一等字段。
 
 **文件:**
 - 修改 `backend/epictrace/media/__init__.py`
-- 修改 `backend/tests/test_media_docs.py`(PDF 用例:断言 MinerU,而非 pypdf)
+- 修改 `backend/tests/test_media_docs.py`(pdf/docx/pptx 用例:断言 MinerU,而非 python 处理器)
 
 步骤:
 
-- [ ] 更新 `backend/tests/test_media_docs.py` 的 PDF 测试,断言选中的是 MinerU 处理器(且未 provision 时,处理会抛错而非返回 pypdf 文本)。把 `test_pdf_extraction` 替换为:
+- [ ] 更新 `backend/tests/test_media_docs.py` 的 pdf/docx/pptx 测试,断言选中的是 MinerU 处理器(且未 provision 时,处理会抛错而非返回 python 处理器文本)。这三处现在路由到 MinerU,旧的 python-docx/python-pptx/pypdf 输出断言不再成立,需重新指向。把 `test_pdf_extraction` / `test_docx_extraction` / `test_pptx_extraction` 三个测试替换为:
   ```python
-  def test_pdf_slot_is_mineru_not_pypdf(tmp_path: Path):
-      from reportlab.pdfgen import canvas
+  import pytest
 
-      from epictrace.media.mineru import MinerUMediaProcessor
-      from epictrace.media.errors import ExtractionEngineNotReady
+  from epictrace.media.errors import ExtractionEngineNotReady
+  from epictrace.media.mineru import MinerUMediaProcessor
 
-      p = tmp_path / "a.pdf"
-      c = canvas.Canvas(str(p)); c.drawString(72, 720, "Hello PDF world"); c.save()
+
+  @pytest.mark.parametrize("name", ["a.pdf", "a.docx", "a.pptx"])
+  def test_rich_doc_slots_are_mineru_not_python_processors(tmp_path: Path, name: str):
+      # 富文档(pdf/docx/pptx)统一走 MinerU;pypdf/python-docx/python-pptx 不再被选中。
+      p = tmp_path / name
+      p.write_bytes(b"x")  # 只验证选路 + 无回退;不需真实文件内容
       proc = get_processor(p, AppConfig(data_dir=tmp_path))
-      assert isinstance(proc, MinerUMediaProcessor)  # pypdf 不再被选中
-      # 未 provision → 处理 PDF 报错(无回退,不返回 pypdf 文本)
+      assert isinstance(proc, MinerUMediaProcessor)
+      # 未 provision → 处理报错(无回退,不返回 python 处理器文本)
       with pytest.raises(ExtractionEngineNotReady):
           proc.process(p)
   ```
-  如果文件顶部还没有 `import pytest`,加上。
-- [ ] 运行 `./.venv/bin/pytest -q tests/test_media_docs.py`,预期 FAIL(当前 `_pdf_processor` 仍返回 `PdfMediaProcessor`,所以 `isinstance(... MinerUMediaProcessor)` 失败)。
-- [ ] 编辑 `backend/epictrace/media/__init__.py` 以构造 MinerU 的 PDF 槽。替换 imports 和 `_pdf_processor`:
-  - 移除 `from epictrace.media.pdf import PdfMediaProcessor`。
+  把 import 放到文件顶部(若顶部还没有 `import pytest` / 这两个 MinerU import,加上;参数化版本同时覆盖了原来的三个独立测试)。docx/pptx 旧测试里对 python-docx/python-pptx 输出文本的断言(如 `"虚拟内存" in text`、`"Slide One" in ...`)随之删除 —— 它们的提取行为现在归 MinerU 的处理器测试与可选的真 mineru 慢测覆盖;休眠的 `media/docx.py`/`pptx.py` 不在活动路径上,无需在此再测。
+- [ ] 运行 `./.venv/bin/pytest -q tests/test_media_docs.py`,预期 FAIL(当前 `_rich_processors` 仍返回 python 处理器,所以 `isinstance(... MinerUMediaProcessor)` 失败)。
+- [ ] 编辑 `backend/epictrace/media/__init__.py` 把 pdf/docx/pptx 三槽统一构造成 MinerU。替换 imports 和 `_rich_processors`:
+  - 移除 `from epictrace.media.pdf import PdfMediaProcessor`、`from epictrace.media.docx import DocxMediaProcessor`、`from epictrace.media.pptx import PptxMediaProcessor`。
   - 加上:
     ```python
     from epictrace.media.mineru import MinerUMediaProcessor
     from epictrace.media.mineru_provisioner import MinerUProvisioner
     ```
-  - 替换 `_pdf_processor`:
+  - 替换 `_rich_processors`(单个 MinerU 处理器同时承接三类,`supports` 内部判 `.pdf/.docx/.pptx`):
     ```python
-    def _pdf_processor(config: AppConfig) -> MediaProcessor:
+    def _rich_processors(config: AppConfig) -> list[MediaProcessor]:
         provisioner = MinerUProvisioner(config.mineru_venv_dir)
-        return MinerUMediaProcessor(
-            provisioner,
-            model_source=getattr(config, "model_source", "modelscope"),
-            timeout=getattr(config, "extraction_timeout", 600),
-        )
+        return [
+            MinerUMediaProcessor(
+                provisioner,
+                model_source=getattr(config, "model_source", "modelscope"),
+                timeout=getattr(config, "extraction_timeout", 600),
+            )
+        ]
     ```
-  - 更新模块 docstring/注释,说明 `pdf.py` 保留但未注册。
-- [ ] 运行 `./.venv/bin/pytest -q tests/test_media_docs.py tests/test_media_text.py`,预期 PASS(PDF → MinerU;text/docx/pptx 不变)。
-- [ ] 运行完整套件 `./.venv/bin/pytest -q -k "not slow and not real_smoke"`,预期 PASS。(默认套件里不存在对 PDF 的 ingest/source/index 测试;基于文本的测试不受影响。若有任何默认套件测试 ingest 了真实 `.pdf` 并期待 pypdf 文本,把它改成用非 PDF fixture 或断言无回退抛错 —— 按本计划已读到的现有测试,目前没有这样的测试。)
+  - 更新模块 docstring/注释,说明 `pdf.py`/`docx.py`/`pptx.py` 三份保留但未注册(休眠)。
+- [ ] 运行 `./.venv/bin/pytest -q tests/test_media_docs.py tests/test_media_text.py`,预期 PASS(pdf/docx/pptx → MinerU;text 不变)。
+- [ ] 运行完整套件 `./.venv/bin/pytest -q -k "not slow and not real_smoke"`,预期 PASS。(默认套件里不存在对 pdf/docx/pptx 的 ingest/source/index 测试;基于文本的测试不受影响。若有任何默认套件测试 ingest 了真实 `.pdf`/`.docx`/`.pptx` 并期待 python 处理器文本,把它改成用文本 fixture 或断言无回退抛错 —— 按本计划已读到的现有测试,目前没有这样的测试。)
 - [ ] 提交:
   ```
   git add backend/epictrace/media/__init__.py backend/tests/test_media_docs.py && git commit -m "$(cat <<'EOF'
-  Wire MinerU into the PDF registry slot
+  Wire MinerU into the pdf/docx/pptx registry slots
 
-  get_processor returns MinerUMediaProcessor for .pdf, built from config
-  with a MinerUProvisioner over config.mineru_venv_dir. PdfMediaProcessor
-  removed from the active registry; media/pdf.py kept unreferenced.
+  get_processor returns a single MinerUMediaProcessor for .pdf/.docx/.pptx,
+  built from config with a MinerUProvisioner over config.mineru_venv_dir.
+  PdfMediaProcessor/DocxMediaProcessor/PptxMediaProcessor removed from the
+  active registry; media/pdf.py, docx.py, pptx.py kept unreferenced
+  (dormant). TextMediaProcessor stays registered.
 
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
   EOF
@@ -867,7 +915,7 @@
 
 ## Task 7:Provenance sidecar 持久化
 
-> 一个小辅助函数写 `<data_dir>/provenance/<kind>-<id>.json`。ingest 调用点在记录被 flush(拿到 id)后写 `kind="ingest"`;reference 调用点在外部附件的 ref 创建后写 `kind="reference"`。仅当 `MediaResult.metadata` 携带非空 `content_list` 时触发。
+> 一个小辅助函数写 `<data_dir>/provenance/<kind>-<id>.json`。ingest 调用点在记录被 flush(拿到 id)后写 `kind="ingest"`;reference 调用点在外部附件的 ref 创建后写 `kind="reference"`。仅当 `MediaResult.metadata` 携带非空 `content_list` 时触发。pdf/docx/pptx 一视同仁存档。注:docx/pptx 缺 PDF 式固定页面/bbox,MinerU 为它们产出的 content_list 通常更"薄"(片/段级而非 bbox 级);存档照存(不丢数据),将来的"跳回"对 office 会是片/段级。
 
 **文件:**
 - 创建 `backend/epictrace/media/provenance.py`
@@ -1342,7 +1390,7 @@
         <div className="flex flex-col gap-1">
           <h2 className="text-sm font-semibold text-foreground">高质量提取</h2>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            用 MinerU(版面/表格/公式/OCR)替代基础 PDF 提取。首次安装会下载模型(约数 GB),仅一次,装完全本地运行。
+            用 MinerU(版面/表格/公式/OCR)替代基础 PDF/DOCX/PPTX 提取。首次安装会下载模型(约数 GB),仅一次,装完全本地运行。
           </p>
         </div>
 
@@ -1490,14 +1538,15 @@
 
 ## Spec 覆盖核对(§4–§10)
 
-- **§4 Architecture** —— Tasks 5(处理器:就绪/未就绪分支)、6(注册表槽、`get_processor(path, config)`)、3(子进程命令 + 读输出)、2(config 穿参),`pdf.py` 保留但未注册(Task 6)。
+- **§4 Architecture** —— Tasks 5(处理器:就绪/未就绪分支)、6(注册表三槽、`get_processor(path, config)`)、3(子进程命令 + 读输出,pdf/docx/pptx 命令一致)、2(config 穿参),`pdf.py`/`docx.py`/`pptx.py` 保留但未注册(Task 6)。
 - **§5.1 `MinerUProvisioner`** —— Task 4(`is_ready`/`provision`/`mineru_bin`/`uv_bin`、状态机、可注入 uv)。
-- **§5.2 `MinerUMediaProcessor`** —— Task 5(支持 `.pdf`、未就绪抛错、就绪→runner→MediaResult、失败→ExtractionFailed、无回退)。
-- **§5.3 子进程 runner** —— Task 3(命令拼装、timeout、读输出、失败语义、`--source` 模型源)。
-- **§5.4 Provenance 归档** —— Task 7(辅助函数 + ingest/attachment 调用点接线、metadata `content_list`)。
+- **§5.2 `MinerUMediaProcessor`** —— Task 5(支持 `.pdf`/`.docx`/`.pptx`、未就绪抛错、就绪→runner→MediaResult、失败→ExtractionFailed、无回退)。
+- **§5.3 子进程 runner** —— Task 3(命令拼装、timeout、读输出、失败语义、`--source` 模型源、格式无关命令)。
+- **§5.4 Provenance 归档** —— Task 7(辅助函数 + ingest/attachment 调用点接线、metadata `content_list`、office 片/段级粒度注)。
 - **§5.5 设置/注册表** —— Tasks 6(从 config 构造注册表)、8(`model_source`/`extraction_timeout`/状态)、9(provision/status 端点)、10(前端区块)。
-- **§6 数据流** —— Tasks 9/10(provision → status)、5/6(PDF → MinerU 子进程 → markdown 进入现有链路)、7(content_list 归档);未就绪/失败抛错(Task 5,在调用点由 Task 2/7 映射)。
+- **§6 数据流** —— Tasks 9/10(provision → status)、5/6(pdf/docx/pptx → MinerU 子进程 → markdown 进入现有链路)、7(content_list 归档);未就绪/失败抛错(Task 5,在调用点由 Task 2/7 映射)。
 - **§7 Provisioning 与模型下载 UX** —— Tasks 9(粗粒度后台 provision,不刮 stdout)+ 10(状态徽标、"下载模型(约数 GB),仅首次"文案、spinner)。
-- **§8 数据模型/契约变更** —— Tasks 2(`get_processor(path, config)`)、6(`_PROCESSORS` 替换、pypdf 保留)、5(`MediaResult.metadata` backend/content_list)、1(新异常)、7(`provenance/` sidecar)、8(`model_source`/`extraction_timeout`/状态)、9(新端点)、10(前端区块);未新增 SQL 表。
-- **§9 错误处理与边界** —— Tasks 5(未就绪 / 失败抛错、无回退)、3(非零/超时/缺失/空 → ExtractionFailed)、4/9(provision 失败 → `failed` 状态 + 重试)、Task 2(保留现有失败路径)。hybrid-engine 标志按 §9 注释钉死;Task 3 按 spec 硬编码 `hybrid-engine --effort high` —— 执行时对照钉死的 MinerU 版本确认,仅当所装版本用的是 `hybrid-auto-engine` 时才调整 `mineru_runner.py` 中的标志字符串。
-- **§10 测试策略** —— Tasks 5(处理器假件)、4(provisioner 假件)、6(`get_processor` 选中 MinerU、不选 pypdf)、7(provenance)、2/7(调用点行为)、11(`EPICTRACE_RUN_SLOW` 真测 + `npm run build`)。
+- **§8 数据模型/契约变更** —— Tasks 2(`get_processor(path, config)`)、6(`_PROCESSORS` 三槽替换、pypdf/python-docx/python-pptx 保留休眠)、5(`MediaResult.metadata` backend/content_list)、1(新异常)、7(`provenance/` sidecar)、8(`model_source`/`extraction_timeout`/状态)、9(新端点)、10(前端区块);未新增 SQL 表。
+- **§9 错误处理与边界** —— Tasks 5(未就绪 / 失败抛错、无回退)、3(非零/超时/缺失/空 → ExtractionFailed)、4/9(provision 失败 → `failed` 状态 + 重试)、Task 2(保留现有失败路径)、Task 7(office provenance 片/段级粒度)。hybrid-engine 标志按 §9 注释钉死;Task 3 按 spec 硬编码 `hybrid-engine --effort high` —— 执行时对照钉死的 MinerU 版本确认,仅当所装版本用的是 `hybrid-auto-engine` 时才调整 `mineru_runner.py` 中的标志字符串。
+- **§11 明确不做** —— 富媒体引擎选择器 + 模型预下载选项留给后续 plan;本期把 MinerU 写死为唯一引擎(Architecture 前言 + Tasks 6/9/10 不含选择器 UI)。
+- **§10 测试策略** —— Tasks 5(处理器假件、`supports` 三类)、4(provisioner 假件)、6(`get_processor` 选中 MinerU、不选 python 处理器)、7(provenance)、2/7(调用点行为)、11(`EPICTRACE_RUN_SLOW` 真测 + `npm run build`)。
