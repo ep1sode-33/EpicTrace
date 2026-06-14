@@ -24,6 +24,11 @@ class AppConfig:
     # 预留:agent / chat / caption 各自端点+key+模型(后续 Plan 用)
     agent_llm: LLMRoleConfig = field(default_factory=LLMRoleConfig)
     chat_llm: LLMRoleConfig = field(default_factory=LLMRoleConfig)
+    # 高质量提取(MinerU):模型源 + 子进程超时(秒) + 解析力度(effort)。
+    # effort 默认 "medium":比 "high" 快得多,只丢图表分析,文本问答足够;high 对交互式太慢。
+    model_source: str = "modelscope"
+    extraction_timeout: int = 600
+    extraction_effort: str = "medium"
 
     @property
     def db_path(self) -> Path:
@@ -42,3 +47,11 @@ class AppConfig:
         # 会话级临时附件向量,单独一个 milvus-lite 文件 —— milvus-lite 对每个 db 文件持独占锁,
         # 不能让项目库与附件库共用一个文件(两个 MilvusClient 会抢锁)。临时、可弃,与永久库分开。
         return str(self.data_dir / "epictrace_attachment_vectors.db")
+
+    @property
+    def mineru_venv_dir(self) -> Path:
+        return self.data_dir / ".MinerU-venv"
+
+    @property
+    def provenance_dir(self) -> Path:
+        return self.data_dir / "provenance"

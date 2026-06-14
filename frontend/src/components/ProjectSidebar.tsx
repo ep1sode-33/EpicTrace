@@ -5,6 +5,7 @@ import {
   MoreHorizontal,
   PenLine,
   Plus,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
 
@@ -43,6 +44,7 @@ export function ProjectSidebar({
   onDeleteConversation,
   onCreateProject,
   onDeleteProject,
+  onReindexProject,
 }: {
   projects: Project[];
   selectedProjectId: number | null;
@@ -67,6 +69,8 @@ export function ProjectSidebar({
   onCreateProject: () => void;
   /** 用户在某个项目行选择「删除项目」时调用,由父级打开确认对话框。 */
   onDeleteProject: (project: Project) => void;
+  /** 用户在某个项目行选择「重建索引」时调用:父级确认 + 触发重建,并跳到入库页看进度。 */
+  onReindexProject: (project: Project) => void;
 }) {
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-border/70 bg-sidebar">
@@ -116,6 +120,7 @@ export function ProjectSidebar({
                 onCreateConversation={onCreateConversation}
                 onDeleteConversation={onDeleteConversation}
                 onDeleteProject={onDeleteProject}
+                onReindexProject={onReindexProject}
               />
             ))}
           </ul>
@@ -164,6 +169,7 @@ function ProjectNode({
   onCreateConversation,
   onDeleteConversation,
   onDeleteProject,
+  onReindexProject,
 }: {
   project: Project;
   selected: boolean;
@@ -178,6 +184,7 @@ function ProjectNode({
   onCreateConversation: (project: Project) => void;
   onDeleteConversation: (conversation: Conversation) => void;
   onDeleteProject: (project: Project) => void;
+  onReindexProject: (project: Project) => void;
 }) {
   // 菜单打开时让行内操作保持可见(否则鼠标移开行后会随 hover 消失)。
   const [menuOpen, setMenuOpen] = useState(false);
@@ -263,6 +270,10 @@ function ProjectNode({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" sideOffset={4}>
+              <DropdownMenuItem onSelect={() => onReindexProject(project)}>
+                <RefreshCw />
+                重建索引
+              </DropdownMenuItem>
               <DropdownMenuItem
                 variant="destructive"
                 onSelect={() => onDeleteProject(project)}

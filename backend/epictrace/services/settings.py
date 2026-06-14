@@ -5,6 +5,7 @@ import secrets
 from dataclasses import dataclass
 
 from epictrace.config import AppConfig
+from epictrace.media.mineru_provisioner import MinerUProvisioner
 
 
 @dataclass
@@ -33,6 +34,7 @@ class SettingsService:
 
     def __init__(self, config: AppConfig) -> None:
         self._path = config.data_dir / "settings.json"
+        self._config = config
 
     # ---- 持久化 ----
     def _read_raw(self) -> dict:
@@ -101,6 +103,11 @@ class SettingsService:
     def is_configured(self) -> bool:
         """是否存在一个活动 Profile(== 可用于对话)。"""
         return self.get_active_profile() is not None
+
+    def extraction_status(self) -> dict:
+        """高质量提取引擎(MinerU)的 provisioning 状态。"""
+        prov = MinerUProvisioner(self._config.mineru_venv_dir)
+        return {"state": prov.state, "ready": prov.is_ready()}
 
     def get_chat_llm(self) -> ChatLLMSettings | None:
         """活动 Profile 的 base_url/api_key/model;无活动 Profile 时返回 None。"""

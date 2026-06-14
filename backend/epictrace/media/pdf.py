@@ -16,7 +16,7 @@ class PdfMediaProcessor(MediaProcessor):
     def supports(self, path: Path) -> bool:
         return path.suffix.lower() == ".pdf"
 
-    def process(self, path: Path) -> MediaResult:
+    def process(self, path: Path, *, progress_cb=None, cancel=None) -> MediaResult:
         reader = PdfReader(str(path))
         parts = [(page.extract_text() or "") for page in reader.pages]
         text = "\n\n".join(parts)

@@ -19,6 +19,6 @@ class TextMediaProcessor(MediaProcessor):
     def supports(self, path: Path) -> bool:
         return path.suffix.lower() in TEXT_SUFFIXES
 
-    def process(self, path: Path) -> MediaResult:
+    def process(self, path: Path, *, progress_cb=None, cancel=None) -> MediaResult:
         text = path.read_text(encoding="utf-8", errors="replace")
         return MediaResult(text=text, metadata={"chars": len(text)})

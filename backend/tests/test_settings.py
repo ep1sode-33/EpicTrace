@@ -187,3 +187,13 @@ def test_create_profile_accepts_explicit_context_window(tmp_path: Path):
     svc = _svc(tmp_path)
     svc.create_profile(name="A", base_url="http://x", api_key="k", model="m", context_window=8192)
     assert svc.get_chat_llm().context_window == 8192
+
+
+def test_extraction_status_reports_state(tmp_path):
+    from epictrace.config import AppConfig
+    from epictrace.services.settings import SettingsService
+
+    svc = SettingsService(AppConfig(data_dir=tmp_path))
+    status = svc.extraction_status()
+    assert status["state"] == "not_installed"
+    assert status["ready"] is False

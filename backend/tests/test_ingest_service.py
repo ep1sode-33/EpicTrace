@@ -123,7 +123,7 @@ def test_ingest_cleans_up_orphan_on_extraction_failure(tmp_path: Path, monkeypat
         def process(self, _path):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr("epictrace.services.ingest.get_processor", lambda _: _BadProc())
+    monkeypatch.setattr("epictrace.services.ingest.get_processor", lambda _path, _config: _BadProc())
 
     folder = Path(proj.folder_path)
     with pytest.raises(RuntimeError):
@@ -137,3 +137,72 @@ def test_ingest_cleans_up_orphan_on_extraction_failure(tmp_path: Path, monkeypat
     # No orphaned copy should remain in the project folder
     copied_files = [p for p in folder.iterdir() if p.is_file()]
     assert copied_files == [], f"Orphan files found: {copied_files}"
+
+
+def test_ingest_pdf_persists_provenance_sidecar(tmp_path: Path, monkeypatch):
+    db, proj = _setup(tmp_path)
+    src = tmp_path / "src" / "paper.pdf"
+    src.parent.mkdir()
+    src.write_bytes(b"%PDF-1.4 fake")
+
+    from epictrace.interfaces.media import MediaResult
+
+    content = [{"type": "text", "text": "hi", "page_idx": 0}]
+
+    class _PdfProc:
+        def supports(self, _path):
+            return True
+
+        def process(self, _path):
+            return MediaResult(text="# extracted", metadata={
+                "backend": "mineru-hybrid", "content_list": content, "pages": 1})
+
+    monkeypatch.setattr(
+        "epictrace.services.ingest.get_processor",
+        lambda path, config: _PdfProc(),
+    )
+    rec = IngestService(db).ingest_file(
+        project_id=proj.id, source_path=str(src),
+        ingest_method="file_direct", description="",
+    )
+    sidecar = Path(tmp_path) / "provenance" / f"ingest-{rec.id}.json"
+    assert sidecar.exists()
+    import json
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == content
+    assert rec.extracted_text == "# extracted"
+
+
+def test_ingest_succeeds_even_if_provenance_write_fails(tmp_path: Path, monkeypatch):
+    """provenance(content_list sidecar)是派生/可选缓存:写失败绝不能回滚入库(删文件)。"""
+    db, proj = _setup(tmp_path)
+    src = tmp_path / "src" / "paper.pdf"
+    src.parent.mkdir()
+    src.write_bytes(b"%PDF-1.4 fake")
+
+    from epictrace.interfaces.media import MediaResult
+
+    class _PdfProc:
+        def supports(self, _path):
+            return True
+
+        def process(self, _path):
+            return MediaResult(text="# extracted", metadata={
+                "backend": "mineru-hybrid",
+                "content_list": [{"type": "text", "text": "hi", "page_idx": 0}],
+                "pages": 1})
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("epictrace.services.ingest.get_processor", lambda path, config: _PdfProc())
+    monkeypatch.setattr("epictrace.services.ingest.write_provenance", _boom)
+
+    rec = IngestService(db).ingest_file(
+        project_id=proj.id, source_path=str(src),
+        ingest_method="file_direct", description="",
+    )
+    # 入库成功:record 持久化、复制的文件保留、提取文本在
+    assert rec.extracted_text == "# extracted"
+    assert Path(rec.stored_path).exists()
+    sidecar = Path(tmp_path) / "provenance" / f"ingest-{rec.id}.json"
+    assert not sidecar.exists()  # provenance 写失败 → 没落盘,但不影响入库

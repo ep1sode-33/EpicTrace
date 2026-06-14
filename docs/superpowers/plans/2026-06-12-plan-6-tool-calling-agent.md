@@ -1,53 +1,53 @@
-# Plan 6: Tool-Calling ReAct Agent Implementation Plan
+# Plan 6:工具调用 ReAct Agent 实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** 必备子技能:用 superpowers:subagent-driven-development(推荐)或 superpowers:executing-plans 逐任务实现本计划。各步骤用复选框(`- [ ]`)语法跟踪。
 
-**Goal:** Replace the hard-wired route→retrieve→grade→rewrite pipeline (for tool-calling-capable profiles) with a LangGraph ReAct agent that exposes project/attachment retrieval and a paginated attachment reader as LLM-callable tools, while keeping the existing Plan 5 pipeline as a capability-gated fallback.
+**Goal:** 对支持工具调用的 profile,用一个 LangGraph ReAct agent 取代写死的 route→retrieve→grade→rewrite 流水线;该 agent 把项目/附件检索与一个分页附件阅读器暴露为 LLM 可调用的工具,同时保留现有 Plan 5 流水线作为按能力门控的回退路。
 
-**Architecture:** `ChatService._run_turn` probes the active profile once (cached on `app.state`); if tool-calling is supported it runs a new `agent/react.py` StateGraph (`ChatOpenAI.bind_tools` agent node ↔ `ToolNode`) that only accumulates `RetrievedChunk` objects into a deduped, capped pool via LangChain tool artifacts, then runs ONE clean GENERATE call over the numbered pool and reuses `build_citations` verbatim. Unsupported profiles, empty pools, malformed-tool-call-then-empty, and any unexpected exception all fall back to the untouched Plan 5 path.
+**Architecture:** `ChatService._run_turn` 对活动 profile 探测一次(结果缓存在 `app.state`);若支持工具调用,则运行新的 `agent/react.py` StateGraph(`ChatOpenAI.bind_tools` 的 agent 节点 ↔ `ToolNode`),它只通过 LangChain 工具 artifact 把 `RetrievedChunk` 对象累积进一个去重、封顶的池里,然后对编号后的池跑一次干净的 GENERATE 调用,并原样复用 `build_citations`。不支持的 profile、空池、坏 tool_call 后空池,以及任何意外异常,都回退到原封不动的 Plan 5 路。
 
-**Tech Stack:** Python 3.11 (venv, NOT uv) · FastAPI · LangGraph `StateGraph`/`ToolNode` · LangChain `ChatOpenAI` (`langchain-openai`, new dep) · existing `OpenAICompatLLM` (fallback + final GENERATE streaming) · `AttachmentRetriever` + cached `extracted_text` · pytest with `FakeLLM`/`FakeEmbedder`/`FakeVectorStore`.
-
----
-
-## File Structure
-
-**Created**
-- `backend/epictrace/agent/attachment_paging.py` — pure `read_attachment_slice(...)` that slices a reference's cached `extracted_text` from a cursor → `(slice_text, next_cursor, RetrievedChunk)`.
-- `backend/epictrace/agent/tool_probe.py` — `probe_tool_calling(chat_model) -> bool` (structural tool_call check) + `cached_supports_tools(app_state, profile, chat_model_factory) -> bool` (process-cache keyed by profile id/base_url/model on `app.state`).
-- `backend/epictrace/agent/tools.py` — `ChunkAccumulator` + `build_tools(...)` returning LangChain tools (`search_project_library`, `search_attachment`, `read_attachment`) using `response_format="content_and_artifact"`; attachment tools built only when attachment refs exist.
-- `backend/epictrace/agent/react.py` — `run_react_loop(...)`: StateGraph (`agent`↔`tools`) with round cap, dedupe+cap, malformed-tool-call retry, force-answer/fallback signaling; returns the accumulated pool (or a fallback sentinel).
-- `backend/epictrace/agent/chat_model.py` — `make_chat_model(profile)` thin factory wrapping `ChatOpenAI(base_url=…, api_key=…, model=…)` (single injection point; keeps `ChatOpenAI` out of deep call sites for testability).
-
-**Modified**
-- `backend/pyproject.toml` — add `langchain-openai` dependency.
-- `backend/epictrace/agent/state.py` — add `ReactState` TypedDict (messages + accumulator) used by the ReAct graph.
-- `backend/epictrace/services/chat.py` — `_run_turn` gains the probe→agent-path-or-Plan-5-fallback routing; agent path collects the pool, injects/cites small fulltext refs, runs final GENERATE + `build_citations`, emits tool-activity status events. Plan 5 path unchanged.
-- `backend/epictrace/api/deps.py` — `get_chat_model_factory(request)` helper + capability probe hook reading the active profile; passes a `chat_model_factory` and `supports_tools` probe into `ChatService`.
-- `backend/epictrace/api/routers/conversations.py` — wire the `chat_model_factory` + probe into `_chat_service`.
-
-**Tests**
-- `backend/tests/test_langchain_openai_dep.py` — import smoke test for `langchain_openai.ChatOpenAI`.
-- `backend/tests/test_attachment_paging.py` — exact-offset slicing tests for `read_attachment_slice`.
-- `backend/tests/test_tool_probe.py` — probe True/False + cache-hit tests with a fake chat model.
-- `backend/tests/test_agent_tools.py` — tools return readable text + populate accumulator; conditional exposure.
-- `backend/tests/test_agent_react.py` — multi-round, parallel calls, round-cap force-answer, dedupe+cap, retry-then-fallback.
-- `backend/tests/test_agent_citations_reuse.py` — final GENERATE + `build_citations` over pool; attachment offsets; hallucinated `[n]` dropped; empty pool → direct.
-- `backend/tests/test_chat_agent_routing.py` — supported→agent path cites; unsupported→identical Plan 5 behavior; fulltext still injected+cited.
-
-**Test helpers (added to `backend/tests/fakes.py`)**
-- `FakeChatModel` — LangChain-`Runnable`-shaped fake with `.bind_tools(tools)`; returns a scripted sequence of `AIMessage`s (with/without `tool_calls`) so the ReAct graph and probe can run without a network. Executes bound tools through `ToolNode` exactly like the real model.
+**Tech Stack:** Python 3.11(venv,NOT uv)· FastAPI · LangGraph `StateGraph`/`ToolNode` · LangChain `ChatOpenAI`(`langchain-openai`,新依赖)· 现有 `OpenAICompatLLM`(回退路 + 最终 GENERATE 流式)· `AttachmentRetriever` + 缓存的 `extracted_text` · pytest 配 `FakeLLM`/`FakeEmbedder`/`FakeVectorStore`。
 
 ---
 
-## Task 1 — Add `langchain-openai` dependency
+## 文件结构
+
+**创建**
+- `backend/epictrace/agent/attachment_paging.py` — 纯函数 `read_attachment_slice(...)`,从游标处切片某引用缓存的 `extracted_text` → `(slice_text, next_cursor, RetrievedChunk)`。
+- `backend/epictrace/agent/tool_probe.py` — `probe_tool_calling(chat_model) -> bool`(结构化 tool_call 检查)+ `cached_supports_tools(app_state, profile, chat_model_factory) -> bool`(以 profile id/base_url/model 为键、存在 `app.state` 上的进程级缓存)。
+- `backend/epictrace/agent/tools.py` — `ChunkAccumulator` + `build_tools(...)`,返回用 `response_format="content_and_artifact"` 的 LangChain 工具(`search_project_library`、`search_attachment`、`read_attachment`);附件类工具仅在存在附件引用时构建。
+- `backend/epictrace/agent/react.py` — `run_react_loop(...)`:StateGraph(`agent`↔`tools`),带轮数上限、去重+封顶、坏 tool_call 重试、force-answer/fallback 信号;返回累积的池(或一个 fallback 哨兵)。
+- `backend/epictrace/agent/chat_model.py` — `make_chat_model(profile)`,薄封装 `ChatOpenAI(base_url=…, api_key=…, model=…)` 的工厂(单一注入点;把 `ChatOpenAI` 挡在深层调用点之外,利于测试)。
+
+**修改**
+- `backend/pyproject.toml` — 添加 `langchain-openai` 依赖。
+- `backend/epictrace/agent/state.py` — 添加 ReAct 图用的 `ReactState` TypedDict(messages + accumulator)。
+- `backend/epictrace/services/chat.py` — `_run_turn` 新增 探测→走 agent 路或回退 Plan 5 的路由;agent 路收集池、注入并引用小的 fulltext 引用、跑最终 GENERATE + `build_citations`、发出工具活动状态事件。Plan 5 路不变。
+- `backend/epictrace/api/deps.py` — `get_chat_model_factory(request)` 辅助函数 + 读取活动 profile 的能力探测钩子;把 `chat_model_factory` 与 `supports_tools` 探测传入 `ChatService`。
+- `backend/epictrace/api/routers/conversations.py` — 把 `chat_model_factory` + 探测接进 `_chat_service`。
+
+**测试**
+- `backend/tests/test_langchain_openai_dep.py` — `langchain_openai.ChatOpenAI` 的 import 冒烟测试。
+- `backend/tests/test_attachment_paging.py` — `read_attachment_slice` 的精确偏移切片测试。
+- `backend/tests/test_tool_probe.py` — 用 fake chat model 做 probe True/False + 缓存命中测试。
+- `backend/tests/test_agent_tools.py` — 工具返回可读文本 + 填充 accumulator;条件暴露。
+- `backend/tests/test_agent_react.py` — 多轮、并行调用、轮数上限 force-answer、去重+封顶、retry-then-fallback。
+- `backend/tests/test_agent_citations_reuse.py` — 对池跑最终 GENERATE + `build_citations`;附件偏移;幻觉 `[n]` 被丢弃;空池 → 直答。
+- `backend/tests/test_chat_agent_routing.py` — 支持→走 agent 路并引用;不支持→与 Plan 5 行为一致;fulltext 仍然注入+引用。
+
+**测试辅助(加进 `backend/tests/fakes.py`)**
+- `FakeChatModel` — LangChain-`Runnable` 形状的 fake,带 `.bind_tools(tools)`;返回一段脚本化的 `AIMessage` 序列(带/不带 `tool_calls`),让 ReAct 图和 probe 无需联网即可运行。通过 `ToolNode` 执行绑定的工具,与真实模型完全一致。
+
+---
+
+## Task 1 — 添加 `langchain-openai` 依赖
 
 **Files:**
-- Modify: `backend/pyproject.toml`
-- Test: `backend/tests/test_langchain_openai_dep.py`
+- 修改:`backend/pyproject.toml`
+- 测试:`backend/tests/test_langchain_openai_dep.py`
 
-Steps:
-- [ ] Write the failing import-smoke test `backend/tests/test_langchain_openai_dep.py`:
+步骤:
+- [ ] 写下会失败的 import 冒烟测试 `backend/tests/test_langchain_openai_dep.py`:
   ```python
   def test_langchain_openai_importable():
       from langchain_openai import ChatOpenAI  # noqa: F401
@@ -55,19 +55,19 @@ Steps:
       # bind_tools is the exact surface Plan 6 relies on.
       assert hasattr(ChatOpenAI, "bind_tools")
   ```
-- [ ] Run it, expect FAIL with `ModuleNotFoundError: No module named 'langchain_openai'`:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_langchain_openai_dep.py -v` → Expected: FAIL (collection/import error).
-- [ ] Add `langchain-openai` to `[project].dependencies` in `backend/pyproject.toml`, immediately after the `langgraph` line:
+- [ ] 运行它,预期 FAIL(`ModuleNotFoundError: No module named 'langchain_openai'`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_langchain_openai_dep.py -v` → 预期:FAIL(收集/导入错误)。
+- [ ] 在 `backend/pyproject.toml` 的 `[project].dependencies` 里,紧跟 `langgraph` 行之后添加 `langchain-openai`:
   ```toml
     "langgraph",
     "langchain-openai",
     "sse-starlette",
   ```
-- [ ] Install into the venv (NOT uv):
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pip install langchain-openai` → Expected: `Successfully installed langchain-openai-...`.
-- [ ] Run the smoke test, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_langchain_openai_dep.py -v` → Expected: 1 passed.
-- [ ] Commit:
+- [ ] 装进 venv(NOT uv):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pip install langchain-openai` → 预期:`Successfully installed langchain-openai-...`。
+- [ ] 运行冒烟测试,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_langchain_openai_dep.py -v` → 预期:1 passed。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add pyproject.toml tests/test_langchain_openai_dep.py && git commit -m "$(cat <<'EOF'
   Plan 6: add langchain-openai dependency
 
@@ -80,16 +80,16 @@ Steps:
 
 ---
 
-## Task 2 — `read_attachment` paginated reader (pure function)
+## Task 2 — `read_attachment` 分页阅读器(纯函数)
 
-Implements spec §5.2 `read_attachment` slicing + §5.5 attachment offset chunk. No embeddings.
+实现 spec §5.2 `read_attachment` 切片 + §5.5 附件偏移 chunk。不涉及 embedding。
 
 **Files:**
-- Create: `backend/epictrace/agent/attachment_paging.py`
-- Test: `backend/tests/test_attachment_paging.py`
+- 创建:`backend/epictrace/agent/attachment_paging.py`
+- 测试:`backend/tests/test_attachment_paging.py`
 
-Steps:
-- [ ] Write the failing test `backend/tests/test_attachment_paging.py`:
+步骤:
+- [ ] 写下会失败的测试 `backend/tests/test_attachment_paging.py`:
   ```python
   from epictrace.agent.attachment_paging import read_attachment_slice
 
@@ -149,9 +149,9 @@ Steps:
       )
       assert slice_text == "" and next_cursor == 0 and chunk is None and done is True
   ```
-- [ ] Run it, expect FAIL with `ModuleNotFoundError: No module named 'epictrace.agent.attachment_paging'`:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_attachment_paging.py -v` → Expected: FAIL (import error).
-- [ ] Write `backend/epictrace/agent/attachment_paging.py`:
+- [ ] 运行它,预期 FAIL(`ModuleNotFoundError: No module named 'epictrace.agent.attachment_paging'`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_attachment_paging.py -v` → 预期:FAIL(导入错误)。
+- [ ] 写下 `backend/epictrace/agent/attachment_paging.py`:
   ```python
   from __future__ import annotations
 
@@ -187,9 +187,9 @@ Steps:
       )
       return slice_text, end, chunk, done
   ```
-- [ ] Run it, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_attachment_paging.py -v` → Expected: 5 passed.
-- [ ] Commit:
+- [ ] 运行它,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_attachment_paging.py -v` → 预期:5 passed。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add epictrace/agent/attachment_paging.py tests/test_attachment_paging.py && git commit -m "$(cat <<'EOF'
   Plan 6: paginated read_attachment slicer
 
@@ -202,16 +202,16 @@ Steps:
 
 ---
 
-## Task 3 — `FakeChatModel` test helper
+## Task 3 — `FakeChatModel` 测试辅助
 
-A LangChain-`Runnable`-shaped fake the probe + ReAct graph drive without a network. Added first so Tasks 4–7 can use it. It mimics `ChatOpenAI` enough for `bind_tools` + `ToolNode`.
+一个 LangChain-`Runnable` 形状的 fake,让 probe + ReAct 图无需联网即可驱动。先加它,好让 Task 4–7 都能用。它对 `ChatOpenAI` 的模仿足以支撑 `bind_tools` + `ToolNode`。
 
 **Files:**
-- Modify: `backend/tests/fakes.py`
-- Test: `backend/tests/test_fake_chat_model.py`
+- 修改:`backend/tests/fakes.py`
+- 测试:`backend/tests/test_fake_chat_model.py`
 
-Steps:
-- [ ] Write the failing test `backend/tests/test_fake_chat_model.py`:
+步骤:
+- [ ] 写下会失败的测试 `backend/tests/test_fake_chat_model.py`:
   ```python
   from langchain_core.messages import AIMessage, HumanMessage
 
@@ -234,9 +234,9 @@ Steps:
       m = FakeChatModel(script=[], default=AIMessage(content="fallthrough"))
       assert m.bind_tools([]).invoke([HumanMessage(content="x")]).content == "fallthrough"
   ```
-- [ ] Run it, expect FAIL with `ImportError: cannot import name 'FakeChatModel'`:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_fake_chat_model.py -v` → Expected: FAIL (import error).
-- [ ] Append `FakeChatModel` to `backend/tests/fakes.py` (add the imports at the top of the file if not already present: `from langchain_core.messages import AIMessage`):
+- [ ] 运行它,预期 FAIL(`ImportError: cannot import name 'FakeChatModel'`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_fake_chat_model.py -v` → 预期:FAIL(导入错误)。
+- [ ] 把 `FakeChatModel` 追加到 `backend/tests/fakes.py`(若文件顶部还没有,则加上这行 import:`from langchain_core.messages import AIMessage`):
   ```python
   from langchain_core.messages import AIMessage  # add near top of fakes.py
 
@@ -265,9 +265,9 @@ Steps:
               return self._script.pop(0)
           return self._default
   ```
-- [ ] Run it, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_fake_chat_model.py -v` → Expected: 2 passed.
-- [ ] Commit:
+- [ ] 运行它,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_fake_chat_model.py -v` → 预期:2 passed。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add tests/fakes.py tests/test_fake_chat_model.py && git commit -m "$(cat <<'EOF'
   Plan 6: FakeChatModel test helper
 
@@ -280,16 +280,16 @@ Steps:
 
 ---
 
-## Task 4 — `make_chat_model` factory (injection seam)
+## Task 4 — `make_chat_model` 工厂(注入缝)
 
-Implements spec §5.1/§8: a single thin construction point for `ChatOpenAI`, so tests inject `FakeChatModel` and `ChatOpenAI` never gets hard-wired deep in the agent.
+实现 spec §5.1/§8:为 `ChatOpenAI` 提供单一、薄的构造点,这样测试可注入 `FakeChatModel`,而 `ChatOpenAI` 永远不会被写死在 agent 深层。
 
 **Files:**
-- Create: `backend/epictrace/agent/chat_model.py`
-- Test: `backend/tests/test_chat_model_factory.py`
+- 创建:`backend/epictrace/agent/chat_model.py`
+- 测试:`backend/tests/test_chat_model_factory.py`
 
-Steps:
-- [ ] Write the failing test `backend/tests/test_chat_model_factory.py`:
+步骤:
+- [ ] 写下会失败的测试 `backend/tests/test_chat_model_factory.py`:
   ```python
   from epictrace.agent.chat_model import make_chat_model
 
@@ -308,9 +308,9 @@ Steps:
       model = make_chat_model(profile)
       assert str(model.openai_api_base).rstrip("/").endswith("api.deepseek.com")
   ```
-- [ ] Run it, expect FAIL with `ModuleNotFoundError: No module named 'epictrace.agent.chat_model'`:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_model_factory.py -v` → Expected: FAIL (import error).
-- [ ] Write `backend/epictrace/agent/chat_model.py`:
+- [ ] 运行它,预期 FAIL(`ModuleNotFoundError: No module named 'epictrace.agent.chat_model'`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_model_factory.py -v` → 预期:FAIL(导入错误)。
+- [ ] 写下 `backend/epictrace/agent/chat_model.py`:
   ```python
   from __future__ import annotations
 
@@ -331,9 +331,9 @@ Steps:
           temperature=temperature,
       )
   ```
-- [ ] Run it, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_model_factory.py -v` → Expected: 2 passed.
-- [ ] Commit:
+- [ ] 运行它,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_model_factory.py -v` → 预期:2 passed。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add epictrace/agent/chat_model.py tests/test_chat_model_factory.py && git commit -m "$(cat <<'EOF'
   Plan 6: ChatOpenAI factory (injection seam)
 
@@ -346,16 +346,16 @@ Steps:
 
 ---
 
-## Task 5 — `probe_tool_calling` + process cache
+## Task 5 — `probe_tool_calling` + 进程缓存
 
-Implements spec §5.1: probe a profile by binding a trivial tool and checking for a structurally valid `tool_call`; cache the verdict on `app.state` keyed by profile id+base_url+model.
+实现 spec §5.1:通过绑定一个 trivial 工具并检查是否回出结构合法的 `tool_call` 来探测某 profile;以 profile id+base_url+model 为键把判定缓存在 `app.state`。
 
 **Files:**
-- Create: `backend/epictrace/agent/tool_probe.py`
-- Test: `backend/tests/test_tool_probe.py`
+- 创建:`backend/epictrace/agent/tool_probe.py`
+- 测试:`backend/tests/test_tool_probe.py`
 
-Steps:
-- [ ] Write the failing test `backend/tests/test_tool_probe.py`:
+步骤:
+- [ ] 写下会失败的测试 `backend/tests/test_tool_probe.py`:
   ```python
   from types import SimpleNamespace
 
@@ -408,9 +408,9 @@ Steps:
       assert cached_supports_tools(state, b, lambda p: FakeChatModel(
           script=[AIMessage(content="prose")])) is False
   ```
-- [ ] Run it, expect FAIL with `ModuleNotFoundError: No module named 'epictrace.agent.tool_probe'`:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_tool_probe.py -v` → Expected: FAIL (import error).
-- [ ] Write `backend/epictrace/agent/tool_probe.py`:
+- [ ] 运行它,预期 FAIL(`ModuleNotFoundError: No module named 'epictrace.agent.tool_probe'`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_tool_probe.py -v` → 预期:FAIL(导入错误)。
+- [ ] 写下 `backend/epictrace/agent/tool_probe.py`:
   ```python
   from __future__ import annotations
 
@@ -463,9 +463,9 @@ Steps:
       cache[key] = verdict
       return verdict
   ```
-- [ ] Run it, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_tool_probe.py -v` → Expected: 5 passed.
-- [ ] Commit:
+- [ ] 运行它,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_tool_probe.py -v` → 预期:5 passed。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add epictrace/agent/tool_probe.py tests/test_tool_probe.py && git commit -m "$(cat <<'EOF'
   Plan 6: tool-calling capability probe + process cache
 
@@ -479,16 +479,16 @@ Steps:
 
 ---
 
-## Task 6 — Tool definitions + `ChunkAccumulator`
+## Task 6 — 工具定义 + `ChunkAccumulator`
 
-Implements spec §5.2: wrap `retriever`, `AttachmentRetriever`, and the paginated reader as LangChain tools. Each returns readable text for the model (content) AND captures structured `RetrievedChunk`s into an accumulator via `response_format="content_and_artifact"` (the `ToolMessage.artifact`, harvested in the ReAct loop). Attachment tools are conditionally built. Tool descriptions carry routing (§5.2).
+实现 spec §5.2:把 `retriever`、`AttachmentRetriever` 和分页阅读器封装为 LangChain 工具。每个工具既返回给模型读的可读文本(content),又通过 `response_format="content_and_artifact"`(`ToolMessage.artifact`,在 ReAct 循环里收割)把结构化的 `RetrievedChunk` 捕获进 accumulator。附件类工具按条件构建。工具描述里带路由信息(§5.2)。
 
 **Files:**
-- Create: `backend/epictrace/agent/tools.py`
-- Test: `backend/tests/test_agent_tools.py`
+- 创建:`backend/epictrace/agent/tools.py`
+- 测试:`backend/tests/test_agent_tools.py`
 
-Steps:
-- [ ] Write the failing test `backend/tests/test_agent_tools.py`:
+步骤:
+- [ ] 写下会失败的测试 `backend/tests/test_agent_tools.py`:
   ```python
   from epictrace.agent.tools import ChunkAccumulator, build_tools
   from epictrace.retrieval.types import RetrievedChunk
@@ -580,9 +580,9 @@ Steps:
                       "id": "c1", "type": "tool_call"})
       assert msg.artifact == []
   ```
-- [ ] Run it, expect FAIL with `ModuleNotFoundError: No module named 'epictrace.agent.tools'`:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_tools.py -v` → Expected: FAIL (import error).
-- [ ] Write `backend/epictrace/agent/tools.py`:
+- [ ] 运行它,预期 FAIL(`ModuleNotFoundError: No module named 'epictrace.agent.tools'`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_tools.py -v` → 预期:FAIL(导入错误)。
+- [ ] 写下 `backend/epictrace/agent/tools.py`:
   ```python
   from __future__ import annotations
 
@@ -666,9 +666,9 @@ Steps:
 
       return tools
   ```
-- [ ] Run it, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_tools.py -v` → Expected: 6 passed.
-- [ ] Commit:
+- [ ] 运行它,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_tools.py -v` → 预期:6 passed。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add epictrace/agent/tools.py tests/test_agent_tools.py && git commit -m "$(cat <<'EOF'
   Plan 6: LangChain tool wrappers + chunk accumulator
 
@@ -683,19 +683,19 @@ Steps:
 
 ---
 
-## Task 7 — ReAct StateGraph loop (`agent/react.py`)
+## Task 7 — ReAct StateGraph 循环(`agent/react.py`)
 
-Implements spec §5.3/§5.4: `agent` (`ChatOpenAI.bind_tools`) ↔ `tools` (`ToolNode`) loop; accumulate chunks across rounds (harvested from `ToolMessage.artifact`), dedupe via `key()`, cap ≤12; round cap ≈8 → stop; malformed tool_call → retry once → force-answer (pool non-empty) or fallback signal (pool empty). The loop returns the accumulated pool and a status — it does NOT write the final answer (that is Task 8).
+实现 spec §5.3/§5.4:`agent`(`ChatOpenAI.bind_tools`)↔ `tools`(`ToolNode`)循环;跨轮累积 chunk(从 `ToolMessage.artifact` 收割),按 `key()` 去重,封顶 ≤12;轮数上限 ≈8 → 停止;坏 tool_call → 重试一次 → force-answer(池非空)或 fallback 信号(池空)。循环返回累积的池和一个状态——它并不写最终答案(那是 Task 8)。
 
-First add the `ReactState` TypedDict.
+先添加 `ReactState` TypedDict。
 
 **Files:**
-- Modify: `backend/epictrace/agent/state.py`
-- Create: `backend/epictrace/agent/react.py`
-- Test: `backend/tests/test_agent_react.py`
+- 修改:`backend/epictrace/agent/state.py`
+- 创建:`backend/epictrace/agent/react.py`
+- 测试:`backend/tests/test_agent_react.py`
 
-Steps:
-- [ ] Add `ReactState` to `backend/epictrace/agent/state.py` (append at end, leave `AgentState` untouched):
+步骤:
+- [ ] 把 `ReactState` 加到 `backend/epictrace/agent/state.py`(追加在末尾,`AgentState` 不动):
   ```python
   from typing import Annotated
 
@@ -707,7 +707,7 @@ Steps:
       messages: Annotated[list[BaseMessage], add_messages]
       rounds: int          # agent 节点跑过的轮数(撞上限→force-answer)
   ```
-- [ ] Write the failing test `backend/tests/test_agent_react.py`:
+- [ ] 写下会失败的测试 `backend/tests/test_agent_react.py`:
   ```python
   from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -840,9 +840,9 @@ Steps:
       status = run_react_loop(_OnceThenBoom(), _tools(retr), acc, "q", history=[])
       assert status == "ok" and acc.chunks      # pool has chunk → force-answer, not fallback
   ```
-- [ ] Run it, expect FAIL with `ModuleNotFoundError: No module named 'epictrace.agent.react'`:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_react.py -v` → Expected: FAIL (import error).
-- [ ] Write `backend/epictrace/agent/react.py`:
+- [ ] 运行它,预期 FAIL(`ModuleNotFoundError: No module named 'epictrace.agent.react'`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_react.py -v` → 预期:FAIL(导入错误)。
+- [ ] 写下 `backend/epictrace/agent/react.py`:
   ```python
   from __future__ import annotations
 
@@ -935,9 +935,9 @@ Steps:
           return "ok"
       return "direct" if not used_tools else "ok"
   ```
-- [ ] Run it, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_react.py -v` → Expected: 8 passed.
-- [ ] Commit:
+- [ ] 运行它,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_react.py -v` → 预期:8 passed。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add epictrace/agent/state.py epictrace/agent/react.py tests/test_agent_react.py && git commit -m "$(cat <<'EOF'
   Plan 6: ReAct StateGraph loop (collect-only)
 
@@ -952,16 +952,16 @@ Steps:
 
 ---
 
-## Task 8 — Final answer + citations over the pool
+## Task 8 — 对池做最终答案 + 引用
 
-Implements spec §5.5/§5.7: after the loop, run ONE clean GENERATE call (reuse `GENERATE_SYS` + `format_chunks` over the numbered pool, discarding the loop transcript) and reuse `build_citations(answer, pool)` verbatim. Empty pool → direct answer (reuse existing `CHAT_SYS` behavior). This is a pure helper that streams tokens, so `ChatService` can wire it in Task 9 without duplicating GENERATE logic.
+实现 spec §5.5/§5.7:循环结束后,跑一次干净的 GENERATE 调用(复用 `GENERATE_SYS` + 对编号后的池 `format_chunks`,丢弃循环对话历史),并原样复用 `build_citations(answer, pool)`。空池 → 直答(复用现有 `CHAT_SYS` 行为)。这是一个流式吐 token 的纯辅助函数,因此 `ChatService` 在 Task 9 接它时无需重复 GENERATE 逻辑。
 
 **Files:**
-- Create: `backend/epictrace/agent/answer.py`
-- Test: `backend/tests/test_agent_citations_reuse.py`
+- 创建:`backend/epictrace/agent/answer.py`
+- 测试:`backend/tests/test_agent_citations_reuse.py`
 
-Steps:
-- [ ] Write the failing test `backend/tests/test_agent_citations_reuse.py`:
+步骤:
+- [ ] 写下会失败的测试 `backend/tests/test_agent_citations_reuse.py`:
   ```python
   from epictrace.agent.answer import stream_final_answer
   from epictrace.retrieval.types import RetrievedChunk
@@ -1032,9 +1032,9 @@ Steps:
       sent = " ".join(m["content"] for m in llm.messages)
       assert "report.pdf" in sent and "附加" in sent
   ```
-- [ ] Run it, expect FAIL with `ModuleNotFoundError: No module named 'epictrace.agent.answer'`:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_citations_reuse.py -v` → Expected: FAIL (import error).
-- [ ] Write `backend/epictrace/agent/answer.py`:
+- [ ] 运行它,预期 FAIL(`ModuleNotFoundError: No module named 'epictrace.agent.answer'`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_citations_reuse.py -v` → 预期:FAIL(导入错误)。
+- [ ] 写下 `backend/epictrace/agent/answer.py`:
   ```python
   from __future__ import annotations
 
@@ -1077,9 +1077,9 @@ Steps:
       yield {"event": "citations", "data": json.dumps(citations, ensure_ascii=False)}
       yield {"event": "_answer", "data": answer}  # 内部:供 ChatService 落库(不发给前端)
   ```
-- [ ] Run it, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_citations_reuse.py -v` → Expected: 4 passed.
-- [ ] Commit:
+- [ ] 运行它,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_citations_reuse.py -v` → 预期:4 passed。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add epictrace/agent/answer.py tests/test_agent_citations_reuse.py && git commit -m "$(cat <<'EOF'
   Plan 6: final GENERATE over pool + citation reuse
 
@@ -1093,16 +1093,16 @@ Steps:
 
 ---
 
-## Task 9 — ChatService routing (agent path vs Plan 5 fallback)
+## Task 9 — ChatService 路由(agent 路 vs Plan 5 回退)
 
-Implements spec §5.6/§4/§9: `_run_turn` probes the active profile → agent path if supported, else the existing Plan 5 fallback (byte-for-byte unchanged). Small `fulltext` refs/attachments are injected into the agent loop's initial messages AND added to the pool (mirroring today's auto-inject+cite). Tool-activity status events. Outer try/except → fallback. `ChatService` gains injectable `chat_model_factory` + `supports_tools` so tests drive it with `FakeChatModel`.
+实现 spec §5.6/§4/§9:`_run_turn` 对活动 profile 探测 → 支持则走 agent 路,否则走现有 Plan 5 回退路(逐字节不变)。小的 `fulltext` 引用/附件既注入 agent 循环的初始 messages,又加入池(镜像今天的自动注入+引用)。工具活动状态事件。外层 try/except → 回退。`ChatService` 新增可注入的 `chat_model_factory` + `supports_tools`,让测试用 `FakeChatModel` 驱动它。
 
 **Files:**
-- Modify: `backend/epictrace/services/chat.py`
-- Test: `backend/tests/test_chat_agent_routing.py`
+- 修改:`backend/epictrace/services/chat.py`
+- 测试:`backend/tests/test_chat_agent_routing.py`
 
-Steps:
-- [ ] Write the failing test `backend/tests/test_chat_agent_routing.py`:
+步骤:
+- [ ] 写下会失败的测试 `backend/tests/test_chat_agent_routing.py`:
   ```python
   import json
   from pathlib import Path
@@ -1221,9 +1221,9 @@ Steps:
       sent = " ".join(m["content"] for m in llm.stream_messages[-1])
       assert "项目TLB片段" in sent
   ```
-- [ ] Run it, expect FAIL (ChatService has no `chat_model_factory`/`supports_tools` params → `TypeError`):
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_agent_routing.py -v` → Expected: FAIL (TypeError: unexpected keyword argument).
-- [ ] Modify `ChatService.__init__` in `backend/epictrace/services/chat.py` to accept the new injectables (keep all existing params/defaults):
+- [ ] 运行它,预期 FAIL(ChatService 没有 `chat_model_factory`/`supports_tools` 参数 → `TypeError`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_agent_routing.py -v` → 预期:FAIL(TypeError: unexpected keyword argument)。
+- [ ] 修改 `backend/epictrace/services/chat.py` 里的 `ChatService.__init__`,接受新的可注入项(保留所有现有参数/默认值):
   ```python
       def __init__(self, db: Database, llm, retriever, references=None,
                    attachment_retriever=None, chat_model_factory=None,
@@ -1238,13 +1238,13 @@ Steps:
           self._chat_model_factory = chat_model_factory
           self._supports_tools = supports_tools
   ```
-- [ ] In `backend/epictrace/services/chat.py`, add the agent-path imports at the top (next to existing agent imports):
+- [ ] 在 `backend/epictrace/services/chat.py` 文件顶部添加 agent 路的 import(挨着现有 agent import):
   ```python
   from epictrace.agent.answer import stream_final_answer
   from epictrace.agent.react import FALLBACK, run_react_loop
   from epictrace.agent.tools import ChunkAccumulator, build_tools
   ```
-- [ ] In `_run_turn`, insert the agent-path branch at the very top of the method body (right after `is_first_user_turn = ...` and the initial `yield {"event": "status", "data": "思考中"}`), BEFORE the existing Plan 5 `try:` block. Add this block:
+- [ ] 在 `_run_turn` 里,把 agent 路分支插在方法体最前面(紧跟 `is_first_user_turn = ...` 和初始的 `yield {"event": "status", "data": "思考中"}` 之后),BEFORE 现有 Plan 5 的 `try:` 块。添加这一块:
   ```python
           # ---- Agent 路(profile 探测=支持工具)----
           if self._chat_model_factory is not None and self._supports_tools and self._supports_tools():
@@ -1256,7 +1256,7 @@ Steps:
               except Exception:  # noqa: BLE001 — agent 路任何意外 → 回退 Plan 5(安全带)
                   pass
   ```
-- [ ] Add the `_run_agent_turn` method to `ChatService` (place it directly after `_run_turn`). It mirrors today's fulltext auto-inject+cite, runs the loop, then streams the final answer and persists the assistant message + title:
+- [ ] 给 `ChatService` 添加 `_run_agent_turn` 方法(放在 `_run_turn` 正后面)。它镜像今天的 fulltext 自动注入+引用,跑循环,然后流式输出最终答案并落库 assistant 消息 + 标题:
   ```python
       def _run_agent_turn(self, conversation_id: int, question: str,
                           history: list[dict]) -> "Iterator[dict]":
@@ -1315,11 +1315,11 @@ Steps:
           yield {"event": "done", "data": ""}
           return True
   ```
-- [ ] Run the routing tests, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_agent_routing.py -v` → Expected: 5 passed.
-- [ ] Run the existing Plan 5 attachment tests to confirm zero regression:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_attachment_rag.py -v` → Expected: all passed (unchanged).
-- [ ] Commit:
+- [ ] 运行路由测试,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_agent_routing.py -v` → 预期:5 passed。
+- [ ] 跑现有 Plan 5 附件测试,确认零回归:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_chat_attachment_rag.py -v` → 预期:全部 passed(不变)。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add epictrace/services/chat.py tests/test_chat_agent_routing.py && git commit -m "$(cat <<'EOF'
   Plan 6: ChatService agent-path routing with Plan 5 fallback
 
@@ -1334,17 +1334,17 @@ Steps:
 
 ---
 
-## Task 10 — Wire probe + chat_model_factory into deps/router
+## Task 10 — 把探测 + chat_model_factory 接进 deps/router
 
-Implements spec §5.1/§5.6/§8: `deps` builds a `chat_model_factory` from the active profile and a `supports_tools` callable backed by `cached_supports_tools(app.state, …)`; the conversations router passes both into `ChatService`. Falls back gracefully when no active profile or `langchain-openai` is unavailable.
+实现 spec §5.1/§5.6/§8:`deps` 基于活动 profile 构造一个 `chat_model_factory` 和一个由 `cached_supports_tools(app.state, …)` 支撑的 `supports_tools` 可调用对象;conversations router 把两者都传入 `ChatService`。无活动 profile 或 `langchain-openai` 不可用时优雅回退。
 
 **Files:**
-- Modify: `backend/epictrace/api/deps.py`
-- Modify: `backend/epictrace/api/routers/conversations.py`
-- Test: `backend/tests/test_deps_tool_support.py`
+- 修改:`backend/epictrace/api/deps.py`
+- 修改:`backend/epictrace/api/routers/conversations.py`
+- 测试:`backend/tests/test_deps_tool_support.py`
 
-Steps:
-- [ ] Write the failing test `backend/tests/test_deps_tool_support.py`:
+步骤:
+- [ ] 写下会失败的测试 `backend/tests/test_deps_tool_support.py`:
   ```python
   from types import SimpleNamespace
 
@@ -1388,9 +1388,9 @@ Steps:
       assert supports() is True
       assert probes == [1]   # cached on app.state → probed once
   ```
-- [ ] Run it, expect FAIL with `ImportError: cannot import name 'get_chat_model_factory'`:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_deps_tool_support.py -v` → Expected: FAIL (import error).
-- [ ] Add to `backend/epictrace/api/deps.py` (append at end of file):
+- [ ] 运行它,预期 FAIL(`ImportError: cannot import name 'get_chat_model_factory'`):
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_deps_tool_support.py -v` → 预期:FAIL(导入错误)。
+- [ ] 加到 `backend/epictrace/api/deps.py`(追加在文件末尾):
   ```python
   def _active_profile(request: Request) -> dict | None:
       """活动 Profile 的完整字典(含 id/base_url/api_key/model)——agent 路探测 + 构造用。
@@ -1431,26 +1431,26 @@ Steps:
 
       return supports
   ```
-  (Note: the `probe_tool_calling` import is present so the test's `monkeypatch.setattr("epictrace.api.deps.probe_tool_calling", …)` binds; `cached_supports_tools` calls `probe_tool_calling` internally via the module, so the test asserts the probe-once behavior through the cache. If the monkeypatch target must intercept the call, ensure `cached_supports_tools` references `probe_tool_calling` from its own module — it does — so the deps-level monkeypatch only needs the cache assertion; keep the test asserting `probes == [1]` against the cache, which holds because `cached_supports_tools` probes once per key.)
-- [ ] Wire the factory + probe into `_chat_service` in `backend/epictrace/api/routers/conversations.py`. Update the import line and the return:
+  (注:这里存在 `probe_tool_calling` 的 import,是为了让测试里的 `monkeypatch.setattr("epictrace.api.deps.probe_tool_calling", …)` 能绑上;`cached_supports_tools` 在其自身模块内部调用 `probe_tool_calling`,因此测试通过缓存来断言 probe-once 行为。若 monkeypatch 目标必须拦截该调用,需确保 `cached_supports_tools` 从它自己的模块引用 `probe_tool_calling`——它确实如此——所以 deps 层的 monkeypatch 只需做缓存断言;让测试针对缓存断言 `probes == [1]`,这成立是因为 `cached_supports_tools` 对每个键只探测一次。)
+- [ ] 把工厂 + 探测接进 `backend/epictrace/api/routers/conversations.py` 的 `_chat_service`。更新 import 行和 return:
   ```python
   from epictrace.api.deps import (
       get_db, get_llm, get_retriever, get_embedder, get_reranker, get_attachment_store,
       get_chat_model_factory, get_supports_tools,
   )
   ```
-  and:
+  以及:
   ```python
       return ChatService(db, llm, get_retriever(request), references=refs,
                          attachment_retriever=attach,
                          chat_model_factory=get_chat_model_factory(request),
                          supports_tools=get_supports_tools(request))
   ```
-- [ ] Run the deps test, expect PASS:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_deps_tool_support.py -v` → Expected: 3 passed.
-- [ ] Run any existing conversations/router tests to confirm no regression:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/ -k "conversation or router or chat" -v` → Expected: all passed.
-- [ ] Commit:
+- [ ] 运行 deps 测试,预期 PASS:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_deps_tool_support.py -v` → 预期:3 passed。
+- [ ] 跑现有 conversations/router 测试,确认无回归:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/ -k "conversation or router or chat" -v` → 预期:全部 passed。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add epictrace/api/deps.py epictrace/api/routers/conversations.py tests/test_deps_tool_support.py && git commit -m "$(cat <<'EOF'
   Plan 6: wire tool-calling probe + ChatOpenAI factory into deps/router
 
@@ -1464,15 +1464,15 @@ Steps:
 
 ---
 
-## Task 11 — Verification: full suite + slow-test sketch + frontend build
+## Task 11 — 验证:全套件 + 慢测草稿 + 前端构建
 
-Implements spec §10 closure: whole backend suite green; opt-in real-model slow test sketch behind `EPICTRACE_RUN_SLOW=1`; frontend build passes (frontend untouched).
+实现 spec §10 收尾:整个后端套件全绿;以 `EPICTRACE_RUN_SLOW=1` 门控的 opt-in 真实模型慢测草稿;前端构建通过(前端未动)。
 
 **Files:**
-- Create: `backend/tests/test_agent_slow.py` (skipped unless `EPICTRACE_RUN_SLOW=1`)
+- 创建:`backend/tests/test_agent_slow.py`(除非 `EPICTRACE_RUN_SLOW=1` 否则跳过)
 
-Steps:
-- [ ] Write the opt-in slow test `backend/tests/test_agent_slow.py`:
+步骤:
+- [ ] 写下 opt-in 慢测 `backend/tests/test_agent_slow.py`:
   ```python
   import os
 
@@ -1498,15 +1498,15 @@ Steps:
       supported = probe_tool_calling(make_chat_model(profile))
       assert isinstance(supported, bool)
   ```
-- [ ] Confirm it is skipped by default:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_slow.py -v` → Expected: 1 skipped.
-- [ ] Run the FULL backend suite, expect all green:
-  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest -q` → Expected: all passed (1 skipped: the slow test).
-- [ ] Build the frontend to confirm it still compiles (frontend untouched in Plan 6):
-  `cd /Users/william/Desktop/EpicTrace/frontend && npm run build` → Expected: build succeeds (exit 0).
-- [ ] (Optional, documented run) Real-model sanity with a configured profile:
-  `cd /Users/william/Desktop/EpicTrace/backend && EPICTRACE_RUN_SLOW=1 ./.venv/bin/pytest tests/test_agent_slow.py -v` → Expected: 1 passed (or skipped if no active profile).
-- [ ] Commit:
+- [ ] 确认它默认被跳过:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest tests/test_agent_slow.py -v` → 预期:1 skipped。
+- [ ] 跑完整后端套件,预期全绿:
+  `cd /Users/william/Desktop/EpicTrace/backend && ./.venv/bin/pytest -q` → 预期:全部 passed(1 skipped:慢测)。
+- [ ] 构建前端,确认仍能编译(Plan 6 未动前端):
+  `cd /Users/william/Desktop/EpicTrace/frontend && npm run build` → 预期:构建成功(exit 0)。
+- [ ] (可选,记录在案的运行)用已配置 profile 做真实模型 sanity:
+  `cd /Users/william/Desktop/EpicTrace/backend && EPICTRACE_RUN_SLOW=1 ./.venv/bin/pytest tests/test_agent_slow.py -v` → 预期:1 passed(若无活动 profile 则 skipped)。
+- [ ] 提交:
   `cd /Users/william/Desktop/EpicTrace/backend && git add tests/test_agent_slow.py && git commit -m "$(cat <<'EOF'
   Plan 6: opt-in real-model slow test + verification
 
@@ -1519,16 +1519,16 @@ Steps:
 
 ---
 
-## Spec coverage map (self-review)
+## Spec 覆盖映射(自查)
 
-- **§5.1 capability probe + cache** → Tasks 4 (factory seam), 5 (`probe_tool_calling`/`cached_supports_tools`), 10 (deps wiring + cache on `app.state`).
-- **§5.2 three tools, conditional exposure, routing-in-descriptions** → Task 6 (`build_tools`, attachment tools gated on `indexed_ext_ids`, focus_ids honored), Task 2 (`read_attachment` slicing).
-- **§5.3 ReAct StateGraph, collect-only, dedupe/cap, round cap, fulltext inject** → Task 7 (graph/loop/cap/dedupe), Task 9 (fulltext inject into pool + initial context).
-- **§5.4 failure/fallback (retry once, force-answer vs fallback)** → Task 7 (retry + `FALLBACK`), Task 9 (fallback to Plan 5).
-- **§5.5 final GENERATE + citations reuse, empty pool → direct** → Task 8.
-- **§5.6 ChatService routing, status events** → Task 9 (routing, status), Task 10 (deps).
-- **§5.7 loop prompt vs GENERATE_SYS** → Task 7 (`LOOP_SYS`), Task 8 (reuse `GENERATE_SYS`).
-- **§6 data flows (parallel tools / read_attachment paging / greeting direct / unsupported→Plan 5)** → Tasks 7 (parallel, round-cap), 2+6 (paging), 8 (direct), 9 (unsupported).
-- **§8 contract changes (langchain-openai dep, new modules, ChatOpenAI alongside OpenAICompatLLM)** → Tasks 1, 4, 6, 7, 8, 9, 10.
-- **§9 error/boundary handling (probe fail→fallback, round cap, empty→direct, outer try/except)** → Tasks 5, 7, 8, 9.
-- **§10 test strategy (probe, tools, loop, citations, routing/fallback, retry, slow test, npm build)** → Tasks 5, 6, 7, 8, 9, 11.
+- **§5.1 能力探测 + 缓存** → Task 4(工厂缝)、5(`probe_tool_calling`/`cached_supports_tools`)、10(deps 接线 + 缓存在 `app.state`)。
+- **§5.2 三个工具、条件暴露、描述里带路由** → Task 6(`build_tools`,附件工具按 `indexed_ext_ids` 门控,尊重 focus_ids)、Task 2(`read_attachment` 切片)。
+- **§5.3 ReAct StateGraph、只收集、去重/封顶、轮数上限、fulltext 注入** → Task 7(图/循环/封顶/去重)、Task 9(fulltext 注入池 + 初始上下文)。
+- **§5.4 失败/回退(重试一次、force-answer vs fallback)** → Task 7(重试 + `FALLBACK`)、Task 9(回退 Plan 5)。
+- **§5.5 最终 GENERATE + 引用复用、空池 → 直答** → Task 8。
+- **§5.6 ChatService 路由、状态事件** → Task 9(路由、状态)、Task 10(deps)。
+- **§5.7 循环 prompt vs GENERATE_SYS** → Task 7(`LOOP_SYS`)、Task 8(复用 `GENERATE_SYS`)。
+- **§6 数据流(并行工具 / read_attachment 分页 / 寒暄直答 / 不支持→Plan 5)** → Task 7(并行、轮数上限)、2+6(分页)、8(直答)、9(不支持)。
+- **§8 契约变更(langchain-openai 依赖、新模块、ChatOpenAI 与 OpenAICompatLLM 并存)** → Task 1、4、6、7、8、9、10。
+- **§9 错误/边界处理(探测失败→回退、轮数上限、空→直答、外层 try/except)** → Task 5、7、8、9。
+- **§10 测试策略(探测、工具、循环、引用、路由/回退、重试、慢测、npm build)** → Task 5、6、7、8、9、11。

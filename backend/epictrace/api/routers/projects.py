@@ -32,6 +32,15 @@ def _ensure_project(db: Database, project_id: int) -> None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project not found")
 
 
+def _has_running_job(request: Request, project_id: int) -> bool:
+    """该项目是否已有「正在跑」的索引/重建 job(读 job 状态时取其锁拍快照)。"""
+    job = request.app.state.index_jobs.get(project_id)
+    if job is None:
+        return False
+    with job._lock:
+        return job.status == "running"
+
+
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 def create_project(payload: ProjectCreate, db: Database = Depends(get_db)) -> ProjectOut:
     proj = ProjectService(db).create(title=payload.title, folder_path=payload.folder_path)
@@ -102,11 +111,39 @@ def index_project(project_id: int, request: Request, db: Database = Depends(get_
     # vector store 传 getter 延迟构造:Milvus(gRPC)会在后台线程 warmup 模型之后才创建,
     # 避免 'gRPC 激活后再 fork 加载模型' 的段错误(见 services/index.py._run)。
     svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request))
-    # 构建 running 的 job 并在守护线程里推进 per-file 工作,立刻返回 running 状态。
-    # (同步等待会在真模型上把请求拖到超时;前端改为轮询 status 读实时进度。)
-    job = svc.index_project(project_id)
-    request.app.state.index_jobs[project_id] = job
-    svc.run_in_background(job)
+    # 「检查在跑 + 启动新 job」整体在锁内,避免双击/重试/正在跑时再点起两个并发(破坏性)job。
+    with request.app.state.index_lock:
+        if _has_running_job(request, project_id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="indexing already in progress for this project")
+        # 构建 running 的 job 并在守护线程里推进 per-file 工作,立刻返回 running 状态。
+        # (同步等待会在真模型上把请求拖到超时;前端改为轮询 status 读实时进度。)
+        job = svc.index_project(project_id)
+        request.app.state.index_jobs[project_id] = job
+        svc.run_in_background(job)
+    return _job_to_out(job)
+
+
+@router.post("/{project_id}/reindex", response_model=IndexStatusOut)
+def reindex_project(project_id: int, request: Request, db: Database = Depends(get_db)) -> IndexStatusOut:
+    """用当前提取引擎重建该项目索引:清旧向量 + 把记录翻回待索引 + 重跑同一条索引流水线。
+    与 index_project 同形返回(running 的 job),前端复用同一套 index/status 轮询读进度。"""
+    _ensure_project(db, project_id)
+    # 同 index_project:vector store 传 getter 延迟构造。注意 reindex_project 会在本请求线程里
+    # 先 delete_by_project(同步清向量)——getter(get_vector_store)保证「先 warmup 模型再起
+    # Milvus」,避免 'gRPC 激活后再 fork 加载模型' 段错误(见 deps.get_vector_store)。
+    svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request))
+    # 整段在锁内:先确认没有在跑的 job,再做 reindex_project 的破坏性清向量 + 翻回待索引 + 启动。
+    # 否则双击/重试/正在跑时再点会触发两次并发的破坏性重建(本地工具,清向量无 build-then-swap)。
+    with request.app.state.index_lock:
+        if _has_running_job(request, project_id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="indexing already in progress for this project")
+        # 注:reindex 直接清向量并把记录翻回待索引(无 build-then-swap)——向量是可重建的派生
+        # 索引,失败重跑即可恢复;对本地单用户工具而言 build-then-swap 属过度设计(评审已接受)。
+        job = svc.reindex_project(project_id)
+        request.app.state.index_jobs[project_id] = job
+        svc.run_in_background(job)
     return _job_to_out(job)
 
 

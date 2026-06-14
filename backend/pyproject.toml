@@ -22,6 +22,8 @@ dependencies = [
   "langgraph",
   "langchain-openai",
   "sse-starlette",
+  # 注:MinerU 不进核心环境(几 GB)。它由 MinerUProvisioner 用 uv 装进
+  # <data_dir>/.MinerU-venv,运行期子进程调用(见 epictrace/media/mineru*.py)。
 ]
 
 [project.optional-dependencies]

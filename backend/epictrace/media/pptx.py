@@ -11,7 +11,7 @@ class PptxMediaProcessor(MediaProcessor):
     def supports(self, path: Path) -> bool:
         return path.suffix.lower() == ".pptx"
 
-    def process(self, path: Path) -> MediaResult:
+    def process(self, path: Path, *, progress_cb=None, cancel=None) -> MediaResult:
         prs = Presentation(str(path))
         lines: list[str] = []
         for slide in prs.slides:

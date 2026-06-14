@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import threading
+
 from fastapi import APIRouter, Request
 
+from epictrace.api.deps import get_provisioner
 from epictrace.llm.openai_compat import OpenAICompatLLM
 from epictrace.schemas import (
+    ExtractionStatusOut,
     ProfileCreate,
     ProfileUpdate,
     SetActiveIn,
@@ -88,3 +92,31 @@ def test_profile(payload: TestProfileIn) -> TestProfileOut:
         return TestProfileOut(ok=True, sample=(text or "").strip()[:80])
     except Exception as exc:  # 任何异常(网络/鉴权/4xx/超时…)都回传原始信息
         return TestProfileOut(ok=False, error=str(exc)[:400])
+
+
+def _provision_status(prov) -> ExtractionStatusOut:
+    error = getattr(prov, "last_error", None)
+    return ExtractionStatusOut(state=prov.state, ready=prov.is_ready(), error=error)
+
+
+@router.get("/extraction/status", response_model=ExtractionStatusOut)
+def extraction_status(request: Request):
+    return _provision_status(get_provisioner(request))
+
+
+@router.post("/extraction/provision", response_model=ExtractionStatusOut)
+def extraction_provision(request: Request):
+    """触发 provisioning(后台线程,粗粒度状态)。立即返回当前状态;前端轮询 status。
+
+    失败状态/原因(failed + last_error)由 provisioner 自身记录;重复触发由 provisioner
+    内部并发守卫 no-op。这里只在后台线程吞掉上抛的异常(线程内未捕获异常无人接收)。"""
+    prov = get_provisioner(request)
+
+    def _run():
+        try:
+            prov.provision()
+        except Exception:  # noqa: BLE001 — 失败状态/last_error 已由 provisioner 记录
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return _provision_status(prov)

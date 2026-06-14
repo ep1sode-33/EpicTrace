@@ -117,3 +117,87 @@ def test_detach_wrong_conversation_is_noop(tmp_path: Path):
     ref = svc.add_external(cid, _write(tmp_path, "n.md", "内容内容"), context_window=1_000_000)
     svc.detach(999999, ref["id"])               # 不是该引用的会话 → 不动
     assert len(svc.list_active(cid)) == 1
+
+
+def test_add_external_forwards_progress_cb_to_processor(tmp_path: Path, monkeypatch):
+    """add_external 把 progress_cb 透传给 processor.process —— SSE 端点据此把进度流给前端。"""
+    db, cid, _ = _setup(tmp_path)
+    path = _write(tmp_path, "paper.pdf", "x")  # 文本由假处理器给
+
+    from epictrace.interfaces.media import MediaResult
+
+    class _PdfProc:
+        def supports(self, _path):
+            return True
+
+        def process(self, _path, *, progress_cb=None, cancel=None):
+            if progress_cb is not None:
+                progress_cb("解析中 12/29")
+                progress_cb("解析中 29/29")
+            return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: _PdfProc())
+    seen: list[str] = []
+    svc = ReferenceService(db)
+    ref = svc.add_external(cid, path, context_window=1_000_000, progress_cb=seen.append)
+    assert ref["mode"] == "fulltext"
+    assert seen == ["解析中 12/29", "解析中 29/29"]
+
+
+def test_add_external_forwards_cancel_to_processor(tmp_path: Path, monkeypatch):
+    """FIX 2:add_external 把 cancel 事件透传给 processor.process —— SSE 端点据此在
+    客户端断开时停掉 mineru。"""
+    import threading
+
+    db, cid, _ = _setup(tmp_path)
+    path = _write(tmp_path, "paper.pdf", "x")
+    ev = threading.Event()
+    captured = {}
+
+    from epictrace.interfaces.media import MediaResult
+
+    class _PdfProc:
+        def supports(self, _path):
+            return True
+
+        def process(self, _path, *, progress_cb=None, cancel=None):
+            captured["cancel"] = cancel
+            return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: _PdfProc())
+    ReferenceService(db).add_external(cid, path, context_window=1_000_000, cancel=ev)
+    assert captured["cancel"] is ev
+
+
+def test_add_external_succeeds_even_if_provenance_write_fails(tmp_path: Path, monkeypatch):
+    """provenance(content_list sidecar)派生/可选:DB 行已 commit 后写失败不得向上传播。"""
+    db, cid, _ = _setup(tmp_path)
+    path = _write(tmp_path, "paper.pdf", "x")  # 内容由假处理器给,文件存在即可
+
+    from epictrace.interfaces.media import MediaResult
+
+    class _PdfProc:
+        def supports(self, _path):
+            return True
+
+        def process(self, _path, *, progress_cb=None, cancel=None):
+            return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={
+                "backend": "mineru-hybrid",
+                "content_list": [{"type": "text", "text": "hi", "page_idx": 0}],
+                "pages": 1})
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("epictrace.services.references.get_processor", lambda p, config: _PdfProc())
+    monkeypatch.setattr("epictrace.services.references.write_provenance", _boom)
+
+    svc = ReferenceService(db)
+    ref = svc.add_external(cid, path, context_window=1_000_000)  # 不应抛
+    assert ref["extracted_text"].startswith("页表")
+    active = svc.list_active(cid)
+    assert len(active) == 1 and active[0]["id"] == ref["id"]
+    sidecar = Path(tmp_path) / "provenance" / f"reference-{ref['id']}.json"
+    assert not sidecar.exists()

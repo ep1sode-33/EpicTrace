@@ -34,6 +34,11 @@ export interface Settings {
   active_profile_id: string | null;
   profiles: LLMProfile[];
 }
+export interface ExtractionStatus {
+  state: "not_installed" | "installing" | "ready" | "failed";
+  ready: boolean;
+  error?: string | null;
+}
 
 /** sendMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
 export interface StreamHandlers {
@@ -69,6 +74,8 @@ export const api = {
     fetch(`${BASE}/api/projects/${projectId}/index`, { method: "POST" }).then(j<IndexStatus>),
   indexStatus: (projectId: number) =>
     fetch(`${BASE}/api/projects/${projectId}/index/status`).then(j<IndexStatus>),
+  reindexProject: (projectId: number) =>
+    fetch(`${BASE}/api/projects/${projectId}/reindex`, { method: "POST" }).then(j<IndexStatus>),
   deleteProject: (projectId: number, deleteFolder: boolean) =>
     fetch(
       `${BASE}/api/projects/${projectId}?delete_folder=${deleteFolder}`,
@@ -138,6 +145,11 @@ export const api = {
       body: JSON.stringify(payload),
     }).then(j<{ ok: boolean; sample?: string; error?: string }>),
 
+  getExtractionStatus: () =>
+    fetch(`${BASE}/api/extraction/status`).then(j<ExtractionStatus>),
+  provisionExtraction: () =>
+    fetch(`${BASE}/api/extraction/provision`, { method: "POST" }).then(j<ExtractionStatus>),
+
   /**
    * 发消息并流式接收回答。后端是 SSE(events: status/token/citations/done);
    * 因为要 POST,不能用 EventSource——改用 fetch + ReadableStream 手解析 `event:`/`data:` 行。
@@ -175,76 +187,121 @@ export const api = {
       body: JSON.stringify({ content }),
     });
   },
+
+  /**
+   * 附加外部文件(MinerU 解析),流式回报进度。后端 SSE 事件:
+   * status(多次,实时进度文案)/ done(成功,data 是 ReferenceOut JSON)/ error(失败,nothing persisted)。
+   * 阻塞直到 done/error:附件在 done 之前不可用——这里只是把仍在「等」的过程可视化。
+   * 复用 sendMessage 同款 SSE 解析(fetch + ReadableStream 手解析 event:/data: 行)。
+   * 返回的 Promise 在流结束(done/error/网络错误处理完)后 resolve。
+   */
+  attachExternalStream(
+    cid: number,
+    sourcePath: string,
+    cb: {
+      onStatus?: (text: string) => void;
+      onDone?: (ref: ConversationReference) => void;
+      onError?: (message: string) => void;
+    },
+  ): Promise<void> {
+    return consumeSSE(
+      `${BASE}/api/conversations/${cid}/references/stream`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({ kind: "external", source_path: sourcePath }),
+      },
+      (event, data) => {
+        switch (event) {
+          case "status":
+            cb.onStatus?.(data);
+            break;
+          case "done":
+            try {
+              cb.onDone?.(JSON.parse(data) as ConversationReference);
+            } catch (e) {
+              cb.onError?.(`解析结果失败:${e instanceof Error ? e.message : String(e)}`);
+            }
+            break;
+          case "error":
+            cb.onError?.(data || "服务端错误");
+            break;
+        }
+      },
+    );
+  },
 };
 
 /**
  * POST 一个 SSE 端点并流式分发其事件(status/token/citations/done/error)。
- * sendMessage / regenerate 共用:fetch + ReadableStream 手解析 `event:`/`data:` 行。
+ * sendMessage / regenerate 共用;底层 fetch + ReadableStream 解析复用 consumeSSE。
  * 返回一个 abort 函数:调用即取消本次流(切换会话/卸载时用)。
  */
 function streamSSE(url: string, h: StreamHandlers, init: RequestInit): () => void {
   const ctrl = new AbortController();
-  (async () => {
-    let res: Response;
-    try {
-      res = await fetch(url, { ...init, signal: ctrl.signal });
-    } catch (e) {
-      if (!ctrl.signal.aborted) h.onError?.(e instanceof Error ? e : new Error(String(e)));
-      return;
+  // 解析失败 / HTTP / 网络错误统一经 onError 兜底(consumeSSE 抛出);abort 时静默。
+  void consumeSSE(url, { ...init, signal: ctrl.signal }, (event, data) => {
+    switch (event) {
+      case "status": h.onStatus?.(data); break;
+      case "token": h.onToken?.(data); break;
+      case "citations":
+        try { h.onCitations?.(JSON.parse(data) as Citation[]); }
+        catch { /* 引用解析失败不致命:答案正文已经流式呈现 */ }
+        break;
+      case "error": h.onError?.(new Error(data || "服务端错误")); break;
+      case "done": h.onDone?.(); break;
     }
-    if (!res.ok || !res.body) {
-      const detail = await res.text().catch(() => "");
-      h.onError?.(new Error(`${res.status}: ${detail}`));
-      return;
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    // 一个 SSE 事件以空行分隔;每行可能是 `event:` 或 `data:`(同事件可有多行 data)。
-    // 注:服务端(sse-starlette)用 CRLF,故先把 \r\n 归一为 \n,再按 \n\n 切事件块。
-    const dispatch = (event: string, data: string) => {
-      switch (event) {
-        case "status": h.onStatus?.(data); break;
-        case "token": h.onToken?.(data); break;
-        case "citations":
-          try { h.onCitations?.(JSON.parse(data) as Citation[]); }
-          catch { /* 引用解析失败不致命:答案正文已经流式呈现 */ }
-          break;
-        case "error": h.onError?.(new Error(data || "服务端错误")); break;
-        case "done": h.onDone?.(); break;
-      }
-    };
-    const flush = (block: string) => {
-      let event = "message";
-      const dataLines: string[] = [];
-      for (const line of block.split("\n")) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
-        // 忽略注释行(`:`)、id:、retry: 等
-      }
-      if (dataLines.length || event !== "message") dispatch(event, dataLines.join("\n"));
-    };
-
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        // CRLF → LF 归一在「累积缓冲」上做,才能吃掉跨 chunk 边界的 \r\n(sse-starlette 用 \r\n\r\n);
-        // 已消费部分已 slice 掉,对整段重复归一是幂等且安全的。
-        buf = buf.replace(/\r\n/g, "\n");
-        let sep: number;
-        while ((sep = buf.indexOf("\n\n")) !== -1) {
-          const block = buf.slice(0, sep);
-          buf = buf.slice(sep + 2);
-          if (block.trim()) flush(block);
-        }
-      }
-      if (buf.trim()) flush(buf.replace(/\r\n/g, "\n")); // 收尾:无尾随空行时残留的最后一个事件
-    } catch (e) {
-      if (!ctrl.signal.aborted) h.onError?.(e instanceof Error ? e : new Error(String(e)));
-    }
-  })();
+  }).catch((e) => {
+    if (!ctrl.signal.aborted) h.onError?.(e instanceof Error ? e : new Error(String(e)));
+  });
   return () => ctrl.abort();
+}
+
+/**
+ * fetch 一个 SSE 端点,手解析 `event:`/`data:` 行,对每个事件调用 onEvent(event, data)。
+ * sendMessage(经 streamSSE)与 attachExternalStream 共用同一套解析逻辑——不另起一套机制。
+ * 流正常结束时 resolve;HTTP/网络/解析层错误 reject(由调用方决定如何上报)。
+ */
+async function consumeSSE(
+  url: string,
+  init: RequestInit,
+  onEvent: (event: string, data: string) => void,
+): Promise<void> {
+  const res = await fetch(url, init);
+  if (!res.ok || !res.body) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`${res.status}: ${detail}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  // 一个 SSE 事件以空行分隔;每行可能是 `event:` 或 `data:`(同事件可有多行 data)。
+  // 注:服务端(sse-starlette)用 CRLF,故先把 \r\n 归一为 \n,再按 \n\n 切事件块。
+  const flush = (block: string) => {
+    let event = "message";
+    const dataLines: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+      // 忽略注释行(`:`)、id:、retry: 等
+    }
+    if (dataLines.length || event !== "message") onEvent(event, dataLines.join("\n"));
+  };
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // CRLF → LF 归一在「累积缓冲」上做,才能吃掉跨 chunk 边界的 \r\n(sse-starlette 用 \r\n\r\n);
+    // 已消费部分已 slice 掉,对整段重复归一是幂等且安全的。
+    buf = buf.replace(/\r\n/g, "\n");
+    let sep: number;
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const block = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      if (block.trim()) flush(block);
+    }
+  }
+  if (buf.trim()) flush(buf.replace(/\r\n/g, "\n")); // 收尾:无尾随空行时残留的最后一个事件
 }

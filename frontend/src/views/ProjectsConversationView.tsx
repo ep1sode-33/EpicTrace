@@ -39,9 +39,12 @@ import { SourceViewer } from "@/components/SourceViewer";
 export function ProjectsConversationView({
   llmConfigured,
   onOpenSettings,
+  onReindexStarted,
 }: {
   llmConfigured: boolean;
   onOpenSettings: () => void;
+  /** 重建索引已触发:由 App 切到「信息处理和入库」并聚焦该项目,在那儿看完整索引进度。 */
+  onReindexStarted: (projectId: number) => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Project | null>(null);
@@ -243,6 +246,29 @@ export function ProjectsConversationView({
     [],
   );
 
+  // 重建索引:确认 → 调 /reindex(后端清旧向量 + 把记录翻回待索引 + 跑同一条索引流水线)→
+  // 切到「信息处理和入库」页并聚焦该项目。进度不再在侧栏行内显示——而是复用与「建立索引」
+  // 完全相同的整套进度 UI(PendingList,轮询同一个 index/status 端点),用户在那儿看实时进度。
+  const handleReindexProject = useCallback(
+    async (project: Project) => {
+      // 重建较慢且会清空现有索引,二次确认避免误触。
+      const ok = window.confirm(
+        "将清除该项目索引并用当前提取引擎重新索引所有文件,可能较慢,继续?",
+      );
+      if (!ok) return;
+      try {
+        // POST 同步把该项目记录翻回待索引并启动后台 job,立刻返回。
+        // 必须先 await 再跳转:这样目标页拉到的列表里该项目已是待索引,PendingList 才能聚合出它。
+        await api.reindexProject(project.id);
+      } catch {
+        // 触发失败:静默,用户可重试(不跳转,留在当前页)。
+        return;
+      }
+      onReindexStarted(project.id);
+    },
+    [onReindexStarted],
+  );
+
   const handleCreated = async (project: Project) => {
     // 重新拉取权威列表,避免较慢的初始 listProjects 响应覆盖乐观插入的新项目;
     // 随后按 id 选中并展开新项目。
@@ -301,6 +327,7 @@ export function ProjectsConversationView({
         onDeleteConversation={(c) => setPendingDeleteConversation(c)}
         onCreateProject={() => setCreateOpen(true)}
         onDeleteProject={setPendingDelete}
+        onReindexProject={handleReindexProject}
       />
 
       <section className="flex min-w-0 flex-1 flex-col">
@@ -539,6 +566,8 @@ function Conversation({
   const [attachError, setAttachError] = useState<string | null>(null);
   // 正在附加(后端对大文件同步索引,较慢)时显示瞬态提示。
   const [attaching, setAttaching] = useState(false);
+  // 附加进行中的实时进度文案(如「正在用 MinerU 解析 report.pdf:解析中 12/29」);null 表示暂无进度文案。
+  const [attachProgress, setAttachProgress] = useState<string | null>(null);
   // 右侧「引用」侧栏开关(类 Claude Desktop 的 Context 面板)。默认收起。
   const [refSidebarOpen, setRefSidebarOpen] = useState(false);
   // 拖放覆盖层:在整个对话区拖动文件时显示半透明提示。
@@ -722,18 +751,32 @@ function Conversation({
       const cid = await ensureConversation();
       setAttaching(true);
       const failures: string[] = [];
-      for (const p of paths) {
-        try {
-          await api.addExternalReference(cid, p);
-        } catch (e) {
-          // 单文件失败不阻塞其余;收集后统一以内联提示呈现。
+      try {
+        // 顺序逐个解析:阻塞直到每个文件 done/error(MinerU 解析较慢),
+        // 期间用 attachProgress 把后端的实时进度文案直出到指示器。
+        for (const p of paths) {
           const name = p.split("/").pop() || p;
-          failures.push(`${name}(${e instanceof Error ? e.message : String(e)})`);
+          let failed: string | null = null;
+          try {
+            await api.attachExternalStream(cid, p, {
+              onStatus: (text) => setAttachProgress(`正在用 MinerU 解析 ${name}:${text}`),
+              // done 由下面统一 refreshRefs 以服务端为准重拉,这里无需手动并入。
+              onError: (message) => { failed = message; },
+            });
+          } catch (e) {
+            // 流被 reject(HTTP / 网络 / SSE 解析错误,或 server error 事件经 onError 后仍 reject):
+            // 也算单文件失败,收进 failures(而非整批抛出),否则会漏掉 finally 的进行态清理。
+            failed = e instanceof Error ? e.message : String(e);
+          }
+          // 单文件失败不阻塞其余;收集后统一以内联提示呈现。
+          if (failed) failures.push(`${name}(${failed})`);
         }
+      } finally {
+        // 无论成功 / 失败 / 抛错,都收起进行态、清进度文案,避免按钮卡在加载态。
+        setAttaching(false);
+        setAttachProgress(null);
       }
-      // 先收起进行态,再呈现失败提示,最后刷新引用列表——
-      // 这样即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
-      setAttaching(false);
+      // 呈现失败提示,最后刷新引用列表——即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
       setAttachError(failures.length ? `部分文件未能添加:${failures.join("；")}` : null);
       await refreshRefs(cid);
     },
@@ -978,7 +1021,9 @@ function Conversation({
           )}
 
           {inConversation && attaching && (
-            <p className="mx-auto w-full max-w-2xl px-6 text-xs text-muted-foreground">正在索引附件…</p>
+            <p className="mx-auto w-full max-w-2xl px-6 text-xs text-muted-foreground">
+              {attachProgress ?? "正在索引附件…"}
+            </p>
           )}
 
           {inConversation && attachError && (

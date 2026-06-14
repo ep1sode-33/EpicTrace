@@ -20,11 +20,17 @@ type IndexState =
 export function PendingList({
   projects,
   refreshKey,
+  expandProjectId = null,
+  expandSignal = 0,
   onIndexed,
 }: {
   projects: Project[];
   /** 变更此值可触发重新聚合(例如重新扫描后)。 */
   refreshKey: number;
+  /** 需自动展开的项目 id(从项目页「重建索引」跳转来时,直接展开该项目看进度);null 表示不强制展开。 */
+  expandProjectId?: number | null;
+  /** 自增信号:同一项目再次跳转也能重新展开(配合 expandProjectId 使用)。 */
+  expandSignal?: number;
   /** 某个项目索引完成后回调,供父级重新聚合(已索引文件离开待索引队列)。 */
   onIndexed?: () => void;
 }) {
@@ -48,6 +54,18 @@ export function PendingList({
       pollTimers.current = {};
     };
   }, []);
+
+  // 从项目页「重建索引」跳转来时:自动展开被聚焦的项目,让用户立刻看到其待索引文件 + 进度。
+  // expandSignal 自增即重新展开(支持同一项目被多次重建)。
+  useEffect(() => {
+    if (expandProjectId == null) return;
+    setExpanded((prev) => {
+      if (prev.has(expandProjectId)) return prev;
+      const next = new Set(prev);
+      next.add(expandProjectId);
+      return next;
+    });
+  }, [expandProjectId, expandSignal]);
 
   useEffect(() => {
     let cancelled = false;

@@ -105,6 +105,21 @@ def get_llm(request: Request):
     return llm
 
 
+def get_provisioner(request: Request):
+    """高质量提取 provisioner(MinerU)。优先用注入的 app.state.provisioner(测试假件);
+    否则按 app.state.config.mineru_venv_dir 懒构造并缓存。"""
+    prov = getattr(request.app.state, "provisioner", None)
+    if prov is not None:
+        return prov
+    from epictrace.config import AppConfig
+    from epictrace.media.mineru_provisioner import MinerUProvisioner
+
+    config = getattr(request.app.state, "config", None) or AppConfig()
+    prov = MinerUProvisioner(config.mineru_venv_dir)
+    request.app.state.provisioner = prov
+    return prov
+
+
 def get_retriever(request: Request):
     """混合检索器:dense + sparse → RRF → rerank。优先用注入的 app.state.retriever;
     否则复用延迟构造的 embedder / store / reranker。"""

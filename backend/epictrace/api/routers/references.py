@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import queue
+import threading
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sse_starlette.sse import EventSourceResponse
 
 from epictrace.api.deps import get_db, get_embedder, get_attachment_store
 from epictrace.db import Database
@@ -71,6 +76,101 @@ def add_reference(cid: int, payload: ReferenceCreate, request: Request,
         return svc.add_internal(cid, payload.ingest_record_id, cw)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+_DONE = object()  # 哨兵:worker 线程结束(成功/失败)后放入队列,通知 SSE 生成器收尾。
+
+
+@router.post("/conversations/{cid}/references/stream")
+def add_reference_stream(cid: int, payload: ReferenceCreate, request: Request,
+                         db: Database = Depends(get_db)):
+    """挂附件并把提取进度实时 SSE 出去(语义仍是 block-until-ready:仅在 done 事件携带
+    创建好的引用,前端据此刷新;附件只在提取完成后才可用,不是 fire-and-forget)。
+
+    事件:
+      {"event":"status","data":"解析中 12/29"}  — 提取进度(MinerU 逐条)
+      {"event":"done",  "data": <ReferenceOut JSON>}  — 成功,带创建好的引用
+      {"event":"error", "data": "<message>"}  — 提取/参数失败(ValueError/引擎未就绪等)
+
+    阻塞提取跑在 worker 线程,progress_cb 把进度推进线程安全队列;SSE 生成器边消费
+    队列边吐 status,从而「提取进行中就持续有进度」,而非等整个提取完成才一次性返回。
+    仅支持 external(走 MinerU 等长耗时提取);internal/无源仍用非流式 add_reference。
+    """
+    _require_conv(db, cid)
+    if payload.kind != "external" or not payload.source_path:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "stream attach requires kind=external with source_path")
+    svc = ReferenceService(db, embedder=_Lazy(lambda: get_embedder(request)),
+                           attachment_store=_Lazy(lambda: get_attachment_store(request)))
+    cw = _context_window(request)
+    # 有界队列:客户端断开后生成器停止 drain,worker 仍可能短暂 put 进度——
+    # 用 put_nowait 丢弃满时的进度(不阻塞 worker),保证 worker 在 cancel 后能尽快退出。
+    q: queue.Queue = queue.Queue(maxsize=256)
+    cancel = threading.Event()
+
+    def _emit(msg: str) -> None:
+        try:
+            q.put_nowait(("status", msg))
+        except queue.Full:
+            pass  # 进度是可丢弃的瞬态;丢一条不影响最终 done/error
+
+    def _work() -> None:
+        # worker:跑阻塞提取,进度→队列;结束放 (_DONE, result_or_None, error_or_None)。
+        # cancel(客户端断开时由生成器 set)透传到提取层,及时停掉 mineru 子进程。
+        try:
+            ref = svc.add_external(cid, payload.source_path, cw,
+                                   progress_cb=_emit, cancel=cancel)
+            _put_done(q, (_DONE, ref, None))
+        except Exception as e:  # noqa: BLE001 — 任意失败 → 经队列转成 error 事件
+            _put_done(q, (_DONE, None, str(e)))
+
+    async def gen():
+        worker = threading.Thread(target=_work, daemon=True)
+        worker.start()
+        try:
+            while True:
+                try:
+                    kind, a, b = _unpack(q.get_nowait())
+                except queue.Empty:
+                    # 没有待发事件:检查客户端是否断开;断开则取消 worker 并收尾。
+                    if await request.is_disconnected():
+                        cancel.set()
+                        return
+                    await asyncio.sleep(0.05)
+                    continue
+                if kind == "status":
+                    yield {"event": "status", "data": a}
+                    continue
+                # kind is _DONE: a=created ref dict (or None), b=error message (or None)
+                if b is not None:
+                    yield {"event": "error", "data": b}
+                else:
+                    yield {"event": "done",
+                           "data": ReferenceOut.model_validate(a).model_dump_json()}
+                return
+        finally:
+            # 正常结束或客户端中途断开(GeneratorExit)都置 cancel:让 worker 停掉
+            # 并杀掉 mineru 子进程,不再空跑数分钟、不再无界堆积队列。
+            cancel.set()
+
+    return EventSourceResponse(gen())
+
+
+def _unpack(item):
+    """队列项规整为 (kind, a, b):status→("status", msg, None);完成→(_DONE, ref, err)。"""
+    if item[0] == "status":
+        return ("status", item[1], None)
+    return item  # (_DONE, ref_or_None, err_or_None)
+
+
+def _put_done(q: queue.Queue, item) -> None:
+    """投递终态(done/error)。短超时阻塞:正常情况下消费者在持续 drain,队列必有空位;
+    若客户端已断开(消费者停 drain、队列被进度占满),超时后丢弃即可——没有读者再关心终态,
+    关键是不让 worker 永久阻塞在 put 上(否则线程泄漏)。"""
+    try:
+        q.put(item, timeout=1.0)
+    except queue.Full:
+        pass
 
 
 @router.delete("/conversations/{cid}/references/{rid}", status_code=status.HTTP_204_NO_CONTENT)
