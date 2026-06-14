@@ -60,6 +60,46 @@ class IndexService:
         job._targets = targets  # type: ignore[attr-defined]  # 交给 _run 消费
         return job
 
+    def reindex_project(self, project_id: int) -> IndexJob:
+        """用当前提取引擎重建该项目的索引:已索引文件用旧引擎提取过,常规 index_project
+        只碰 indexed=False 的记录、永远不会重提它们 —— 重建先把派生索引清空、把记录翻回
+        待索引,再走 index_project 的同一条后台流水线。
+
+        步骤:(a) 清该项目全部向量;(b) 重置全部 IngestRecord.indexed=False;
+        (c) 尽力删该项目记录的 provenance sidecar(派生缓存,可由重跑 MinerU 重建,删失败不阻断);
+        (d) 返回与 index_project 同形的 running 的 IndexJob,交给 run_in_background 推进。
+        """
+        # (a) 清向量。向量是可重建的派生索引;这里整项目清,后台再逐文件 upsert 回去。
+        self._resolve_store().delete_by_project(project_id)
+
+        # (b) 把该项目所有记录翻回待索引,使 index_project 重新纳入它们。
+        with self._db.session() as s:
+            recs = list(
+                s.execute(
+                    select(IngestRecord).where(IngestRecord.project_id == project_id)
+                ).scalars()
+            )
+            rec_ids = [r.id for r in recs]
+            for r in recs:
+                r.indexed = False
+
+        # (c) 尽力删 provenance sidecar(派生/可选缓存);失败仅记日志,不阻断重建。
+        try:
+            prov_dir = Path(self._db.config.provenance_dir)
+            for rid in rec_ids:
+                sidecar = prov_dir / f"ingest-{rid}.json"
+                if sidecar.exists():
+                    sidecar.unlink()
+        except Exception as e:  # noqa: BLE001 — sidecar 是派生缓存,删失败不影响重建
+            import logging
+
+            logging.getLogger("epictrace").warning(
+                "重建项目 %s 时清理 provenance sidecar 失败(不阻断): %s", project_id, e
+            )
+
+        # (d) 复用 index_project 的同一条流水线(同样的 IndexJob 形状 + 后台推进 + status 轮询)。
+        return self.index_project(project_id)
+
     def run_in_background(self, job: IndexJob) -> threading.Thread:
         """在守护线程里跑 _run(job),立刻返回线程对象;job 会被原地更新。"""
         t = threading.Thread(target=self._run, args=(job,), daemon=True)

@@ -110,6 +110,21 @@ def index_project(project_id: int, request: Request, db: Database = Depends(get_
     return _job_to_out(job)
 
 
+@router.post("/{project_id}/reindex", response_model=IndexStatusOut)
+def reindex_project(project_id: int, request: Request, db: Database = Depends(get_db)) -> IndexStatusOut:
+    """用当前提取引擎重建该项目索引:清旧向量 + 把记录翻回待索引 + 重跑同一条索引流水线。
+    与 index_project 同形返回(running 的 job),前端复用同一套 index/status 轮询读进度。"""
+    _ensure_project(db, project_id)
+    # 同 index_project:vector store 传 getter 延迟构造。注意 reindex_project 会在本请求线程里
+    # 先 delete_by_project(同步清向量)——getter(get_vector_store)保证「先 warmup 模型再起
+    # Milvus」,避免 'gRPC 激活后再 fork 加载模型' 段错误(见 deps.get_vector_store)。
+    svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request))
+    job = svc.reindex_project(project_id)
+    request.app.state.index_jobs[project_id] = job
+    svc.run_in_background(job)
+    return _job_to_out(job)
+
+
 @router.get("/{project_id}/index/status", response_model=IndexStatusOut)
 def index_status(project_id: int, request: Request, db: Database = Depends(get_db)) -> IndexStatusOut:
     _ensure_project(db, project_id)

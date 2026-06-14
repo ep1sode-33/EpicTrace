@@ -2,9 +2,11 @@ import { useState } from "react";
 import {
   ChevronRight,
   FolderClosed,
+  Loader2,
   MoreHorizontal,
   PenLine,
   Plus,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
 
@@ -36,6 +38,7 @@ export function ProjectSidebar({
   expandedIds,
   conversationsByProject,
   loadingProjectIds,
+  reindexingIds,
   onSelectProject,
   onToggleExpand,
   onSelectConversation,
@@ -43,6 +46,7 @@ export function ProjectSidebar({
   onDeleteConversation,
   onCreateProject,
   onDeleteProject,
+  onReindexProject,
 }: {
   projects: Project[];
   selectedProjectId: number | null;
@@ -55,6 +59,8 @@ export function ProjectSidebar({
   conversationsByProject: Readonly<Record<number, Conversation[]>>;
   /** 正在懒加载对话的项目 id 集合。 */
   loadingProjectIds: ReadonlySet<number>;
+  /** 正在「重建索引」(后台索引 job 运行中)的项目 id 集合;用于行内进度指示 + 菜单项禁用。 */
+  reindexingIds: ReadonlySet<number>;
   /** 点项目名/行:选中并展开该项目。 */
   onSelectProject: (project: Project) => void;
   /** 点 chevron:仅切换展开/折叠(不改变选中)。 */
@@ -67,6 +73,8 @@ export function ProjectSidebar({
   onCreateProject: () => void;
   /** 用户在某个项目行选择「删除项目」时调用,由父级打开确认对话框。 */
   onDeleteProject: (project: Project) => void;
+  /** 用户在某个项目行选择「重建索引」时调用,由父级确认 + 调后端 + 轮询进度。 */
+  onReindexProject: (project: Project) => void;
 }) {
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-border/70 bg-sidebar">
@@ -109,6 +117,7 @@ export function ProjectSidebar({
                 hasDraft={p.id === draftProjectId}
                 conversations={conversationsByProject[p.id]}
                 conversationsLoading={loadingProjectIds.has(p.id)}
+                reindexing={reindexingIds.has(p.id)}
                 selectedConversationId={selectedConversationId}
                 onSelectProject={onSelectProject}
                 onToggleExpand={onToggleExpand}
@@ -116,6 +125,7 @@ export function ProjectSidebar({
                 onCreateConversation={onCreateConversation}
                 onDeleteConversation={onDeleteConversation}
                 onDeleteProject={onDeleteProject}
+                onReindexProject={onReindexProject}
               />
             ))}
           </ul>
@@ -157,6 +167,7 @@ function ProjectNode({
   hasDraft,
   conversations,
   conversationsLoading,
+  reindexing,
   selectedConversationId,
   onSelectProject,
   onToggleExpand,
@@ -164,6 +175,7 @@ function ProjectNode({
   onCreateConversation,
   onDeleteConversation,
   onDeleteProject,
+  onReindexProject,
 }: {
   project: Project;
   selected: boolean;
@@ -171,6 +183,7 @@ function ProjectNode({
   hasDraft: boolean;
   conversations: Conversation[] | undefined;
   conversationsLoading: boolean;
+  reindexing: boolean;
   selectedConversationId: number | null;
   onSelectProject: (project: Project) => void;
   onToggleExpand: (project: Project) => void;
@@ -178,6 +191,7 @@ function ProjectNode({
   onCreateConversation: (project: Project) => void;
   onDeleteConversation: (conversation: Conversation) => void;
   onDeleteProject: (project: Project) => void;
+  onReindexProject: (project: Project) => void;
 }) {
   // 菜单打开时让行内操作保持可见(否则鼠标移开行后会随 hover 消失)。
   const [menuOpen, setMenuOpen] = useState(false);
@@ -229,13 +243,30 @@ function ProjectNode({
           </span>
         </button>
 
-        {/* 行内操作:与主按钮并列(绝对定位、不嵌套)。默认隐形,hover/聚焦/菜单打开时显现。 */}
+        {/* 重建索引进行态:常驻一个安静的旋转指示(不随 hover 隐现),
+            让用户即便鼠标移开也知道该项目后台还在索引。 */}
+        {reindexing && (
+          <span
+            className="absolute top-1/2 right-1.5 flex size-6 -translate-y-1/2 items-center justify-center text-muted-foreground"
+            role="status"
+            aria-live="polite"
+            title="正在重建索引…"
+          >
+            <Loader2 className="size-4 animate-spin" />
+            <span className="sr-only">正在重建索引</span>
+          </span>
+        )}
+
+        {/* 行内操作:与主按钮并列(绝对定位、不嵌套)。默认隐形,hover/聚焦/菜单打开时显现。
+            重建索引进行中时隐藏整组行内操作,给旋转指示让位,并避免重复触发。 */}
         <div
           className={cn(
             "absolute top-1/2 right-1.5 flex -translate-y-1/2 items-center gap-0.5 transition-opacity",
-            menuOpen
-              ? "opacity-100"
-              : "opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100",
+            reindexing
+              ? "pointer-events-none opacity-0"
+              : menuOpen
+                ? "opacity-100"
+                : "opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100",
           )}
         >
           <button
@@ -263,6 +294,13 @@ function ProjectNode({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" sideOffset={4}>
+              <DropdownMenuItem
+                disabled={reindexing}
+                onSelect={() => onReindexProject(project)}
+              >
+                <RefreshCw />
+                重建索引
+              </DropdownMenuItem>
               <DropdownMenuItem
                 variant="destructive"
                 onSelect={() => onDeleteProject(project)}
