@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -17,6 +18,9 @@ from epictrace.services.errors import (
     SourceFileNotFound,
     SourceUnreadable,
 )
+
+
+_log = logging.getLogger("epictrace")
 
 
 def _sha256(path: Path) -> str:
@@ -85,11 +89,20 @@ class IngestService:
                 s.add(rec)
                 s.flush()
                 s.refresh(rec)
+                # provenance(content_list sidecar)是派生/可选缓存(重跑 MinerU 可重建):
+                # 写失败绝不能回滚入库,所以单独窄 try/except,不让它落进下方的清理-重抛块。
                 if result is not None and result.metadata.get("content_list"):
-                    write_provenance(
-                        self._db.config.data_dir, "ingest", rec.id,
-                        result.metadata["content_list"],
-                    )
+                    try:
+                        write_provenance(
+                            self._db.config.data_dir, "ingest", rec.id,
+                            result.metadata["content_list"],
+                        )
+                    except Exception:  # noqa: BLE001 — 派生缓存写失败仅记日志,入库照常成功
+                        _log.warning(
+                            "write_provenance failed for ingest %s; "
+                            "skipping sidecar (extracted text is unaffected)",
+                            rec.id, exc_info=True,
+                        )
                 s.expunge(rec)
                 return rec
             except Exception:

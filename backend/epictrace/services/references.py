@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from sqlalchemy import select
@@ -10,6 +11,8 @@ from epictrace.media import get_processor
 from epictrace.media.provenance import write_provenance
 from epictrace.models import Conversation, ConversationReference, IngestRecord
 from epictrace.services.budget import estimate_tokens, fits_fulltext
+
+_log = logging.getLogger("epictrace")
 
 
 def _to_dict(r: ConversationReference) -> dict:
@@ -60,11 +63,19 @@ class ReferenceService:
             s.add(ref); s.flush(); s.refresh(ref)
             out = _to_dict(ref)
             ref_id = ref.id
+        # provenance sidecar 派生/可选:ref 已 commit,写失败仅记日志,不向调用方传播。
         if result.metadata.get("content_list"):
-            write_provenance(
-                self._db.config.data_dir, "reference", ref_id,
-                result.metadata["content_list"],
-            )
+            try:
+                write_provenance(
+                    self._db.config.data_dir, "reference", ref_id,
+                    result.metadata["content_list"],
+                )
+            except Exception:  # noqa: BLE001 — 派生缓存写失败不影响已登记的引用
+                _log.warning(
+                    "write_provenance failed for reference %s; "
+                    "skipping sidecar (extracted text is unaffected)",
+                    ref_id, exc_info=True,
+                )
         # 大文件:尝试切块+embed 进会话级临时集合(失败保持 deferred,不阻塞)。
         if mode == "deferred" and self._embedder is not None and self._attachment_store is not None:
             if self._index_attachment(conversation_id, ref_id, text):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -9,6 +10,8 @@ from epictrace.media.errors import ExtractionFailed
 
 # 注入点:默认用 subprocess.run;测试传假 runner 完全不碰真 mineru。
 Runner = Callable[[list[str], int], subprocess.CompletedProcess]
+
+_log = logging.getLogger("epictrace")
 
 
 def _default_runner(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
@@ -62,10 +65,21 @@ def run_mineru(
     markdown = md_path.read_text(encoding="utf-8", errors="replace")
     if not markdown.strip():
         raise ExtractionFailed("mineru produced empty markdown")
+    # content_list 是派生/可选的 provenance(可由重跑 MinerU 重建):缺失/损坏不应
+    # 让提取失败而丢掉好的 markdown 文本——记一条 warning(不静默吞),返回空 list。
     content_list: list = []
     if cl_path.exists():
         try:
             content_list = json.loads(cl_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            _log.warning(
+                "mineru content_list at %s is unreadable/corrupt (%s); "
+                "extraction succeeds with empty provenance", cl_path, e,
+            )
             content_list = []
+    else:
+        _log.warning(
+            "mineru produced no content_list at %s; "
+            "extraction succeeds with empty provenance", cl_path,
+        )
     return markdown, content_list

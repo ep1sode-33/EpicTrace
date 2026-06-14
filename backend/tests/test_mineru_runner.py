@@ -109,3 +109,46 @@ def test_empty_markdown_raises(tmp_path: Path):
     with pytest.raises(ExtractionFailed):
         run_mineru(pdf, out, mineru_bin="mineru",
                    model_source="modelscope", timeout=10, runner=runner)
+
+
+def test_missing_content_list_succeeds_with_empty_and_warns(tmp_path: Path, caplog):
+    """content_list 缺失:provenance 是可选/派生,不能因此丢掉好的提取文本——
+    返回成功 + 空 content_list,并记一条 warning(不静默吞)。"""
+    pdf = tmp_path / "p.pdf"; pdf.write_bytes(b"%PDF")
+    out = tmp_path / "o"
+
+    def runner(cmd, timeout):
+        d = out / "p"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "p.md").write_text("# real text\n\nbody", encoding="utf-8")
+        # 故意不写 p_content_list.json
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="epictrace"):
+        md, cl = run_mineru(pdf, out, mineru_bin="mineru",
+                            model_source="modelscope", timeout=10, runner=runner)
+    assert md == "# real text\n\nbody"
+    assert cl == []
+    assert any("content_list" in r.message for r in caplog.records)
+
+
+def test_corrupt_content_list_succeeds_with_empty_and_warns(tmp_path: Path, caplog):
+    """content_list 损坏(非法 JSON):同样返回成功 + 空 content_list + warning,绝不 raise。"""
+    pdf = tmp_path / "p.pdf"; pdf.write_bytes(b"%PDF")
+    out = tmp_path / "o"
+
+    def runner(cmd, timeout):
+        d = out / "p"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "p.md").write_text("# real text\n\nbody", encoding="utf-8")
+        (d / "p_content_list.json").write_text("{not valid json", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="epictrace"):
+        md, cl = run_mineru(pdf, out, mineru_bin="mineru",
+                            model_source="modelscope", timeout=10, runner=runner)
+    assert md == "# real text\n\nbody"
+    assert cl == []
+    assert any("content_list" in r.message for r in caplog.records)

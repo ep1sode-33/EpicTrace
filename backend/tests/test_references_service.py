@@ -117,3 +117,35 @@ def test_detach_wrong_conversation_is_noop(tmp_path: Path):
     ref = svc.add_external(cid, _write(tmp_path, "n.md", "内容内容"), context_window=1_000_000)
     svc.detach(999999, ref["id"])               # 不是该引用的会话 → 不动
     assert len(svc.list_active(cid)) == 1
+
+
+def test_add_external_succeeds_even_if_provenance_write_fails(tmp_path: Path, monkeypatch):
+    """provenance(content_list sidecar)派生/可选:DB 行已 commit 后写失败不得向上传播。"""
+    db, cid, _ = _setup(tmp_path)
+    path = _write(tmp_path, "paper.pdf", "x")  # 内容由假处理器给,文件存在即可
+
+    from epictrace.interfaces.media import MediaResult
+
+    class _PdfProc:
+        def supports(self, _path):
+            return True
+
+        def process(self, _path):
+            return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={
+                "backend": "mineru-hybrid",
+                "content_list": [{"type": "text", "text": "hi", "page_idx": 0}],
+                "pages": 1})
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("epictrace.services.references.get_processor", lambda p, config: _PdfProc())
+    monkeypatch.setattr("epictrace.services.references.write_provenance", _boom)
+
+    svc = ReferenceService(db)
+    ref = svc.add_external(cid, path, context_window=1_000_000)  # 不应抛
+    assert ref["extracted_text"].startswith("页表")
+    active = svc.list_active(cid)
+    assert len(active) == 1 and active[0]["id"] == ref["id"]
+    sidecar = Path(tmp_path) / "provenance" / f"reference-{ref['id']}.json"
+    assert not sidecar.exists()

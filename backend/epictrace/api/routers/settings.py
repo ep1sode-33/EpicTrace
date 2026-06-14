@@ -106,17 +106,17 @@ def extraction_status(request: Request):
 
 @router.post("/extraction/provision", response_model=ExtractionStatusOut)
 def extraction_provision(request: Request):
-    """触发 provisioning(后台线程,粗粒度状态)。立即返回当前状态;前端轮询 status。"""
+    """触发 provisioning(后台线程,粗粒度状态)。立即返回当前状态;前端轮询 status。
+
+    失败状态/原因(failed + last_error)由 provisioner 自身记录;重复触发由 provisioner
+    内部并发守卫 no-op。这里只在后台线程吞掉上抛的异常(线程内未捕获异常无人接收)。"""
     prov = get_provisioner(request)
 
     def _run():
         try:
             prov.provision()
-        except Exception as exc:  # noqa: BLE001 — 失败状态由 prov.state 反映;记录原因
-            try:
-                prov.last_error = str(exc)[:500]
-            except Exception:  # noqa: BLE001
-                pass
+        except Exception:  # noqa: BLE001 — 失败状态/last_error 已由 provisioner 记录
+            pass
 
     threading.Thread(target=_run, daemon=True).start()
     return _provision_status(prov)

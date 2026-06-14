@@ -55,3 +55,60 @@ def test_ingest_file_and_list(client, tmp_path):
     listed = client.get(f"/api/files?project_id={pid}").json()
     assert len(listed) == 1
     assert listed[0]["description"] == "lecture"
+
+
+def _make_project(client, tmp_path, name="RX"):
+    folder = str(tmp_path / name)
+    return client.post("/api/projects", json={"title": name, "folder_path": folder}).json()["id"]
+
+
+def test_ingest_engine_not_ready_returns_409(client, tmp_path, monkeypatch):
+    from epictrace.media.errors import ExtractionEngineNotReady
+
+    pid = _make_project(client, tmp_path, "ENR")
+    src = tmp_path / "paper.pdf"
+    src.write_bytes(b"%PDF-1.4 fake")
+
+    class _Proc:
+        def process(self, _path):
+            raise ExtractionEngineNotReady("请先在设置中安装高质量提取引擎")
+
+    monkeypatch.setattr("epictrace.services.ingest.get_processor", lambda path, config: _Proc())
+
+    resp = client.post(
+        "/api/files/ingest",
+        json={
+            "project_id": pid,
+            "source_path": str(src),
+            "ingest_method": "file_direct",
+            "description": "",
+        },
+    )
+    assert resp.status_code == 409
+    assert "高质量提取引擎" in resp.json()["detail"]
+
+
+def test_ingest_extraction_failed_returns_400(client, tmp_path, monkeypatch):
+    from epictrace.media.errors import ExtractionFailed
+
+    pid = _make_project(client, tmp_path, "EF")
+    src = tmp_path / "deck.pptx"
+    src.write_bytes(b"PK fake")
+
+    class _Proc:
+        def process(self, _path):
+            raise ExtractionFailed("mineru exited 2: boom")
+
+    monkeypatch.setattr("epictrace.services.ingest.get_processor", lambda path, config: _Proc())
+
+    resp = client.post(
+        "/api/files/ingest",
+        json={
+            "project_id": pid,
+            "source_path": str(src),
+            "ingest_method": "file_direct",
+            "description": "",
+        },
+    )
+    assert resp.status_code == 400
+    assert "mineru" in resp.json()["detail"]
