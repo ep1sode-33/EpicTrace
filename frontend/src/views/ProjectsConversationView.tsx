@@ -751,23 +751,32 @@ function Conversation({
       const cid = await ensureConversation();
       setAttaching(true);
       const failures: string[] = [];
-      // 顺序逐个解析:阻塞直到每个文件 done/error(MinerU 解析较慢),
-      // 期间用 attachProgress 把后端的实时进度文案直出到指示器。
-      for (const p of paths) {
-        const name = p.split("/").pop() || p;
-        let failed: string | null = null;
-        await api.attachExternalStream(cid, p, {
-          onStatus: (text) => setAttachProgress(`正在用 MinerU 解析 ${name}:${text}`),
-          // done 由下面统一 refreshRefs 以服务端为准重拉,这里无需手动并入。
-          onError: (message) => { failed = message; },
-        });
-        // 单文件失败不阻塞其余;收集后统一以内联提示呈现。
-        if (failed) failures.push(`${name}(${failed})`);
+      try {
+        // 顺序逐个解析:阻塞直到每个文件 done/error(MinerU 解析较慢),
+        // 期间用 attachProgress 把后端的实时进度文案直出到指示器。
+        for (const p of paths) {
+          const name = p.split("/").pop() || p;
+          let failed: string | null = null;
+          try {
+            await api.attachExternalStream(cid, p, {
+              onStatus: (text) => setAttachProgress(`正在用 MinerU 解析 ${name}:${text}`),
+              // done 由下面统一 refreshRefs 以服务端为准重拉,这里无需手动并入。
+              onError: (message) => { failed = message; },
+            });
+          } catch (e) {
+            // 流被 reject(HTTP / 网络 / SSE 解析错误,或 server error 事件经 onError 后仍 reject):
+            // 也算单文件失败,收进 failures(而非整批抛出),否则会漏掉 finally 的进行态清理。
+            failed = e instanceof Error ? e.message : String(e);
+          }
+          // 单文件失败不阻塞其余;收集后统一以内联提示呈现。
+          if (failed) failures.push(`${name}(${failed})`);
+        }
+      } finally {
+        // 无论成功 / 失败 / 抛错,都收起进行态、清进度文案,避免按钮卡在加载态。
+        setAttaching(false);
+        setAttachProgress(null);
       }
-      // 先收起进行态、清进度文案,再呈现失败提示,最后刷新引用列表——
-      // 这样即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
-      setAttaching(false);
-      setAttachProgress(null);
+      // 呈现失败提示,最后刷新引用列表——即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
       setAttachError(failures.length ? `部分文件未能添加:${failures.join("；")}` : null);
       await refreshRefs(cid);
     },
