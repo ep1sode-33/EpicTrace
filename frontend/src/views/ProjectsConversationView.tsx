@@ -39,9 +39,12 @@ import { SourceViewer } from "@/components/SourceViewer";
 export function ProjectsConversationView({
   llmConfigured,
   onOpenSettings,
+  onReindexStarted,
 }: {
   llmConfigured: boolean;
   onOpenSettings: () => void;
+  /** 重建索引已触发:由 App 切到「信息处理和入库」并聚焦该项目,在那儿看完整索引进度。 */
+  onReindexStarted: (projectId: number) => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Project | null>(null);
@@ -69,16 +72,6 @@ export function ProjectsConversationView({
   // 与 activeConversationId 互斥:有草稿时主区显示空线程 + 就绪输入框,后端无任何记录。
   // 首次发送时才 createConversation;切换项目/会话/顶栏页签会丢弃草稿(纯前端瞬态)。
   const [draftProjectId, setDraftProjectId] = useState<number | null>(null);
-  // 正在「重建索引」(后台索引 job 运行中)的项目 id 集合;用于侧栏行内进度指示 + 菜单项禁用。
-  const [reindexingIds, setReindexingIds] = useState<ReadonlySet<number>>(new Set());
-  // 重建索引的 status 轮询定时器(按项目 id);组件卸载时统一清理,避免泄漏 / unmount 后 setState。
-  const reindexTimers = useRef<Record<number, ReturnType<typeof setInterval>>>({});
-  useEffect(() => {
-    const timers = reindexTimers.current;
-    return () => {
-      for (const id of Object.values(timers)) clearInterval(id);
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -254,58 +247,26 @@ export function ProjectsConversationView({
   );
 
   // 重建索引:确认 → 调 /reindex(后端清旧向量 + 把记录翻回待索引 + 跑同一条索引流水线)→
-  // 复用与 PendingList 完全一致的 index/status 轮询读实时进度(同端点、同返回形状)。
-  // 侧栏只显示「索引中」的旋转指示;完成/失败都收尾、清进度。
-  const finishReindex = useCallback((projectId: number) => {
-    const timer = reindexTimers.current[projectId];
-    if (timer !== undefined) {
-      clearInterval(timer);
-      delete reindexTimers.current[projectId];
-    }
-    setReindexingIds((prev) => {
-      if (!prev.has(projectId)) return prev;
-      const next = new Set(prev);
-      next.delete(projectId);
-      return next;
-    });
-  }, []);
-
+  // 切到「信息处理和入库」页并聚焦该项目。进度不再在侧栏行内显示——而是复用与「建立索引」
+  // 完全相同的整套进度 UI(PendingList,轮询同一个 index/status 端点),用户在那儿看实时进度。
   const handleReindexProject = useCallback(
     async (project: Project) => {
-      // 已在重建中:忽略重复触发。
-      if (reindexTimers.current[project.id] !== undefined) return;
       // 重建较慢且会清空现有索引,二次确认避免误触。
       const ok = window.confirm(
         "将清除该项目索引并用当前提取引擎重新索引所有文件,可能较慢,继续?",
       );
       if (!ok) return;
-
-      setReindexingIds((prev) => new Set(prev).add(project.id));
       try {
-        // POST 立刻返回 running 的 job(后台线程推进);已是终态(无文件)则直接收尾。
-        const started = await api.reindexProject(project.id);
-        if (started.status !== "running") {
-          finishReindex(project.id);
-          return;
-        }
+        // POST 同步把该项目记录翻回待索引并启动后台 job,立刻返回。
+        // 必须先 await 再跳转:这样目标页拉到的列表里该项目已是待索引,PendingList 才能聚合出它。
+        await api.reindexProject(project.id);
       } catch {
-        // 触发失败:收尾(撤销进度指示),用户可重试。
-        finishReindex(project.id);
+        // 触发失败:静默,用户可重试(不跳转,留在当前页)。
         return;
       }
-      // 每 ~800ms 轮询 status,直到 status !== "running"(与 PendingList 一致)。
-      const timer = setInterval(async () => {
-        try {
-          const job = await api.indexStatus(project.id);
-          if (job.status !== "running") finishReindex(project.id);
-        } catch {
-          // 轮询失败:停止并收尾。
-          finishReindex(project.id);
-        }
-      }, 800);
-      reindexTimers.current[project.id] = timer;
+      onReindexStarted(project.id);
     },
-    [finishReindex],
+    [onReindexStarted],
   );
 
   const handleCreated = async (project: Project) => {
@@ -359,7 +320,6 @@ export function ProjectsConversationView({
         expandedIds={expandedIds}
         conversationsByProject={conversationsByProject}
         loadingProjectIds={loadingProjectIds}
-        reindexingIds={reindexingIds}
         onSelectProject={handleSelectProject}
         onToggleExpand={handleToggleExpand}
         onSelectConversation={handleSelectConversation}

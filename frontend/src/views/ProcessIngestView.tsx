@@ -11,7 +11,15 @@ import {
 import { CreateProjectModal } from "@/components/CreateProjectModal";
 import { PendingList } from "@/components/PendingList";
 
-export function ProcessIngestView() {
+export function ProcessIngestView({
+  focusProjectId = null,
+  focusKey = 0,
+}: {
+  /** 从项目页「重建索引」跳转来时要聚焦(展开并看进度)的项目 id;null 表示无跳转。 */
+  focusProjectId?: number | null;
+  /** 自增信号:同一项目再次触发重建也能重新聚焦(配合 focusProjectId 使用)。 */
+  focusKey?: number;
+} = {}) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [rescanning, setRescanning] = useState(false);
@@ -37,6 +45,29 @@ export function ProcessIngestView() {
       cancelled = true;
     };
   }, []);
+
+  // 从项目页「重建索引」跳转进来(或已在本页时再次触发):重建已在后端把该项目记录翻回待索引,
+  // 这里重拉项目列表并 bump refreshKey,让 PendingList 重新聚合出该项目的待索引分组,
+  // 并自动展开它;PendingList 自带的「恢复 running job」逻辑随即接管显示实时进度。
+  useEffect(() => {
+    if (focusProjectId == null) return;
+    let cancelled = false;
+    api
+      .listProjects()
+      .then((rows) => {
+        if (!cancelled) setProjects(rows);
+      })
+      .catch(() => {
+        /* 列表刷新失败:沿用现有列表,PendingList 仍会按已有项目恢复进度。 */
+      })
+      .finally(() => {
+        if (!cancelled) setRefreshKey((k) => k + 1);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // focusKey 自增即重新触发(支持同一项目被多次重建);focusProjectId 变化亦触发。
+  }, [focusProjectId, focusKey]);
 
   const handleCreated = async (project: Project) => {
     // 重新拉取权威列表,避免较慢的初始 listProjects 响应覆盖乐观插入的新项目。
@@ -139,6 +170,8 @@ export function ProcessIngestView() {
         <PendingList
           projects={projects}
           refreshKey={refreshKey}
+          expandProjectId={focusProjectId}
+          expandSignal={focusKey}
           onIndexed={() => setRefreshKey((k) => k + 1)}
         />
       </section>
