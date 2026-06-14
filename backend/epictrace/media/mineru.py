@@ -14,7 +14,7 @@ class _Provisioner(Protocol):
     def mineru_bin(self) -> str: ...
 
 
-# runner(pdf_path, out_dir, *, mineru_bin, model_source, timeout, progress_cb) -> (markdown, content_list)
+# runner(pdf_path, out_dir, *, mineru_bin, model_source, timeout, effort, progress_cb) -> (markdown, content_list)
 RunnerFn = Callable[..., tuple[str, list]]
 
 
@@ -39,11 +39,13 @@ class MinerUMediaProcessor(MediaProcessor):
         *,
         model_source: str,
         timeout: int,
+        effort: str = "medium",
         runner: RunnerFn | None = None,
     ) -> None:
         self._provisioner = provisioner
         self._model_source = model_source
         self._timeout = timeout
+        self._effort = effort
         self._runner = runner or run_mineru
 
     def supports(self, path: Path) -> bool:
@@ -60,6 +62,7 @@ class MinerUMediaProcessor(MediaProcessor):
                 mineru_bin=self._provisioner.mineru_bin(),
                 model_source=self._model_source,
                 timeout=self._timeout,
+                effort=self._effort,
                 progress_cb=progress_cb,
             )
         return MediaResult(

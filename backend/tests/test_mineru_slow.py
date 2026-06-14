@@ -30,7 +30,8 @@ def test_real_mineru_extracts_a_pdf(tmp_path):
     c.save()
 
     proc = MinerUMediaProcessor(
-        prov, model_source=config.model_source, timeout=config.extraction_timeout
+        prov, model_source=config.model_source, timeout=config.extraction_timeout,
+        effort=config.extraction_effort,
     )
     result = proc.process(pdf)
     assert result.text.strip()

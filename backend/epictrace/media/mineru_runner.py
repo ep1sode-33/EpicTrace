@@ -119,10 +119,11 @@ def run_mineru(
     mineru_bin: str,
     model_source: str,
     timeout: int,
+    effort: str = "high",
     runner: Runner | None = None,
     progress_cb: ProgressCb | None = None,
 ) -> tuple[str, list]:
-    """跑 MinerU 子进程(hybrid-engine, effort=high),读 markdown + content_list。
+    """跑 MinerU 子进程(hybrid-engine,解析力度由 effort 决定;默认 high),读 markdown + content_list。
 
     src_path 可为 pdf/docx/pptx —— mineru 按文件路径自动识别格式,命令对三类完全
     一致(此函数不分支)。
@@ -139,7 +140,7 @@ def run_mineru(
         "-p", str(src_path),
         "-o", str(out_dir),
         "-b", "hybrid-engine",
-        "--effort", "high",
+        "--effort", effort,
         "--source", model_source,
     ]
     # 注入了 runner(测试)→ 一律用它(不流式);否则:有 progress_cb 走流式 Popen,

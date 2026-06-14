@@ -20,6 +20,13 @@ def test_rich_doc_slots_are_mineru_not_python_processors(tmp_path: Path, name: s
         proc.process(p)
 
 
+def test_rich_processor_uses_config_extraction_effort(tmp_path: Path):
+    # registry 用 config.extraction_effort(默认 medium)构造 MinerU 处理器。
+    proc = get_processor(tmp_path / "a.pdf", AppConfig(data_dir=tmp_path))
+    assert isinstance(proc, MinerUMediaProcessor)
+    assert proc._effort == "medium"
+
+
 def test_unknown_type_returns_none(tmp_path: Path):
     assert get_processor(tmp_path / "a.png", AppConfig(data_dir=tmp_path)) is None    # 图片本期无 processor
     assert get_processor(tmp_path / "a.mp3", AppConfig(data_dir=tmp_path)) is None     # 音频本期无 processor

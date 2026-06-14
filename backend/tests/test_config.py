@@ -21,5 +21,6 @@ def test_extraction_defaults():
     c = AppConfig()
     assert c.model_source == "modelscope"
     assert c.extraction_timeout == 600
+    assert c.extraction_effort == "medium"  # faster default; high is too slow for interactive use
     assert c.mineru_venv_dir == c.data_dir / ".MinerU-venv"
     assert c.provenance_dir == c.data_dir / "provenance"

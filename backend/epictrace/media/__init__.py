@@ -24,6 +24,7 @@ def _rich_processors(config: AppConfig) -> list[MediaProcessor]:
             provisioner,
             model_source=getattr(config, "model_source", "modelscope"),
             timeout=getattr(config, "extraction_timeout", 600),
+            effort=getattr(config, "extraction_effort", "medium"),
         )
     ]
 

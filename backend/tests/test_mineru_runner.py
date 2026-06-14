@@ -48,9 +48,29 @@ def test_builds_command_and_parses_output(tmp_path: Path):
     assert "-p" in cmd and str(pdf) in cmd
     assert "-o" in cmd and str(out) in cmd
     assert "-b" in cmd and "hybrid-engine" in cmd
-    assert "--effort" in cmd and "high" in cmd
+    assert "--effort" in cmd and "high" in cmd  # default effort is high (standalone call)
     assert "--source" in cmd and "modelscope" in cmd
     assert seen["timeout"] == 600
+
+
+def test_effort_param_lands_in_command(tmp_path: Path):
+    # 传入的 effort 应被写进命令(默认 high,可被覆盖为 medium 等)。
+    pdf = tmp_path / "paper.pdf"; pdf.write_bytes(b"%PDF")
+    out = tmp_path / "out"
+    seen = {}
+
+    def runner(cmd, timeout):
+        seen["cmd"] = cmd
+        return _fake_ok(out, "paper", "# ok\n\nbody", [])(cmd, timeout)
+
+    run_mineru(
+        pdf, out, mineru_bin="mineru", model_source="modelscope",
+        timeout=600, effort="medium", runner=runner,
+    )
+    cmd = seen["cmd"]
+    i = cmd.index("--effort")
+    assert cmd[i + 1] == "medium"
+    assert "high" not in cmd
 
 
 @pytest.mark.parametrize("name", ["paper.pdf", "notes.docx", "deck.pptx"])
