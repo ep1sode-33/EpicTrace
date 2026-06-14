@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -56,6 +58,9 @@ def create_app(
     app.state.llm = llm  # 注入或由 SettingsService 接线(见 deps.get_llm)
     app.state.retriever = retriever  # 注入或延迟构造(见 deps.get_retriever)
     app.state.index_jobs = {}  # project_id -> IndexJob(最近一次)
+    # 守护 index/reindex 的「检查在跑 + 启动新 job」临界区:双击/重试/正在跑时再点
+    # 不应起第二个并发的(破坏性)重建。见 routers/projects.py。
+    app.state.index_lock = threading.Lock()
 
     app.include_router(health.router, prefix="/api")
     app.include_router(projects.router, prefix="/api")
