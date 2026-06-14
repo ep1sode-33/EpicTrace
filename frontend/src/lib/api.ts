@@ -94,6 +94,16 @@ export const api = {
       // 后端在缺失时返回 404;视为「已不在」,与删除成功同样处理。
       if (!r.ok && r.status !== 404) throw new Error(`${r.status}: ${r.statusText}`);
     }),
+  renameConversation: (cid: number, title: string) =>
+    fetch(`${BASE}/api/conversations/${cid}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }).then(j<Conversation>),
+  renameProject: (id: number, title: string) =>
+    fetch(`${BASE}/api/projects/${id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }).then(j<Project>),
   listMessages: (cid: number) =>
     fetch(`${BASE}/api/conversations/${cid}/messages`).then(j<ChatMessage[]>),
   getSource: (recordId: number) =>
