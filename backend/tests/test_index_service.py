@@ -56,13 +56,13 @@ def test_index_single_file_failure_is_recorded_not_fatal(tmp_path, monkeypatch):
     # 让某个文件提取时抛错
     import epictrace.services.index as idx
     real = idx.get_processor
-    def boom(p):
+    def boom(p, config):
         if p.name == "a.md":
             class P:
                 def process(self, _): raise RuntimeError("boom")
                 def supports(self, _): return True
             return P()
-        return real(p)
+        return real(p, config)
     monkeypatch.setattr(idx, "get_processor", boom)
     job = svc.index_project(proj.id)
     svc._run(job)

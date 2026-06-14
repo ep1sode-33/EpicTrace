@@ -54,7 +54,7 @@ class IndexService:
                     )
                 ).scalars()
             )
-            targets = [(r.id, r.stored_path) for r in recs if get_processor(Path(r.stored_path)) is not None]
+            targets = [(r.id, r.stored_path) for r in recs if get_processor(Path(r.stored_path), self._db.config) is not None]
 
         job = IndexJob(project_id=project_id, total=len(targets))
         job._targets = targets  # type: ignore[attr-defined]  # 交给 _run 消费
@@ -75,7 +75,7 @@ class IndexService:
         for rec_id, path_str in targets:
             try:
                 path = Path(path_str)
-                proc = get_processor(path)
+                proc = get_processor(path, self._db.config)
                 text = proc.process(path).text
                 chunks = chunk_text(text)
                 # 幂等:提取成功后、入库前无条件清旧块,

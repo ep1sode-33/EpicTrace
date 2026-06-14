@@ -123,7 +123,7 @@ def test_ingest_cleans_up_orphan_on_extraction_failure(tmp_path: Path, monkeypat
         def process(self, _path):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr("epictrace.services.ingest.get_processor", lambda _: _BadProc())
+    monkeypatch.setattr("epictrace.services.ingest.get_processor", lambda _path, _config: _BadProc())
 
     folder = Path(proj.folder_path)
     with pytest.raises(RuntimeError):

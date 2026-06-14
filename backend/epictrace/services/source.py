@@ -20,7 +20,7 @@ class SourceService:
                 raise ValueError("ingest record not found")
             path = Path(rec.stored_path)
             filename = rec.original_filename
-        proc = get_processor(path)
+        proc = get_processor(path, self._db.config)
         text = proc.process(path).text if proc is not None else ""
         return {"filename": filename, "path": str(path), "text": text}
 
@@ -34,6 +34,6 @@ class SourceService:
             path = ref.source_path or ""
             text = ref.extracted_text or ""
         if not text and path and Path(path).exists():
-            proc = get_processor(Path(path))
+            proc = get_processor(Path(path), self._db.config)
             text = proc.process(Path(path)).text if proc is not None else ""
         return {"filename": name, "path": path, "text": text}

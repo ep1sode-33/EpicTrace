@@ -39,7 +39,7 @@ class ReferenceService:
         p = Path(path)
         if not p.exists() or not p.is_file():
             raise ValueError("file not found")
-        proc = get_processor(p)
+        proc = get_processor(p, self._db.config)
         if proc is None:
             raise ValueError("unsupported file type")
         try:
@@ -79,7 +79,7 @@ class ReferenceService:
             if rec.project_id != conv.project_id:
                 raise ValueError("ingest record belongs to a different project")
             path = Path(rec.stored_path); name = rec.original_filename
-        proc = get_processor(path)
+        proc = get_processor(path, self._db.config)
         text = ""
         if proc is not None:
             try:

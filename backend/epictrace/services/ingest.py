@@ -66,7 +66,7 @@ class IngestService:
                 raise SourceUnreadable(source_path) from e
 
             try:
-                proc = get_processor(dest)
+                proc = get_processor(dest, self._db.config)
                 extracted = proc.process(dest).text if proc is not None else ""
 
                 rec = IngestRecord(
