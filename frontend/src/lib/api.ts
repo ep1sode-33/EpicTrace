@@ -34,6 +34,11 @@ export interface Settings {
   active_profile_id: string | null;
   profiles: LLMProfile[];
 }
+export interface ExtractionStatus {
+  state: "not_installed" | "installing" | "ready" | "failed";
+  ready: boolean;
+  error?: string | null;
+}
 
 /** sendMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
 export interface StreamHandlers {
@@ -137,6 +142,11 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }).then(j<{ ok: boolean; sample?: string; error?: string }>),
+
+  getExtractionStatus: () =>
+    fetch(`${BASE}/api/extraction/status`).then(j<ExtractionStatus>),
+  provisionExtraction: () =>
+    fetch(`${BASE}/api/extraction/provision`, { method: "POST" }).then(j<ExtractionStatus>),
 
   /**
    * 发消息并流式接收回答。后端是 SSE(events: status/token/citations/done);

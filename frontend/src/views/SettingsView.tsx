@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 
-import { api, type LLMProfile, type Settings } from "@/lib/api";
+import { api, type ExtractionStatus, type LLMProfile, type Settings } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -249,8 +249,114 @@ export function SettingsView({
             </>
           )}
         </section>
+
+        <ExtractionSection />
       </div>
     </div>
+  );
+}
+
+const STATE_LABEL: Record<ExtractionStatus["state"], string> = {
+  not_installed: "未安装",
+  installing: "安装中",
+  ready: "就绪",
+  failed: "失败",
+};
+
+function ExtractionSection() {
+  const [status, setStatus] = useState<ExtractionStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getExtractionStatus()
+      .then((s) => !cancelled && setStatus(s))
+      .catch((e) => !cancelled && setErr(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 安装中:轮询 status 直到 ready/failed。
+  useEffect(() => {
+    if (status?.state !== "installing" && !busy) return;
+    const t = setInterval(() => {
+      api
+        .getExtractionStatus()
+        .then((s) => {
+          setStatus(s);
+          if (s.state === "ready" || s.state === "failed") {
+            setBusy(false);
+            clearInterval(t);
+          }
+        })
+        .catch(() => {});
+    }, 2000);
+    return () => clearInterval(t);
+  }, [status?.state, busy]);
+
+  const install = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      setStatus(await api.provisionExtraction());
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  };
+
+  const ready = status?.ready === true;
+  const installing = busy || status?.state === "installing";
+
+  return (
+    <section className="mt-10 flex flex-col gap-3 border-t border-border/60 pt-8">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-sm font-semibold text-foreground">高质量提取</h2>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          用 MinerU(版面/表格/公式/OCR)替代基础 PDF/DOCX/PPTX 提取。首次安装会下载模型(约数 GB),仅一次,装完全本地运行。
+        </p>
+      </div>
+
+      <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5">
+        <span className="flex items-center gap-2 text-sm text-foreground">
+          {installing && <Loader2 className="size-3.5 animate-spin" />}
+          {ready && <CheckCircle2 className="size-3.5 text-primary" strokeWidth={2.25} />}
+          {status?.state === "failed" && <TriangleAlert className="size-3.5 text-destructive" />}
+          状态:{status ? STATE_LABEL[status.state] : "…"}
+        </span>
+        <div className="ml-auto">
+          {!ready && (
+            <Button
+              type="button"
+              size="sm"
+              disabled={installing}
+              onClick={install}
+              title="下载并安装 MinerU 提取引擎"
+            >
+              {installing ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  安装中…
+                </>
+              ) : status?.state === "failed" ? (
+                "重试安装"
+              ) : (
+                "安装"
+              )}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {(err || status?.error) && (
+        <p className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
+          {err || status?.error}
+        </p>
+      )}
+    </section>
   );
 }
 
