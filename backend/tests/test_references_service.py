@@ -119,6 +119,32 @@ def test_detach_wrong_conversation_is_noop(tmp_path: Path):
     assert len(svc.list_active(cid)) == 1
 
 
+def test_add_external_forwards_progress_cb_to_processor(tmp_path: Path, monkeypatch):
+    """add_external 把 progress_cb 透传给 processor.process —— SSE 端点据此把进度流给前端。"""
+    db, cid, _ = _setup(tmp_path)
+    path = _write(tmp_path, "paper.pdf", "x")  # 文本由假处理器给
+
+    from epictrace.interfaces.media import MediaResult
+
+    class _PdfProc:
+        def supports(self, _path):
+            return True
+
+        def process(self, _path, *, progress_cb=None):
+            if progress_cb is not None:
+                progress_cb("解析中 12/29")
+                progress_cb("解析中 29/29")
+            return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: _PdfProc())
+    seen: list[str] = []
+    svc = ReferenceService(db)
+    ref = svc.add_external(cid, path, context_window=1_000_000, progress_cb=seen.append)
+    assert ref["mode"] == "fulltext"
+    assert seen == ["解析中 12/29", "解析中 29/29"]
+
+
 def test_add_external_succeeds_even_if_provenance_write_fails(tmp_path: Path, monkeypatch):
     """provenance(content_list sidecar)派生/可选:DB 行已 commit 后写失败不得向上传播。"""
     db, cid, _ = _setup(tmp_path)
@@ -130,7 +156,7 @@ def test_add_external_succeeds_even_if_provenance_write_fails(tmp_path: Path, mo
         def supports(self, _path):
             return True
 
-        def process(self, _path):
+        def process(self, _path, *, progress_cb=None):
             return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={
                 "backend": "mineru-hybrid",
                 "content_list": [{"type": "text", "text": "hi", "page_idx": 0}],

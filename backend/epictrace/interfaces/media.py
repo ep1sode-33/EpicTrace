@@ -3,6 +3,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+
+# 可选的进度回调:processor 在长耗时提取(MinerU)中逐条上报人类可读进度串。
+# 大多数 processor(纯文本/pypdf 等瞬时完成)忽略它。
+ProgressCb = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -16,4 +21,7 @@ class MediaProcessor(ABC):
     def supports(self, path: Path) -> bool: ...
 
     @abstractmethod
-    def process(self, path: Path) -> MediaResult: ...
+    def process(self, path: Path, *, progress_cb: ProgressCb | None = None) -> MediaResult:
+        """提取文本。progress_cb 给定时,长耗时实现(MinerU)应逐条上报进度;
+        瞬时实现忽略即可(签名统一便于调用方一律传)。"""
+        ...

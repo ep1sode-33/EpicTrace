@@ -43,7 +43,7 @@ def test_ready_returns_media_result(tmp_path: Path):
                {"type": "text", "text": "bye", "page_idx": 1}]
     captured = {}
 
-    def fake_runner(pdf_path, out_dir, *, mineru_bin, model_source, timeout):
+    def fake_runner(pdf_path, out_dir, *, mineru_bin, model_source, timeout, progress_cb=None):
         captured["mineru_bin"] = mineru_bin
         captured["model_source"] = model_source
         captured["timeout"] = timeout
@@ -62,10 +62,29 @@ def test_ready_returns_media_result(tmp_path: Path):
     assert captured["timeout"] == 600
 
 
+def test_process_forwards_progress_cb_to_runner(tmp_path: Path):
+    pdf = tmp_path / "paper.pdf"; pdf.write_bytes(b"%PDF")
+    captured = {}
+
+    def fake_runner(pdf_path, out_dir, *, mineru_bin, model_source, timeout, progress_cb=None):
+        captured["progress_cb"] = progress_cb
+        if progress_cb is not None:
+            progress_cb("解析中 1/2")
+        return "# ok\n\nbody", []
+
+    proc = MinerUMediaProcessor(_FakeProvisioner(ready=True),
+                                model_source="modelscope", timeout=600,
+                                runner=fake_runner)
+    seen: list[str] = []
+    proc.process(pdf, progress_cb=seen.append)
+    assert captured["progress_cb"] is not None
+    assert seen == ["解析中 1/2"]
+
+
 def test_runner_failure_propagates_as_extraction_failed(tmp_path: Path):
     pdf = tmp_path / "p.pdf"; pdf.write_bytes(b"%PDF")
 
-    def boom(pdf_path, out_dir, *, mineru_bin, model_source, timeout):
+    def boom(pdf_path, out_dir, *, mineru_bin, model_source, timeout, progress_cb=None):
         raise ExtractionFailed("subprocess died")
 
     proc = MinerUMediaProcessor(_FakeProvisioner(ready=True),

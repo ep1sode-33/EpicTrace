@@ -39,7 +39,8 @@ class ReferenceService:
         return sum(estimate_tokens(r.get("extracted_text") or "")
                    for r in self.list_active(conversation_id) if r["mode"] == "fulltext")
 
-    def add_external(self, conversation_id: int, path: str, context_window: int) -> dict:
+    def add_external(self, conversation_id: int, path: str, context_window: int,
+                     progress_cb=None) -> dict:
         p = Path(path)
         if not p.exists() or not p.is_file():
             raise ValueError("file not found")
@@ -47,7 +48,7 @@ class ReferenceService:
         if proc is None:
             raise ValueError("unsupported file type")
         try:
-            result = proc.process(p)
+            result = proc.process(p, progress_cb=progress_cb)
         except Exception as e:  # noqa: BLE001 — 提取失败转成可读的 400(由路由映射)
             raise ValueError(f"extract failed: {e}")
         text = result.text

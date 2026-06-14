@@ -14,7 +14,7 @@ class _Provisioner(Protocol):
     def mineru_bin(self) -> str: ...
 
 
-# runner(pdf_path, out_dir, *, mineru_bin, model_source, timeout) -> (markdown, content_list)
+# runner(pdf_path, out_dir, *, mineru_bin, model_source, timeout, progress_cb) -> (markdown, content_list)
 RunnerFn = Callable[..., tuple[str, list]]
 
 
@@ -49,7 +49,7 @@ class MinerUMediaProcessor(MediaProcessor):
     def supports(self, path: Path) -> bool:
         return path.suffix.lower() in _RICH_SUFFIXES
 
-    def process(self, path: Path) -> MediaResult:
+    def process(self, path: Path, *, progress_cb=None) -> MediaResult:
         if not self._provisioner.is_ready():
             raise ExtractionEngineNotReady(
                 "高质量提取引擎尚未安装,请先在设置中安装 MinerU。"
@@ -60,6 +60,7 @@ class MinerUMediaProcessor(MediaProcessor):
                 mineru_bin=self._provisioner.mineru_bin(),
                 model_source=self._model_source,
                 timeout=self._timeout,
+                progress_cb=progress_cb,
             )
         return MediaResult(
             text=markdown,
