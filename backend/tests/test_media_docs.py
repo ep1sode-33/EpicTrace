@@ -20,11 +20,24 @@ def test_rich_doc_slots_are_mineru_not_python_processors(tmp_path: Path, name: s
         proc.process(p)
 
 
-def test_rich_processor_uses_config_extraction_effort(tmp_path: Path):
-    # registry 用 config.extraction_effort(默认 medium)构造 MinerU 处理器。
+def test_rich_processor_defaults_to_config_when_no_persisted(tmp_path: Path):
+    # 无持久化 extraction 设置 → 回退 AppConfig 默认(effort=medium, model_source=modelscope)。
     proc = get_processor(tmp_path / "a.pdf", AppConfig(data_dir=tmp_path))
     assert isinstance(proc, MinerUMediaProcessor)
     assert proc._effort == "medium"
+    assert proc._model_source == "modelscope"
+
+
+def test_rich_processor_uses_persisted_extraction_settings(tmp_path: Path):
+    # 持久化了 effort=high / model_source=huggingface → registry 据此构造处理器。
+    from epictrace.services.settings import SettingsService
+    cfg = AppConfig(data_dir=tmp_path)
+    SettingsService(cfg).set_extraction_settings(
+        engine="mineru", effort="high", model_source="huggingface")
+    proc = get_processor(tmp_path / "a.pdf", cfg)
+    assert isinstance(proc, MinerUMediaProcessor)
+    assert proc._effort == "high"
+    assert proc._model_source == "huggingface"
 
 
 def test_unknown_type_returns_none(tmp_path: Path):

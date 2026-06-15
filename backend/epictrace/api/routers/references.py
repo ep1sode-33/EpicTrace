@@ -7,8 +7,9 @@ import threading
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sse_starlette.sse import EventSourceResponse
 
-from epictrace.api.deps import get_db, get_embedder, get_attachment_store
+from epictrace.api.deps import get_db, get_embedder, get_attachment_store, get_provisioner
 from epictrace.db import Database
+from epictrace.media.errors import ExtractionEngineNotReady, ExtractionFailed
 from epictrace.models import Conversation
 from epictrace.schemas import ReferenceCreate, ReferenceOut
 from epictrace.services.references import ReferenceService
@@ -64,7 +65,8 @@ def add_reference(cid: int, payload: ReferenceCreate, request: Request,
     # 惰性构造 embedder / attachment_store:仅当外部大文件真正走 indexed 分支时才起真件,
     # 避免小文件(fulltext)用例急切加载 BGE-M3 / 第二个 Milvus 客户端。
     svc = ReferenceService(db, embedder=_Lazy(lambda: get_embedder(request)),
-                           attachment_store=_Lazy(lambda: get_attachment_store(request)))
+                           attachment_store=_Lazy(lambda: get_attachment_store(request)),
+                           provisioner=get_provisioner(request))
     cw = _context_window(request)
     try:
         if payload.kind == "external":
@@ -74,6 +76,12 @@ def add_reference(cid: int, payload: ReferenceCreate, request: Request,
         if payload.ingest_record_id is None:
             raise ValueError("ingest_record_id required")
         return svc.add_internal(cid, payload.ingest_record_id, cw)
+    except ExtractionEngineNotReady as e:
+        # 富文档引擎(MinerU)未就绪:干净 409(与 files/source 路由一致),前端可引导去设置安装。
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e))
+    except ExtractionFailed as e:
+        # 子进程失败/超时/缺输出:沿用本项目提取失败的 400 约定(见 files 路由)。
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
@@ -101,7 +109,8 @@ def add_reference_stream(cid: int, payload: ReferenceCreate, request: Request,
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "stream attach requires kind=external with source_path")
     svc = ReferenceService(db, embedder=_Lazy(lambda: get_embedder(request)),
-                           attachment_store=_Lazy(lambda: get_attachment_store(request)))
+                           attachment_store=_Lazy(lambda: get_attachment_store(request)),
+                           provisioner=get_provisioner(request))
     cw = _context_window(request)
     # 有界队列:客户端断开后生成器停止 drain,worker 仍可能短暂 put 进度——
     # 用 put_nowait 丢弃满时的进度(不阻塞 worker),保证 worker 在 cancel 后能尽快退出。

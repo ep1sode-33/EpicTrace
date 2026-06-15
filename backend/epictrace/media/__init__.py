@@ -18,13 +18,17 @@ _STATIC_PROCESSORS: list[MediaProcessor] = [
 
 
 def _rich_processors(config: AppConfig) -> list[MediaProcessor]:
+    # 引入放函数内,避免顶层 import 形成 settings ↔ media 循环依赖。
+    from epictrace.services.settings import SettingsService
+
     provisioner = MinerUProvisioner(config.mineru_venv_dir)
+    ext = SettingsService(config).get_extraction_settings()
     return [
         MinerUMediaProcessor(
             provisioner,
-            model_source=getattr(config, "model_source", "modelscope"),
+            model_source=ext["model_source"],
             timeout=getattr(config, "extraction_timeout", 600),
-            effort=getattr(config, "extraction_effort", "medium"),
+            effort=ext["effort"],
         )
     ]
 

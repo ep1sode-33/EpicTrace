@@ -33,6 +33,63 @@ def test_detach_reference(client, tmp_path: Path):
     assert client.get(f"/api/conversations/{cid}/references").json() == []
 
 
+def test_add_reference_engine_not_ready_is_409(client, tmp_path: Path, monkeypatch):
+    """FIX 4:非流式挂富文档,引擎未就绪 → 干净 409(而非未捕获的 500)。
+    与 files/source 路由一致;ExtractionEngineNotReady 从 add_external 原样上抛。"""
+    from epictrace.media.errors import ExtractionEngineNotReady
+    from epictrace.media.mineru import MinerUMediaProcessor
+
+    _, cid = _project_conv(client, tmp_path)
+    f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
+
+    class _Prov:
+        state = "not_installed"
+        def is_ready(self):
+            return False
+
+    real_proc = MinerUMediaProcessor(_Prov(), model_source="modelscope", timeout=1)
+
+    def _raise(self, p, *, progress_cb=None, cancel=None):
+        raise ExtractionEngineNotReady("未安装 MinerU")
+
+    monkeypatch.setattr(MinerUMediaProcessor, "process", _raise)
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: real_proc)
+
+    r = client.post(f"/api/conversations/{cid}/references",
+                    json={"kind": "external", "source_path": str(f)})
+    assert r.status_code == 409, r.text
+    assert "MinerU" in r.json()["detail"]
+
+
+def test_add_reference_extraction_failed_is_400(client, tmp_path: Path, monkeypatch):
+    """FIX 4:非流式挂富文档,提取失败 → 干净 400(而非 500)。"""
+    from epictrace.media.errors import ExtractionFailed
+    from epictrace.media.mineru import MinerUMediaProcessor
+
+    _, cid = _project_conv(client, tmp_path)
+    f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
+
+    class _Prov:
+        state = "ready"
+        def is_ready(self):
+            return True
+
+    real_proc = MinerUMediaProcessor(_Prov(), model_source="modelscope", timeout=1)
+
+    def _raise(self, p, *, progress_cb=None, cancel=None):
+        raise ExtractionFailed("mineru exited 2: boom")
+
+    monkeypatch.setattr(MinerUMediaProcessor, "process", _raise)
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: real_proc)
+
+    r = client.post(f"/api/conversations/{cid}/references",
+                    json={"kind": "external", "source_path": str(f)})
+    assert r.status_code == 400, r.text
+    assert "boom" in r.json()["detail"]
+
+
 def test_add_reference_bad_file_is_400(client, tmp_path: Path):
     _, cid = _project_conv(client, tmp_path)
     f = tmp_path / "empty.md"; f.write_text("   ", encoding="utf-8")
@@ -185,3 +242,50 @@ def test_stream_attach_client_disconnect_cancels_worker(client, tmp_path: Path, 
     assert saw_cancel.is_set()
     # 断开后不应发出 done 事件。
     assert [e for e, _ in _sse_events(body) if e == "done"] == []
+
+
+def test_stream_attach_downloads_models_then_extracts(client, tmp_path: Path, monkeypatch):
+    """无模型(installed_no_models)发富文档:先经 status 进度报「下载模型」(ensure_models_ready
+    阻塞到就绪),下完转 ready,再提取出 done。"""
+    from epictrace.media.mineru import MinerUMediaProcessor
+
+    _, cid = _project_conv(client, tmp_path)
+    f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
+
+    class _Prov:
+        def __init__(self):
+            self._ready = False
+        @property
+        def state(self):
+            return "ready" if self._ready else "installed_no_models"
+        def is_ready(self):
+            return self._ready
+        def ensure_models_ready(self, *, model_source="modelscope", progress_cb=None):
+            if progress_cb:
+                progress_cb("正在下载模型(约数 GB,首次较久)…")
+            self._ready = True
+
+    prov = _Prov()
+    client.app.state.provisioner = prov
+    real_proc = MinerUMediaProcessor(prov, model_source="modelscope", timeout=1)
+
+    def _fake_process(self, _p, *, progress_cb=None, cancel=None):
+        progress_cb and progress_cb("解析中 1/1")
+        return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+
+    monkeypatch.setattr(MinerUMediaProcessor, "process", _fake_process)
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: real_proc)
+
+    with client.stream("POST", f"/api/conversations/{cid}/references/stream",
+                       json={"kind": "external", "source_path": str(f)}) as r:
+        assert r.status_code == 200
+        body = "".join(chunk for chunk in r.iter_text())
+    events = _sse_events(body)
+    statuses = [d for e, d in events if e == "status"]
+    # 先有下载模型的进度,再有提取进度。
+    assert any("下载模型" in s for s in statuses)
+    assert "解析中 1/1" in statuses
+    assert prov.is_ready() is True  # 下载已发生
+    done = [d for e, d in events if e == "done"]
+    assert len(done) == 1
