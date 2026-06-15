@@ -88,6 +88,9 @@ class Api:
         cap = getattr(self, "_cap", None)
         if not cap:
             return None
+        # 仅当本次 session 选了 screenshot 源才允许抓屏(与 clipboard 同样按源 gate)。
+        if "screenshot" not in (cap.get("sources") or []):
+            return None
         try:
             import time
             import Quartz
@@ -127,27 +130,31 @@ class Api:
                     print(f"[EpicTrace] post event failed ({kind}): {e}", flush=True)
 
     def start_capture_monitors(self, session_id: int, staging_dir: str, sources: list) -> dict:
-        """按所选源起原生监听(剪贴板轮询 + 全局热键触发截图)。重复调用先停旧的。"""
+        """按所选源起原生监听(剪贴板轮询 + 全局热键触发截图)。重复调用先停旧的(并 join 旧线程)。"""
         self.stop_capture_monitors()
-        self._cap = {"sid": session_id, "dir": staging_dir,
-                     "last_clip": None, "stop": False}
+        sources = list(sources or [])
+        cap = {"sid": session_id, "dir": staging_dir, "sources": sources,
+               "last_clip": None, "stop": False}
+        self._cap = cap
         try:
             from AppKit import NSPasteboard
             import threading
 
             pb = NSPasteboard.generalPasteboard()
-            self._cap["clip_count"] = pb.changeCount()
+            cap["clip_count"] = pb.changeCount()
 
-            def _poll():
-                while not self._cap.get("stop"):
+            # 线程内只读自己的局部快照 cap,绝不读 self._cap:pause→resume(stop 后再 start)
+            # 会把 self._cap 换成新 dict;旧线程若读 self._cap 可能崩或往旧 session 投事件。
+            def _poll(cap=cap):
+                while not cap.get("stop"):
                     try:
                         cnt = pb.changeCount()
-                        if "clipboard" in sources and cnt != self._cap["clip_count"]:
-                            self._cap["clip_count"] = cnt
+                        if "clipboard" in cap["sources"] and cnt != cap["clip_count"]:
+                            cap["clip_count"] = cnt
                             txt = pb.stringForType_("public.utf8-plain-text")
-                            if txt and txt != self._cap["last_clip"]:
-                                self._cap["last_clip"] = txt
-                                self._post_event(session_id, "clipboard", str(txt))
+                            if txt and txt != cap["last_clip"]:
+                                cap["last_clip"] = txt
+                                self._post_event(cap["sid"], "clipboard", str(txt))
                     except Exception as e:  # noqa: BLE001
                         print(f"[EpicTrace] clipboard poll: {e}", flush=True)
                     import time
@@ -155,33 +162,34 @@ class Api:
 
             t = threading.Thread(target=_poll, daemon=True)
             t.start()
-            self._cap["thread"] = t
-            # 全局热键:若 PyObjC 全局监听在当前 pywebview 主循环不便挂载,降级为
-            # 「仅 HUD/应用内按钮触发截图」并打印告警(Phase 5 手测确认行为)。
-            try:
-                from AppKit import NSEvent, NSKeyDownMask
-                # ⌘⇧2 = keyCode 19,modifierFlags 含 NSCommandKeyMask|NSShiftKeyMask
-                NSCommandKeyMask = 1 << 20
-                NSShiftKeyMask = 1 << 17
+            cap["thread"] = t
+            # 全局热键:仅当本次选了 screenshot 源才注册(否则不应有截图热键)。
+            # 若 PyObjC 全局监听在当前 pywebview 主循环不便挂载,降级为「仅 HUD/应用内按钮触发」。
+            if "screenshot" in sources:
+                try:
+                    from AppKit import NSEvent, NSKeyDownMask
+                    # ⌘⇧2 = keyCode 19,modifierFlags 含 NSCommandKeyMask|NSShiftKeyMask
+                    NSCommandKeyMask = 1 << 20
+                    NSShiftKeyMask = 1 << 17
 
-                def _hotkey_handler(event):
-                    try:
-                        flags = event.modifierFlags()
-                        if (event.keyCode() == 19
-                                and (flags & NSCommandKeyMask)
-                                and (flags & NSShiftKeyMask)):
-                            self.capture_screenshot()
-                    except Exception as he:  # noqa: BLE001
-                        print(f"[EpicTrace] hotkey handler: {he}", flush=True)
+                    def _hotkey_handler(event):
+                        try:
+                            flags = event.modifierFlags()
+                            if (event.keyCode() == 19
+                                    and (flags & NSCommandKeyMask)
+                                    and (flags & NSShiftKeyMask)):
+                                self.capture_screenshot()
+                        except Exception as he:  # noqa: BLE001
+                            print(f"[EpicTrace] hotkey handler: {he}", flush=True)
 
-                monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                    NSKeyDownMask, _hotkey_handler)
-                self._cap["hotkey_monitor"] = monitor
-            except Exception as hke:  # noqa: BLE001 — 辅助功能权限不足或 API 不可用
-                print(
-                    f"[EpicTrace] global hotkey unavailable, use HUD/in-app button for screenshot: {hke}",
-                    flush=True,
-                )
+                    monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                        NSKeyDownMask, _hotkey_handler)
+                    cap["hotkey_monitor"] = monitor
+                except Exception as hke:  # noqa: BLE001 — 辅助功能权限不足或 API 不可用
+                    print(
+                        f"[EpicTrace] global hotkey unavailable, use HUD/in-app button for screenshot: {hke}",
+                        flush=True,
+                    )
             return {"ok": True}
         except Exception as e:  # noqa: BLE001 — 原生不可用降级
             print(f"[EpicTrace] start_capture_monitors failed: {e}", flush=True)
@@ -191,6 +199,14 @@ class Api:
         cap = getattr(self, "_cap", None)
         if cap:
             cap["stop"] = True
+            # 先 join 旧 poll 线程(置停止位后等它退出),再清理 —— 避免旧线程还在跑、
+            # 与新一轮 start 竞态(往旧 session 投事件 / 读到被替换的状态)。
+            thread = cap.get("thread")
+            if thread is not None:
+                try:
+                    thread.join(timeout=2)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[EpicTrace] join clipboard thread: {e}", flush=True)
             # 清理全局热键监听器(若已注册)
             monitor = cap.get("hotkey_monitor")
             if monitor is not None:
