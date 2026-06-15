@@ -7,11 +7,14 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-# 注入点:默认用 subprocess.run;测试传假 uv_runner,完全不碰真 uv/网络。
+# 注入点:默认用 subprocess.run;测试传假 uv_runner / models_runner,完全不碰真 uv/mineru/网络。
 UvRunner = Callable[[list[str], int], subprocess.CompletedProcess]
+ModelsRunner = Callable[[list[str], int], subprocess.CompletedProcess]
 
 # provision 阶段较长(建环境 + 装几 GB 依赖);给宽松超时。
 _PROVISION_TIMEOUT = 3600
+# 模型下载(几 GB)同样给宽松超时。
+_DOWNLOAD_TIMEOUT = 3600
 
 _log = logging.getLogger("epictrace")
 
@@ -35,20 +38,38 @@ class MinerUProvisioner:
         *,
         uv_bin: str | None = None,
         uv_runner: UvRunner | None = None,
+        models_runner: ModelsRunner | None = None,
     ) -> None:
         self._venv_dir = Path(venv_dir)
         self._uv_bin = uv_bin
         self._uv_runner = uv_runner or _default_uv_runner
+        self._models_runner = models_runner or _default_uv_runner
         self._failed = False
-        # 并发守卫:_installing 标志 + 锁。重复 provision 在安装中 no-op;
-        # state() 据 _installing 暴露 "installing"(前端"安装中"徽标依赖它)。
+        # 并发守卫:_installing / _downloading 各自一个标志 + 共用锁。安装/下载中重复触发
+        # no-op;state() 据标志暴露 "installing"/"downloading_models"(前端徽标依赖它)。
         self._installing = False
+        self._downloading = False
         self._lock = threading.Lock()
         self.last_error: str | None = None
 
     # ---- 路径 ----
     def mineru_bin(self) -> str:
         return str(self._venv_dir / "bin" / "mineru")
+
+    def models_dir(self) -> Path:
+        # mineru-models-download 把权重 + mineru.json 落到 venv 内的模型根目录。
+        return self._venv_dir / "models"
+
+    def _models_ready(self) -> bool:
+        # marker:mineru.json 存在,且模型根目录里有至少一个非 mineru.json 的条目(模型权重)。
+        root = self.models_dir()
+        marker = root / "mineru.json"
+        if not marker.is_file():
+            return False
+        try:
+            return any(c.name != "mineru.json" for c in root.iterdir())
+        except OSError:
+            return False
 
     def uv_bin(self) -> str:
         if self._uv_bin:
@@ -60,18 +81,22 @@ class MinerUProvisioner:
 
     # ---- 状态 ----
     def is_ready(self) -> bool:
-        # 必须是真实文件(目录占位不算就绪);保持廉价,不起子进程探测。
-        return Path(self.mineru_bin()).is_file()
+        # 必须是真实文件(目录占位不算就绪)+ 模型已下;保持廉价,不起子进程探测。
+        return Path(self.mineru_bin()).is_file() and self._models_ready()
 
     @property
     def state(self) -> str:
-        # installing 优先于 ready/failed:安装线程活跃期间一律 installing(前端轮询/徽标据此)。
+        # installing/downloading 优先于其余:对应线程活跃期间一律暴露该过渡态(前端轮询/徽标据此)。
         if self._installing:
             return "installing"
+        if self._downloading:
+            return "downloading_models"
         if self.is_ready():
             return "ready"
         if self._failed:
             return "failed"
+        if Path(self.mineru_bin()).is_file():
+            return "installed_no_models"  # 包就绪、模型未下
         return "not_installed"
 
     # ---- provision ----

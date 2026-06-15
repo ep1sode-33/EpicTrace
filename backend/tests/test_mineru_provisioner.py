@@ -29,13 +29,14 @@ def test_is_ready_requires_a_file_not_a_directory(tmp_path: Path):
     assert p.state == "not_installed"
 
 
-def test_provision_runs_uv_commands_and_becomes_ready(tmp_path: Path):
+def test_provision_installs_packages_only_not_models(tmp_path: Path):
+    """provision 只装包:完成态是 installed_no_models(尚未下模型),is_ready 仍 False。"""
     venv = _venv_dir(tmp_path)
     calls: list[list[str]] = []
 
     def uv_runner(cmd, timeout):
         calls.append(cmd)
-        # 模拟 `uv venv` 创建 bin/mineru 可执行,使 is_ready() 转真
+        # 模拟 `uv venv` 创建 bin/mineru 可执行(包就绪);模型仍未下。
         if "venv" in cmd:
             (venv / "bin").mkdir(parents=True, exist_ok=True)
             (venv / "bin" / "mineru").write_text("#!/bin/sh\n")
@@ -46,8 +47,8 @@ def test_provision_runs_uv_commands_and_becomes_ready(tmp_path: Path):
     p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", uv_runner=uv_runner)
     p.provision(progress_cb=progress.append)
 
-    assert p.state == "ready"
-    assert p.is_ready() is True
+    assert p.state == "installed_no_models"
+    assert p.is_ready() is False  # 包装好但模型未下 → 未就绪
     # 第一条:uv venv --python 3.11 <venv>
     assert calls[0][:1] == ["/usr/local/bin/uv"]
     assert "venv" in calls[0]
@@ -56,6 +57,8 @@ def test_provision_runs_uv_commands_and_becomes_ready(tmp_path: Path):
     # 第二条:uv pip install "mineru[all]" (into the venv)
     assert "pip" in calls[1] and "install" in calls[1]
     assert any("mineru[all]" in c for c in calls[1])
+    # provision 绝不跑模型下载子进程
+    assert not any("mineru-models-download" in " ".join(c) for c in calls)
     assert len(progress) >= 1  # 粗粒度进度回调
 
 
@@ -103,7 +106,7 @@ def test_state_is_installing_while_provisioning(tmp_path: Path):
     p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", uv_runner=uv_runner)
     p.provision()
     assert "installing" in observed
-    assert p.state == "ready"
+    assert p.state == "installed_no_models"
 
 
 def test_duplicate_provision_while_installing_is_noop(tmp_path: Path):
@@ -133,7 +136,7 @@ def test_duplicate_provision_while_installing_is_noop(tmp_path: Path):
     assert p.state == "installing"  # 仍在第一次安装中
     release.set()
     t.join(timeout=5)
-    assert p.state == "ready"
+    assert p.state == "installed_no_models"
     assert venv_calls["n"] == 1  # 只跑了一次 `uv venv`
 
 
