@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { TopBar, type TabKey } from "@/components/TopBar";
 import { SettingsView } from "@/views/SettingsView";
 import { CaptureView } from "@/views/CaptureView";
+import { CaptureStagingView } from "@/views/CaptureStagingView";
 import { ProcessIngestView } from "@/views/ProcessIngestView";
 import { ProjectsConversationView } from "@/views/ProjectsConversationView";
 import { api } from "@/lib/api";
@@ -18,6 +19,8 @@ export default function App() {
   const [processFocus, setProcessFocus] = useState<{ projectId: number; key: number } | null>(
     null,
   );
+  // 采集 tab 内部子视图切换:「采集」或「暂存区」
+  const [captureSubTab, setCaptureSubTab] = useState<"capture" | "staging">("capture");
 
   const refreshSettings = useCallback(() => {
     api
@@ -48,7 +51,56 @@ export default function App() {
           <SettingsView onSaved={(s) => setLlmConfigured(s.configured)} />
         ) : (
           <>
-            {activeTab === "capture" && <CaptureView />}
+            {activeTab === "capture" && (
+              <div className="flex flex-col">
+                {/* 采集 / 暂存 段控 */}
+                <div className="flex border-b border-border/60 px-6 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setCaptureSubTab("capture")}
+                    className={`border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+                      captureSubTab === "capture"
+                        ? "border-primary text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    采集
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCaptureSubTab("staging")}
+                    className={`border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+                      captureSubTab === "staging"
+                        ? "border-primary text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    暂存区
+                  </button>
+                </div>
+                {captureSubTab === "capture" && (
+                  <CaptureView
+                    onSessionStopped={() => {
+                      // 停止后自动切换到暂存区
+                      setCaptureSubTab("staging");
+                    }}
+                  />
+                )}
+                {captureSubTab === "staging" && (
+                  <CaptureStagingView
+                    onOrganized={(pid) => {
+                      // 归类后跳到「信息处理和入库」并聚焦该项目
+                      setProcessFocus((prev) => ({
+                        projectId: pid,
+                        key: (prev?.key ?? 0) + 1,
+                      }));
+                      setInSettings(false);
+                      setActiveTab("process");
+                    }}
+                  />
+                )}
+              </div>
+            )}
             {activeTab === "process" && (
               <ProcessIngestView
                 focusProjectId={processFocus?.projectId ?? null}
