@@ -8,6 +8,7 @@ from sqlalchemy import select
 from epictrace.db import Database
 from epictrace.indexing.chunker import chunk_text
 from epictrace.media import get_processor
+from epictrace.media.mineru import MinerUMediaProcessor
 from epictrace.media.provenance import write_provenance
 from epictrace.models import Conversation, ConversationReference, IngestRecord
 from epictrace.services.budget import estimate_tokens, fits_fulltext
@@ -43,14 +44,21 @@ class ReferenceService:
                    for r in self.list_active(conversation_id) if r["mode"] == "fulltext")
 
     def _ensure_models_ready(self, progress_cb=None) -> None:
-        """provisioner 为 installed_no_models 时先下模型(进度走 progress_cb)。
-        无 provisioner / 非该状态 → no-op(ready 直接提取;not_installed 由 process 抛错)。"""
+        """提取前的「门」:provisioner 为 installed_no_models 或 downloading_models 时,
+        阻塞到模型就绪(ensure_models_ready 内部:未下则下,正在下则等),失败/超时上抛。
+        无 provisioner / ready / not_installed → no-op(ready 直接提取;not_installed 由 process 抛错)。
+
+        关键(对应并发 bug):仅在 installed_no_models 触发会导致第二个并发 caller 看到
+        downloading_models 时跳过、抢先提取 → 模型未就绪提取失败。这里把 downloading_models
+        也交给 ensure_models_ready 阻塞等待,直到就绪才返回。"""
         prov = self._provisioner
         if prov is None:
             return
-        if getattr(prov, "state", None) == "installed_no_models":
+        if getattr(prov, "state", None) in ("installed_no_models", "downloading_models"):
             ext = SettingsService(self._db.config).get_extraction_settings()
-            prov.download_models(model_source=ext["model_source"], progress_cb=progress_cb)
+            prov.ensure_models_ready(
+                model_source=ext["model_source"], progress_cb=progress_cb
+            )
 
     def add_external(self, conversation_id: int, path: str, context_window: int,
                      progress_cb=None, cancel=None) -> dict:
@@ -60,13 +68,16 @@ class ReferenceService:
         proc = get_processor(p, self._db.config)
         if proc is None:
             raise ValueError("unsupported file type")
-        # 富文档(MinerU)且「装了包但没下模型」→ 先下模型(进度走同一 progress_cb 通道),
-        # 下完再提取。not_installed / ready 都不在此处理:not_installed 由 process()
-        # 抛 ExtractionEngineNotReady,ready 直接提取。
-        self._ensure_models_ready(progress_cb)
         try:
+            # 仅富文档(MinerU)需要模型;文本/代码/数据文件走 TextMediaProcessor,
+            # 即使 installed_no_models 也不该触发(几 GB 的)模型下载(FIX 2)。
+            # 富文档且「装了包但没下模型 / 正在下」→ 阻塞到模型就绪再提取(FIX 1)。
+            # not_installed / ready 不在此处理:not_installed 由 process() 抛
+            # ExtractionEngineNotReady,ready 直接提取。
+            if isinstance(proc, MinerUMediaProcessor):
+                self._ensure_models_ready(progress_cb)
             result = proc.process(p, progress_cb=progress_cb, cancel=cancel)
-        except Exception as e:  # noqa: BLE001 — 提取失败转成可读的 400(由路由映射)
+        except Exception as e:  # noqa: BLE001 — 模型确保/提取失败都转成可读的 400(由路由映射)
             raise ValueError(f"extract failed: {e}")
         text = result.text
         if not text.strip():

@@ -168,20 +168,22 @@ def test_index_downloads_models_when_installed_no_models(tmp_path, monkeypatch):
             return "ready" if self._ready else "installed_no_models"
         def is_ready(self):
             return self._ready
-        def download_models(self, *, model_source="modelscope", progress_cb=None):
+        def ensure_models_ready(self, *, model_source="modelscope", progress_cb=None):
             self.downloaded = True
             self._ready = True
 
     prov = _Prov()
 
-    class _Proc:
-        def supports(self, _p):
-            return True
-        def process(self, _p, *, progress_cb=None, cancel=None):
-            return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+    # 富文档 → 真 MinerUMediaProcessor(FIX 2 据其类型决定是否确保模型);process 打桩。
+    from epictrace.media.mineru import MinerUMediaProcessor
+    real_proc = MinerUMediaProcessor(prov, model_source="modelscope", timeout=1)
 
+    def _fake_process(self, _p, *, progress_cb=None, cancel=None):
+        return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+
+    monkeypatch.setattr(MinerUMediaProcessor, "process", _fake_process)
     monkeypatch.setattr("epictrace.services.index.get_processor",
-                        lambda p, config: _Proc())
+                        lambda p, config: real_proc)
 
     svc = IndexService(db, FakeEmbedder(), FakeVectorStore(), provisioner=prov)
     job = svc.index_project(pid)
@@ -190,3 +192,83 @@ def test_index_downloads_models_when_installed_no_models(tmp_path, monkeypatch):
     assert prov.downloaded is True
     assert job.status == "done"
     assert job.done == 1
+
+
+def test_index_text_files_skip_model_ensure(tmp_path, monkeypatch):
+    """FIX 2:索引 .md/.txt(→ TextMediaProcessor)即使 installed_no_models 也不下模型。"""
+    from epictrace.config import AppConfig
+    from epictrace.db import Database
+    from epictrace.models import IngestRecord, Project
+    from epictrace.services.index import IndexService
+    from tests.fakes import FakeEmbedder, FakeVectorStore
+
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    src = tmp_path / "a.md"; src.write_text("page table " * 50, encoding="utf-8")
+    with db.session() as s:
+        proj = Project(title="P", folder_path=str(tmp_path)); s.add(proj); s.flush()
+        rec = IngestRecord(project_id=proj.id, original_filename="a.md",
+                           stored_path=str(src), content_hash="h", size_bytes=4,
+                           mtime=0.0, ingest_method="file_direct", description="",
+                           indexed=False)
+        s.add(rec); s.flush(); pid = proj.id
+
+    class _Prov:
+        state = "installed_no_models"
+        def is_ready(self):
+            return False
+        def ensure_models_ready(self, **kw):
+            raise AssertionError("text files must not trigger model download")
+        def download_models(self, **kw):
+            raise AssertionError("text files must not trigger model download")
+
+    svc = IndexService(db, FakeEmbedder(), FakeVectorStore(), provisioner=_Prov())
+    job = svc.index_project(pid)
+    svc._run(job)
+    assert job.status == "done"
+    assert job.done == 1
+
+
+def test_index_uses_blocking_ensure_models_ready(tmp_path, monkeypatch):
+    """FIX 1:索引富文档时走 ensure_models_ready(阻塞门),且其失败记进 job.errors(不静默)。"""
+    from epictrace.config import AppConfig
+    from epictrace.db import Database
+    from epictrace.models import IngestRecord, Project
+    from epictrace.services.index import IndexService
+    from tests.fakes import FakeEmbedder, FakeVectorStore
+
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    src = tmp_path / "a.pdf"; src.write_bytes(b"%PDF")
+    with db.session() as s:
+        proj = Project(title="P", folder_path=str(tmp_path)); s.add(proj); s.flush()
+        rec = IngestRecord(project_id=proj.id, original_filename="a.pdf",
+                           stored_path=str(src), content_hash="h", size_bytes=4,
+                           mtime=0.0, ingest_method="file_direct", description="",
+                           indexed=False)
+        s.add(rec); s.flush(); pid = proj.id
+
+    from epictrace.interfaces.media import MediaResult
+    from epictrace.media.mineru import MinerUMediaProcessor
+
+    class _Prov:
+        state = "downloading_models"
+        def is_ready(self):
+            return False
+        def ensure_models_ready(self, **kw):
+            raise RuntimeError("model download failed: net down")
+
+    prov = _Prov()
+    real_proc = MinerUMediaProcessor(prov, model_source="modelscope", timeout=1)
+
+    def _fake_process(self, p, *, progress_cb=None, cancel=None):
+        return MediaResult(text="页表", metadata={})
+
+    monkeypatch.setattr(MinerUMediaProcessor, "process", _fake_process)
+    monkeypatch.setattr("epictrace.services.index.get_processor",
+                        lambda p, config: real_proc)
+
+    svc = IndexService(db, FakeEmbedder(), FakeVectorStore(), provisioner=prov)
+    job = svc.index_project(pid)
+    svc._run(job)
+    assert job.status == "done"
+    # ensure 失败被记进 job.errors(不静默);后续 per-file 提取也会各自呈现。
+    assert any("net down" in e for e in job.errors)
