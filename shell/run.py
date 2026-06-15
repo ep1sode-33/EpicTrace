@@ -126,6 +126,81 @@ class Api:
                 if attempt == 2:
                     print(f"[EpicTrace] post event failed ({kind}): {e}", flush=True)
 
+    def start_capture_monitors(self, session_id: int, staging_dir: str, sources: list) -> dict:
+        """按所选源起原生监听(剪贴板轮询 + 全局热键触发截图)。重复调用先停旧的。"""
+        self.stop_capture_monitors()
+        self._cap = {"sid": session_id, "dir": staging_dir,
+                     "last_clip": None, "stop": False}
+        try:
+            from AppKit import NSPasteboard
+            import threading
+
+            pb = NSPasteboard.generalPasteboard()
+            self._cap["clip_count"] = pb.changeCount()
+
+            def _poll():
+                while not self._cap.get("stop"):
+                    try:
+                        cnt = pb.changeCount()
+                        if "clipboard" in sources and cnt != self._cap["clip_count"]:
+                            self._cap["clip_count"] = cnt
+                            txt = pb.stringForType_("public.utf8-plain-text")
+                            if txt and txt != self._cap["last_clip"]:
+                                self._cap["last_clip"] = txt
+                                self._post_event(session_id, "clipboard", str(txt))
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[EpicTrace] clipboard poll: {e}", flush=True)
+                    import time
+                    time.sleep(1.0)
+
+            t = threading.Thread(target=_poll, daemon=True)
+            t.start()
+            self._cap["thread"] = t
+            # 全局热键:若 PyObjC 全局监听在当前 pywebview 主循环不便挂载,降级为
+            # 「仅 HUD/应用内按钮触发截图」并打印告警(Phase 5 手测确认行为)。
+            try:
+                from AppKit import NSEvent, NSKeyDownMask
+                # ⌘⇧2 = keyCode 19,modifierFlags 含 NSCommandKeyMask|NSShiftKeyMask
+                NSCommandKeyMask = 1 << 20
+                NSShiftKeyMask = 1 << 17
+
+                def _hotkey_handler(event):
+                    try:
+                        flags = event.modifierFlags()
+                        if (event.keyCode() == 19
+                                and (flags & NSCommandKeyMask)
+                                and (flags & NSShiftKeyMask)):
+                            self.capture_screenshot()
+                    except Exception as he:  # noqa: BLE001
+                        print(f"[EpicTrace] hotkey handler: {he}", flush=True)
+
+                monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                    NSKeyDownMask, _hotkey_handler)
+                self._cap["hotkey_monitor"] = monitor
+            except Exception as hke:  # noqa: BLE001 — 辅助功能权限不足或 API 不可用
+                print(
+                    f"[EpicTrace] global hotkey unavailable, use HUD/in-app button for screenshot: {hke}",
+                    flush=True,
+                )
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001 — 原生不可用降级
+            print(f"[EpicTrace] start_capture_monitors failed: {e}", flush=True)
+            return {"ok": False, "reason": str(e)}
+
+    def stop_capture_monitors(self) -> None:
+        cap = getattr(self, "_cap", None)
+        if cap:
+            cap["stop"] = True
+            # 清理全局热键监听器(若已注册)
+            monitor = cap.get("hotkey_monitor")
+            if monitor is not None:
+                try:
+                    from AppKit import NSEvent
+                    NSEvent.removeMonitor_(monitor)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[EpicTrace] remove hotkey monitor: {e}", flush=True)
+        self._cap = None
+
 
 def _serve() -> None:
     try:
