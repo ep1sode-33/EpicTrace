@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import threading
 from dataclasses import dataclass
 
 from epictrace.config import AppConfig
 from epictrace.media.mineru_provisioner import MinerUProvisioner
+
+# 进程内、按 settings.json 路径共享的锁:SettingsService 每请求新建实例,实例级锁无法
+# 串行化并发请求。这里按绝对路径维护一把锁(_path_locks),由 _registry_lock 守护其建立,
+# 使「同一个 settings.json」的所有读-改-写跨实例串行(本地单用户,进程内锁足够)。
+_registry_lock = threading.Lock()
+_path_locks: dict[str, threading.Lock] = {}
+
+
+def _lock_for(path: str) -> threading.Lock:
+    with _registry_lock:
+        lock = _path_locks.get(path)
+        if lock is None:
+            lock = threading.Lock()
+            _path_locks[path] = lock
+        return lock
 
 
 @dataclass
@@ -22,6 +39,14 @@ def _short_id() -> str:
     return secrets.token_hex(4)
 
 
+_VALID_EFFORT = {"high", "medium"}
+_VALID_MODEL_SOURCE = {"modelscope", "huggingface", "local"}
+# v2:可选 pypdf(简单文字处理,默认、开箱即用、免安装)或 mineru(OCR/VLM,质量高)。
+_VALID_ENGINE = {"pypdf", "mineru"}
+# 默认引擎:pypdf。免安装、免下模型,文本类 PDF/DOCX/PPTX 直接可用。
+_DEFAULT_ENGINE = "pypdf"
+
+
 class SettingsService:
     """读写 ~/.epictrace/settings.json。本地单用户,明文存盘(桌面 APP)。
 
@@ -35,6 +60,8 @@ class SettingsService:
     def __init__(self, config: AppConfig) -> None:
         self._path = config.data_dir / "settings.json"
         self._config = config
+        # 按路径共享的锁:串行化对同一 settings.json 的读-改-写(跨请求/跨实例)。
+        self._lock = _lock_for(str(self._path.resolve()))
 
     # ---- 持久化 ----
     def _read_raw(self) -> dict:
@@ -47,7 +74,11 @@ class SettingsService:
         return {}
 
     def _load(self) -> dict:
-        """读取并就地迁移旧形状,返回规范化的 {profiles, active_profile_id}。"""
+        """读取并就地迁移旧形状,返回规范化设置。
+
+        归一 profiles/active_profile_id,但保留其余顶层键(如 extraction),
+        使 profile 变更经 _write 回写时不会把 extraction 等键吞掉。
+        """
         data = self._read_raw()
         profiles = data.get("profiles")
         if not isinstance(profiles, list):
@@ -55,35 +86,55 @@ class SettingsService:
             old = data.get("chat_llm")
             if isinstance(old, dict):
                 pid = _short_id()
-                migrated = {
-                    "profiles": [
-                        {
-                            "id": pid,
-                            "name": "默认",
-                            "base_url": old.get("base_url", ""),
-                            "api_key": old.get("api_key", ""),
-                            "model": old.get("model", ""),
-                        }
-                    ],
-                    "active_profile_id": pid,
-                }
+                migrated = dict(data)
+                migrated.pop("chat_llm", None)
+                migrated["profiles"] = [
+                    {
+                        "id": pid,
+                        "name": "默认",
+                        "base_url": old.get("base_url", ""),
+                        "api_key": old.get("api_key", ""),
+                        "model": old.get("model", ""),
+                    }
+                ]
+                migrated["active_profile_id"] = pid
                 # 关键:立刻落盘固定 id。否则每次 _load 都生成新随机 id,前端拿到的 id 与
                 # 下次请求迁移出的 id 对不上 → update/delete/set_active 全部静默 no-op
                 # (表现为"保存不下去、删不掉、名称改不动")。
                 self._write(migrated)
                 return migrated
-            return {"profiles": [], "active_profile_id": None}
+            normalized = dict(data)
+            normalized["profiles"] = []
+            normalized["active_profile_id"] = None
+            return normalized
         active = data.get("active_profile_id")
         ids = {p.get("id") for p in profiles if isinstance(p, dict)}
         if active not in ids:
             active = None
-        return {"profiles": profiles, "active_profile_id": active}
+        normalized = dict(data)
+        normalized["profiles"] = profiles
+        normalized["active_profile_id"] = active
+        return normalized
 
     def _write(self, data: dict) -> None:
+        # 原子写:先写同目录临时文件,再 os.replace 覆盖目标(同卷上是原子 rename)。
+        # 这样写到一半崩溃也只会留下临时文件,settings.json 永远是上一份完整内容,不被截断。
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        # 唯一临时名(同进程并发写时不撞)。失败时尽力清理。
+        tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())  # 落盘后再 rename,确保替换的是完整内容
+            os.replace(tmp, self._path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     # ---- 查询 ----
     def list_profiles(self) -> list[dict]:
@@ -104,10 +155,47 @@ class SettingsService:
         """是否存在一个活动 Profile(== 可用于对话)。"""
         return self.get_active_profile() is not None
 
+    def get_extraction_settings(self) -> dict:
+        """{engine, effort, model_source}。无持久化 → 回退 AppConfig 默认。"""
+        data = self._read_raw()
+        ext = data.get("extraction")
+        if not isinstance(ext, dict):
+            ext = {}
+        return {
+            "engine": ext.get("engine", _DEFAULT_ENGINE),
+            "effort": ext.get("effort", self._config.extraction_effort),
+            "model_source": ext.get("model_source", self._config.model_source),
+        }
+
+    def set_extraction_settings(
+        self, *, engine: str, effort: str, model_source: str
+    ) -> dict:
+        """校验后持久化 extraction 对象,返回更新后的设置。非法值 → ValueError。"""
+        if engine not in _VALID_ENGINE:
+            raise ValueError(f"invalid engine: {engine}")
+        if effort not in _VALID_EFFORT:
+            raise ValueError(f"invalid effort: {effort}")
+        if model_source not in _VALID_MODEL_SOURCE:
+            raise ValueError(f"invalid model_source: {model_source}")
+        # 只改 extraction;profiles/active_profile_id 等其余键原样保留(读 raw,不经 _load 归一)。
+        # 锁内做读-改-写,避免与 profile 写并发交错丢更新。
+        with self._lock:
+            data = self._read_raw()
+            data["extraction"] = {
+                "engine": engine, "effort": effort, "model_source": model_source,
+            }
+            self._write(data)
+        return self.get_extraction_settings()
+
     def extraction_status(self) -> dict:
         """高质量提取引擎(MinerU)的 provisioning 状态。"""
         prov = MinerUProvisioner(self._config.mineru_venv_dir)
-        return {"state": prov.state, "ready": prov.is_ready()}
+        return {
+            "state": prov.state,
+            "ready": prov.is_ready(),
+            "error": prov.last_error,
+            "failed_stage": prov.failed_stage,
+        }
 
     def get_chat_llm(self) -> ChatLLMSettings | None:
         """活动 Profile 的 base_url/api_key/model;无活动 Profile 时返回 None。"""
@@ -131,24 +219,25 @@ class SettingsService:
         context_window: int = 32768,
     ) -> str:
         """新建 Profile,返回其 id。首个 Profile 自动成为活动。"""
-        data = self._load()
-        pid = _short_id()
-        existing_ids = {p.get("id") for p in data["profiles"]}
-        while pid in existing_ids:
+        with self._lock:
+            data = self._load()
             pid = _short_id()
-        data["profiles"].append(
-            {
-                "id": pid,
-                "name": name,
-                "base_url": base_url,
-                "api_key": api_key,
-                "model": model,
-                "context_window": context_window,
-            }
-        )
-        if data["active_profile_id"] is None:
-            data["active_profile_id"] = pid
-        self._write(data)
+            existing_ids = {p.get("id") for p in data["profiles"]}
+            while pid in existing_ids:
+                pid = _short_id()
+            data["profiles"].append(
+                {
+                    "id": pid,
+                    "name": name,
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "model": model,
+                    "context_window": context_window,
+                }
+            )
+            if data["active_profile_id"] is None:
+                data["active_profile_id"] = pid
+            self._write(data)
         return pid
 
     def update_profile(
@@ -163,42 +252,45 @@ class SettingsService:
     ) -> None:
         """更新 Profile 的字段。任一参数为 None → 保留原值;
         尤其 api_key=None 保留既有密钥(前端只回传打码视图,不该清空真 key)。"""
-        data = self._load()
-        for p in data["profiles"]:
-            if p.get("id") == profile_id:
-                if name is not None:
-                    p["name"] = name
-                if base_url is not None:
-                    p["base_url"] = base_url
-                if model is not None:
-                    p["model"] = model
-                if api_key is not None:
-                    p["api_key"] = api_key
-                if context_window is not None:
-                    p["context_window"] = context_window
-                self._write(data)
-                return
+        with self._lock:
+            data = self._load()
+            for p in data["profiles"]:
+                if p.get("id") == profile_id:
+                    if name is not None:
+                        p["name"] = name
+                    if base_url is not None:
+                        p["base_url"] = base_url
+                    if model is not None:
+                        p["model"] = model
+                    if api_key is not None:
+                        p["api_key"] = api_key
+                    if context_window is not None:
+                        p["context_window"] = context_window
+                    self._write(data)
+                    return
         # 未找到:静默不改(幂等,避免对已删除 id 抛错)
 
     def delete_profile(self, profile_id: str) -> None:
         """删除 Profile。若删的是活动 Profile,活动改指剩余的第一个,无则 None。"""
-        data = self._load()
-        before = len(data["profiles"])
-        data["profiles"] = [p for p in data["profiles"] if p.get("id") != profile_id]
-        if len(data["profiles"]) == before:
-            return  # 无此 id
-        if data["active_profile_id"] == profile_id:
-            data["active_profile_id"] = (
-                data["profiles"][0]["id"] if data["profiles"] else None
-            )
-        self._write(data)
+        with self._lock:
+            data = self._load()
+            before = len(data["profiles"])
+            data["profiles"] = [p for p in data["profiles"] if p.get("id") != profile_id]
+            if len(data["profiles"]) == before:
+                return  # 无此 id
+            if data["active_profile_id"] == profile_id:
+                data["active_profile_id"] = (
+                    data["profiles"][0]["id"] if data["profiles"] else None
+                )
+            self._write(data)
 
     def set_active(self, profile_id: str) -> None:
         """设活动 Profile;id 不存在则忽略(不改当前活动)。"""
-        data = self._load()
-        if any(p.get("id") == profile_id for p in data["profiles"]):
-            data["active_profile_id"] = profile_id
-            self._write(data)
+        with self._lock:
+            data = self._load()
+            if any(p.get("id") == profile_id for p in data["profiles"]):
+                data["active_profile_id"] = profile_id
+                self._write(data)
 
     # ---- 对外视图 ----
     def public_view(self) -> dict:

@@ -3,7 +3,7 @@ import { FolderInput, Plus, Settings2, SendHorizontal, Square } from "lucide-rea
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { pickFiles } from "@/lib/pickers";
+import { pickFiles, readClipboardFiles } from "@/lib/pickers";
 
 /**
  * 对话输入框。三态:
@@ -16,6 +16,7 @@ import { pickFiles } from "@/lib/pickers";
 export function Composer({
   llmConfigured,
   streaming,
+  attaching = false,
   onSend,
   onStop,
   onOpenSettings,
@@ -25,6 +26,8 @@ export function Composer({
 }: {
   llmConfigured: boolean;
   streaming: boolean;
+  /** 附件处理中(提取/下模型/索引):阻塞发送,直到引用就绪——否则会在引用未到位时提问、答非所问。 */
+  attaching?: boolean;
   onSend: (content: string) => void;
   onStop: () => void;
   onOpenSettings: () => void;
@@ -45,7 +48,7 @@ export function Composer({
 
   const submit = () => {
     const text = value.trim();
-    if (!text || streaming || !llmConfigured) return;
+    if (!text || streaming || attaching || !llmConfigured) return;
     onSend(text);
     setValue("");
     if (taRef.current) taRef.current.style.height = "auto";
@@ -108,15 +111,14 @@ export function Composer({
               }
             }}
             onPaste={(e) => {
-              const paths = Array.from(e.clipboardData.files)
-                .map((f) => (f as File & { path?: string }).path)
-                .filter((p): p is string => Boolean(p));
-              if (paths.length) {
-                e.preventDefault();
-                onAttachPaths(paths);
-              } else if (e.clipboardData.files.length) {
-                onAttachUnsupported?.();
-              }
+              // 纯文本粘贴照常进输入框;粘贴的是文件时,浏览器 File 拿不到真实路径,
+              // 改从 pywebview 原生读系统剪贴板的文件路径(与拖拽走 cocoa 同理)。
+              if (!e.clipboardData.files.length) return;
+              e.preventDefault();
+              void readClipboardFiles().then((paths) => {
+                if (paths.length) onAttachPaths(paths);
+                else onAttachUnsupported?.();
+              });
             }}
           />
           {streaming ? (
@@ -134,7 +136,7 @@ export function Composer({
             <Button
               type="button"
               size="icon"
-              disabled={!llmConfigured || !value.trim()}
+              disabled={!llmConfigured || !value.trim() || attaching}
               onClick={submit}
               aria-label="发送"
               className="mb-px"

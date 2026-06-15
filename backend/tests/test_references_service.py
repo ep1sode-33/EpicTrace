@@ -171,6 +171,92 @@ def test_add_external_forwards_cancel_to_processor(tmp_path: Path, monkeypatch):
     assert captured["cancel"] is ev
 
 
+def test_add_external_text_file_skips_model_ensure(tmp_path: Path):
+    """FIX 2:挂 .txt/.md(→ TextMediaProcessor)即使 provisioner 为 installed_no_models,
+    也不该触发(几 GB 的)模型下载——只有 MinerU 处理的富文档才需要模型。"""
+    db, cid, _ = _setup(tmp_path)
+    path = _write(tmp_path, "note.md", "页表把虚拟地址映射到物理地址")
+
+    class _Prov:
+        state = "installed_no_models"
+        def is_ready(self):  # noqa: D401
+            return False
+        def ensure_models_ready(self, **kw):
+            raise AssertionError("text/code files must not trigger model download")
+        def download_models(self, **kw):
+            raise AssertionError("text/code files must not trigger model download")
+
+    svc = ReferenceService(db, provisioner=_Prov())
+    ref = svc.add_external(cid, path, context_window=BIG_WIN)
+    assert ref["mode"] == "fulltext"
+
+
+def test_add_external_mineru_file_blocks_until_models_ready(tmp_path: Path, monkeypatch):
+    """FIX 1+2:挂 .pdf(→ MinerU)且 installed_no_models → 提取前必须 ensure_models_ready
+    阻塞到就绪;ensure_models_ready 返回前提取不得发生。"""
+    db, cid, _ = _setup(tmp_path)
+    path = _write(tmp_path, "paper.pdf", "x")
+
+    from epictrace.interfaces.media import MediaResult
+    from epictrace.media.mineru import MinerUMediaProcessor
+
+    order: list[str] = []
+
+    class _Prov:
+        state = "installed_no_models"
+        def is_ready(self):
+            return False
+        def ensure_models_ready(self, *, model_source="modelscope", progress_cb=None):
+            order.append("ensure")
+
+    prov = _Prov()
+    real_proc = MinerUMediaProcessor(prov, model_source="modelscope", timeout=1)
+
+    def _fake_process(self, p, *, progress_cb=None, cancel=None):
+        order.append("extract")
+        return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+
+    monkeypatch.setattr(MinerUMediaProcessor, "process", _fake_process)
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: real_proc)
+
+    svc = ReferenceService(db, provisioner=prov)
+    svc.add_external(cid, path, context_window=BIG_WIN)
+    assert order == ["ensure", "extract"]  # 先确保模型就绪,再提取
+
+
+def test_add_external_surfaces_model_ensure_failure(tmp_path: Path, monkeypatch):
+    """FIX 1:ensure_models_ready 抛(下载失败/超时)→ add_external 不得静默提取,
+    应把失败转成 ValueError(由路由映射)。"""
+    import pytest
+
+    db, cid, _ = _setup(tmp_path)
+    path = _write(tmp_path, "paper.pdf", "x")
+
+    from epictrace.interfaces.media import MediaResult
+    from epictrace.media.mineru import MinerUMediaProcessor
+
+    class _Prov:
+        state = "downloading_models"
+        def is_ready(self):
+            return False
+        def ensure_models_ready(self, **kw):
+            raise RuntimeError("model download failed: net down")
+
+    prov = _Prov()
+    real_proc = MinerUMediaProcessor(prov, model_source="modelscope", timeout=1)
+
+    def _fake_process(self, p, *, progress_cb=None, cancel=None):
+        raise AssertionError("must not extract when models not ready")
+
+    monkeypatch.setattr(MinerUMediaProcessor, "process", _fake_process)
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: real_proc)
+
+    with pytest.raises(ValueError):
+        ReferenceService(db, provisioner=prov).add_external(cid, path, context_window=BIG_WIN)
+
+
 def test_add_external_succeeds_even_if_provenance_write_fails(tmp_path: Path, monkeypatch):
     """provenance(content_list sidecar)派生/可选:DB 行已 commit 后写失败不得向上传播。"""
     db, cid, _ = _setup(tmp_path)
