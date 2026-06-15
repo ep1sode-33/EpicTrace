@@ -35,9 +35,20 @@ export interface Settings {
   profiles: LLMProfile[];
 }
 export interface ExtractionStatus {
-  state: "not_installed" | "installing" | "ready" | "failed";
+  state:
+    | "not_installed"
+    | "installing"
+    | "installed_no_models"
+    | "downloading_models"
+    | "ready"
+    | "failed";
   ready: boolean;
   error?: string | null;
+}
+export interface ExtractionSettings {
+  engine: "mineru";
+  effort: "high" | "medium";
+  model_source: "modelscope" | "huggingface" | "local";
 }
 
 /** sendMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
@@ -159,6 +170,15 @@ export const api = {
     fetch(`${BASE}/api/extraction/status`).then(j<ExtractionStatus>),
   provisionExtraction: () =>
     fetch(`${BASE}/api/extraction/provision`, { method: "POST" }).then(j<ExtractionStatus>),
+  getExtractionSettings: () =>
+    fetch(`${BASE}/api/extraction/settings`).then(j<ExtractionSettings>),
+  putExtractionSettings: (payload: ExtractionSettings) =>
+    fetch(`${BASE}/api/extraction/settings`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(j<ExtractionSettings>),
+  downloadModels: () =>
+    fetch(`${BASE}/api/extraction/download-models`, { method: "POST" }).then(j<ExtractionStatus>),
 
   /**
    * 发消息并流式接收回答。后端是 SSE(events: status/token/citations/done);
