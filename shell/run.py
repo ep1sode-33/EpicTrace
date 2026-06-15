@@ -15,6 +15,11 @@ from epictrace.api.app import create_app
 HOST, PORT = "127.0.0.1", 8765
 
 
+def _is_real_file(p: str) -> bool:
+    """真实的绝对文件路径(非目录、非相对/脏路径)才放行。"""
+    return bool(p) and os.path.isabs(p) and os.path.isfile(p)
+
+
 class Api:
     """暴露给前端 JS 的原生能力(window.pywebview.api.*)。"""
 
@@ -61,11 +66,17 @@ class Api:
             from AppKit import NSURL, NSPasteboard  # type: ignore
 
             pb = NSPasteboard.generalPasteboard()
+            # 只放行真实的绝对文件路径:剪贴板可能带目录、相对/脏路径或非文件项,
+            # 一律过滤,避免下游对不存在/非文件路径误触提取。
             names = pb.propertyListForType_("NSFilenamesPboardType")
             if names:
-                return [str(p) for p in names]
+                return [str(p) for p in names if _is_real_file(str(p))]
             urls = pb.readObjectsForClasses_options_([NSURL], None) or []
-            return [str(u.path()) for u in urls if u.isFileURL()]
+            return [
+                str(u.path())
+                for u in urls
+                if u.isFileURL() and _is_real_file(str(u.path()))
+            ]
         except Exception as e:  # noqa: BLE001 — 读剪贴板任何异常都退化为空
             print(f"[EpicTrace] read_clipboard_files failed: {e}", flush=True)
             return []

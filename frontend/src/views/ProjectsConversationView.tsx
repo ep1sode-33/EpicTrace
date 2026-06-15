@@ -630,6 +630,9 @@ function Conversation({
   const abortRef = useRef<(() => void) | null>(null);
   // 草稿首次落库的在途去重:并发调用 ensureConversation 时共用同一个创建 promise,避免重复建会话。
   const creatingRef = useRef<Promise<number> | null>(null);
+  // 在途 attachExternal 计数:并发附加(拖一批 + 紧接着再拖一个)时,只有全部归零才解除
+  // attaching 锁。否则第一个 finally 抢先 setAttaching(false) 会在第二批仍在跑时放行发送。
+  const attachInFlightRef = useRef(0);
   // 由本组件在草稿首次发送时落库出来的 cid。父级随后会把 conversationId 切到这个值,
   // 此时不应重置/重拉历史——流就在本实例里跑,内容已在屏。下面的重置 effect 据此跳过这一跳变。
   const selfCreatedCidRef = useRef<number | null>(null);
@@ -803,8 +806,12 @@ function Conversation({
 
   const attachExternal = useCallback(
     async (paths: string[]) => {
-      const cid = await ensureConversation();
+      // 锁要在 ensureConversation(await,会让出事件循环)之前就上,且用计数器跨并发累计:
+      // 否则有「await 建会话」这段窗口让 send / 第二次 attach 抢进来;而若只用布尔标志,
+      // 第一个 finally 会在第二批仍在跑时把锁解开。计数归零才真正解锁。
+      attachInFlightRef.current += 1;
       setAttaching(true);
+      const cid = await ensureConversation();
       const failures: string[] = [];
       try {
         // 顺序逐个解析:阻塞直到每个文件 done/error(MinerU 解析较慢),
@@ -827,8 +834,9 @@ function Conversation({
           if (failed) failures.push(`${name}(${failed})`);
         }
       } finally {
-        // 无论成功 / 失败 / 抛错,都收起进行态、清进度文案,避免按钮卡在加载态。
-        setAttaching(false);
+        // 只有所有在途 attach 都结束(计数归零)才解锁;清进度文案,避免按钮卡在加载态。
+        attachInFlightRef.current -= 1;
+        if (attachInFlightRef.current === 0) setAttaching(false);
         setAttachProgress(null);
       }
       // 呈现失败提示,最后刷新引用列表——即便 refreshRefs 抛错,用户仍看得到哪些文件没加上。
