@@ -41,7 +41,10 @@ def _short_id() -> str:
 
 _VALID_EFFORT = {"high", "medium"}
 _VALID_MODEL_SOURCE = {"modelscope", "huggingface", "local"}
-_VALID_ENGINE = {"mineru"}
+# v2:可选 pypdf(简单文字处理,默认、开箱即用、免安装)或 mineru(OCR/VLM,质量高)。
+_VALID_ENGINE = {"pypdf", "mineru"}
+# 默认引擎:pypdf。免安装、免下模型,文本类 PDF/DOCX/PPTX 直接可用。
+_DEFAULT_ENGINE = "pypdf"
 
 
 class SettingsService:
@@ -159,7 +162,7 @@ class SettingsService:
         if not isinstance(ext, dict):
             ext = {}
         return {
-            "engine": ext.get("engine", "mineru"),
+            "engine": ext.get("engine", _DEFAULT_ENGINE),
             "effort": ext.get("effort", self._config.extraction_effort),
             "model_source": ext.get("model_source", self._config.model_source),
         }

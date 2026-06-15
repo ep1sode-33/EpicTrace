@@ -75,7 +75,8 @@ def test_status_reports_installed_no_models(app_and_prov):
 def test_get_extraction_settings_defaults(app_and_prov):
     client, _ = app_and_prov
     body = client.get("/api/extraction/settings").json()
-    assert body == {"engine": "mineru", "effort": "medium", "model_source": "modelscope"}
+    # v2:默认引擎 pypdf(开箱即用)。
+    assert body == {"engine": "pypdf", "effort": "medium", "model_source": "modelscope"}
 
 
 def test_put_extraction_settings_persists(app_and_prov):

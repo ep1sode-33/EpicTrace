@@ -202,8 +202,8 @@ def test_extraction_status_reports_state(tmp_path):
 def test_extraction_settings_default(tmp_path: Path):
     svc = _svc(tmp_path)
     es = svc.get_extraction_settings()
-    # 无持久化设置 → 回退 AppConfig 默认(engine=mineru, effort=medium, model_source=modelscope)。
-    assert es == {"engine": "mineru", "effort": "medium", "model_source": "modelscope"}
+    # v2:无持久化设置 → 默认 engine=pypdf(开箱即用、免安装);effort/model_source 仍回退 AppConfig 默认。
+    assert es == {"engine": "pypdf", "effort": "medium", "model_source": "modelscope"}
 
 
 def test_set_extraction_settings_persists_and_roundtrips(tmp_path: Path):
@@ -218,6 +218,14 @@ def test_set_extraction_settings_persists_and_roundtrips(tmp_path: Path):
     svc.create_profile(name="A", base_url="http://x", api_key="k", model="m")
     assert _svc(tmp_path).get_extraction_settings()["effort"] == "high"
     assert _svc(tmp_path).public_view()["configured"] is True
+
+
+def test_set_extraction_settings_accepts_pypdf_engine(tmp_path: Path):
+    # v2:pypdf 是合法引擎(默认),可显式设置并回读。
+    svc = _svc(tmp_path)
+    out = svc.set_extraction_settings(engine="pypdf", effort="medium", model_source="modelscope")
+    assert out["engine"] == "pypdf"
+    assert _svc(tmp_path).get_extraction_settings()["engine"] == "pypdf"
 
 
 def test_set_extraction_settings_rejects_bad_effort(tmp_path: Path):
