@@ -22,47 +22,81 @@ _DOWNLOAD_TIMEOUT = 3600
 
 _log = logging.getLogger("epictrace")
 
-# 默认 HuggingFace hub 缓存根。mineru-models-download 把权重落进这里(及/或 modelscope
-# 缓存),仓库目录命名形如 `models--<owner>--<name>`。判定模型就绪即检测此处真实缓存。
+# 默认 HuggingFace hub 缓存根。model_source=huggingface 时 mineru-models-download 把权重
+# 落进这里,仓库目录命名形如 `models--<owner>--<name>`(权重在 blobs/ 经 snapshots/ 软链)。
 _DEFAULT_HF_CACHE_DIR = Path.home() / ".cache" / "huggingface" / "hub"
 
-# MinerU 所需模型的 HF 仓库目录名匹配模式(opendatalab 下的 MinerU 权重 + PDF-Extract-Kit)。
-# hybrid 后端用 MinerU2.5(vlm)+ PDF-Extract-Kit(pipeline);任一存在(非空)即视模型可用。
-_MINERU_REPO_GLOBS = (
-    "models--opendatalab--*MinerU*",
-    "models--opendatalab--*PDF-Extract-Kit*",
+# 默认 ModelScope 缓存根。model_source=modelscope(MinerU 默认)时权重落这里,仓库目录形如
+# `<owner>/<name>`(owner 大小写不定:OpenDataLab / opendatalab),权重直接在目录里。
+# ModelScope 新旧版本布局不一(hub/ 下直接放,或再套一层 models/),故下面对该根做递归匹配。
+_DEFAULT_MS_CACHE_DIR = Path.home() / ".cache" / "modelscope" / "hub"
+
+# MinerU 所需的两族模型(hybrid 后端二者都要):MinerU2.5(vlm)+ PDF-Extract-Kit(pipeline)。
+# 每族给一组「仓库目录名」匹配模式,覆盖 HF(models--opendatalab--<name>)与 ModelScope
+# (<owner>/<name>)两种命名。判定就绪要求 *两族都在* 且各含至少一个真实权重文件。
+_MINERU_FAMILY_GLOBS = (
+    "*MinerU*",       # MinerU2.5 vlm 权重
+    "*PDF-Extract-Kit*",  # pipeline 后端的检测/排版/公式等权重
 )
 
+# 真实权重文件后缀:目录里只有 refs/locks/.no_exist 等占位(下了一半)不算就绪。
+_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 
-def _dir_has_payload(path: Path) -> bool:
-    """目录存在且含至少一个文件(递归)——空目录(下了一半/被清空)不算就绪。"""
+
+def _has_weight_file(path: Path) -> bool:
+    """目录(递归)含至少一个真实权重文件(.safetensors/.bin/.pt/.pth)。
+
+    HF 把权重放在 blobs/(经 snapshots/<rev>/ 软链);ModelScope 直接放目录里——
+    两者都用递归扫描覆盖。只有 refs/locks 等占位 → False(下了一半不算就绪)。
+    """
     if not path.is_dir():
         return False
-    for child in path.rglob("*"):
-        if child.is_file():
-            return True
-    return False
-
-
-def detect_mineru_models(cache_dir: Path) -> bool:
-    """检测 HF hub 缓存里是否存在 MinerU 的模型仓库目录(非空)。
-
-    纯文件系统探测,不起子进程;cache_dir 不存在 → False(不崩)。
-    匹配 `models--opendatalab--*MinerU*` 或 `*PDF-Extract-Kit*`(任一非空即可)。
-    """
-    if not cache_dir.is_dir():
-        return False
     try:
-        entries = list(cache_dir.iterdir())
+        for child in path.rglob("*"):
+            if child.is_file() and child.suffix.lower() in _WEIGHT_SUFFIXES:
+                return True
     except OSError:
         return False
-    for entry in entries:
-        if not entry.is_dir():
-            continue
-        if any(fnmatch.fnmatch(entry.name, g) for g in _MINERU_REPO_GLOBS):
-            if _dir_has_payload(entry):
-                return True
     return False
+
+
+def _family_present_with_weight(roots: Iterable[Path], family_glob: str) -> bool:
+    """在给定缓存根(可多个)里查找匹配 family_glob 的模型仓库目录,且其中含真实权重文件。
+
+    HF 缓存:仓库目录是 cache_root 的直接子目录(models--opendatalab--<name>)。
+    ModelScope 缓存:仓库是 <owner>/<name>(可能再深一层 models/<owner>/<name>),故对其做
+    递归目录扫描,任一匹配目录含权重即命中。两种根统一用 rglob 兜底,布局差异不影响判定。
+    """
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            for entry in root.rglob("*"):
+                if not entry.is_dir():
+                    continue
+                if fnmatch.fnmatch(entry.name, family_glob) and _has_weight_file(entry):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def detect_mineru_models(
+    cache_dir: Path, ms_cache_dir: Path | None = None
+) -> bool:
+    """检测 HF / ModelScope 缓存里是否两族 MinerU 模型俱全(各含真实权重文件)。
+
+    纯文件系统探测,不起子进程;两个缓存根都不存在 → False(不崩)。
+    hybrid 后端需 MinerU2.5(vlm)+ PDF-Extract-Kit(pipeline)两族;每族可落在 HF
+    (model_source=huggingface)或 ModelScope(默认 modelscope)缓存,任一缓存命中该族即可,
+    但两族都必须命中、且各自含至少一个真实权重(.safetensors/.bin/.pt/.pth)才视为就绪。
+    """
+    roots = [cache_dir]
+    if ms_cache_dir is not None:
+        roots.append(ms_cache_dir)
+    return all(
+        _family_present_with_weight(roots, fam) for fam in _MINERU_FAMILY_GLOBS
+    )
 
 # 模型下载(mineru-models-download → HuggingFace/ModelScope)进度行解析。
 # 下载器把 tqdm 进度条写到 stderr(回车刷新同一行),形如:
@@ -162,13 +196,16 @@ class MinerUProvisioner:
         uv_runner: UvRunner | None = None,
         models_runner: ModelsRunner | None = None,
         hf_cache_dir: Path | None = None,
+        ms_cache_dir: Path | None = None,
     ) -> None:
         self._venv_dir = Path(venv_dir)
         self._uv_bin = uv_bin
         self._uv_runner = uv_runner or _default_uv_runner
         self._models_runner = models_runner
-        # 模型就绪检测根:HF hub 缓存。可注入(测试用 tmp 目录假造仓库,不碰真 ~/.cache)。
+        # 模型就绪检测根:HF hub + ModelScope 两处缓存。可注入(测试用 tmp 目录假造仓库,
+        # 不碰真 ~/.cache)。model_source 决定权重落哪个缓存,故两处都要检测。
         self._hf_cache_dir = Path(hf_cache_dir) if hf_cache_dir is not None else _DEFAULT_HF_CACHE_DIR
+        self._ms_cache_dir = Path(ms_cache_dir) if ms_cache_dir is not None else _DEFAULT_MS_CACHE_DIR
         self._failed = False
         # 失败阶段:install(装包)/ download(下模型)/ None(无失败)。
         # 区分二者使前端能把「重试」按钮指向正确动作;并在 cached 模型仍可用(state==ready)时
@@ -190,12 +227,16 @@ class MinerUProvisioner:
         """模型就绪检测的 HF hub 缓存根(默认 ~/.cache/huggingface/hub,可注入)。"""
         return self._hf_cache_dir
 
+    def ms_cache_dir(self) -> Path:
+        """模型就绪检测的 ModelScope 缓存根(默认 ~/.cache/modelscope/hub,可注入)。"""
+        return self._ms_cache_dir
+
     def _models_ready(self) -> bool:
-        # 检测真实模型缓存:HF hub 下存在 MinerU 的模型仓库目录(非空)即视就绪。
-        # 不再用 venv 哨兵——哨兵会误判「模型已在 HF 缓存里但本 APP 没下过」的情形。
+        # 检测真实模型缓存:HF hub 或 ModelScope 缓存下两族 MinerU 模型俱全(各含权重)即就绪。
+        # 不再用 venv 哨兵——哨兵会误判「模型已在缓存里但本 APP 没下过」的情形。
         # 已知取舍(接受):成功一次后,若用户在 APP 外手动删了缓存模型,这里会立刻反映为
         # 未就绪(真实探测,正是想要的行为)。
-        return detect_mineru_models(self._hf_cache_dir)
+        return detect_mineru_models(self._hf_cache_dir, self._ms_cache_dir)
 
     def uv_bin(self) -> str:
         if self._uv_bin:

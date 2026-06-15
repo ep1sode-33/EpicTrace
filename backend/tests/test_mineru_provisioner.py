@@ -17,17 +17,39 @@ def _hf_cache_dir(tmp_path: Path) -> Path:
 
 
 def _make_repo_dir(hub: Path, repo_name: str, *, file_name: str = "model.safetensors") -> Path:
-    """在假 HF hub 缓存下造一个非空的模型仓库目录(models--owner--name + 一个文件)。"""
+    """在假 HF hub 缓存下造一个非空的模型仓库目录(models--owner--name + 一个权重文件)。"""
     repo = hub / repo_name
     repo.mkdir(parents=True, exist_ok=True)
     (repo / file_name).write_text("weights\n")
     return repo
 
 
+def _ms_cache_dir(tmp_path: Path) -> Path:
+    """假的 ModelScope 缓存根(测试注入,不碰真 ~/.cache)。"""
+    return tmp_path / "ms_cache" / "hub"
+
+
+def _make_ms_repo_dir(
+    ms_hub: Path, repo_path: str, *, file_name: str = "model.safetensors"
+) -> Path:
+    """在假 ModelScope 缓存下造一个非空模型目录(<owner>/<name>/...,权重直接落在目录里)。"""
+    repo = ms_hub / repo_path
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / file_name).write_text("weights\n")
+    return repo
+
+
+def _both_families_hf(hub: Path) -> None:
+    """在 HF 缓存里造齐两族模型(MinerU + PDF-Extract-Kit),各含一个权重文件。"""
+    _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
+    _make_repo_dir(hub, "models--opendatalab--PDF-Extract-Kit-1.0")
+
+
 def _prov(tmp_path: Path, **kw) -> MinerUProvisioner:
-    """注入假 HF 缓存根,默认 uv_bin 已给。"""
+    """注入假 HF/ModelScope 缓存根,默认 uv_bin 已给。"""
     kw.setdefault("uv_bin", "/usr/local/bin/uv")
     kw.setdefault("hf_cache_dir", _hf_cache_dir(tmp_path))
+    kw.setdefault("ms_cache_dir", _ms_cache_dir(tmp_path))
     return MinerUProvisioner(_venv_dir(tmp_path), **kw)
 
 
@@ -180,67 +202,159 @@ def test_provision_uv_bin_error_sets_failed_with_last_error(tmp_path: Path, monk
     assert "uv" in p.last_error.lower()
 
 
-def _install_only(venv: Path, *, hf_cache_dir: Path | None = None) -> "MinerUProvisioner":
+def _install_only(
+    venv: Path, *, hf_cache_dir: Path | None = None, ms_cache_dir: Path | None = None
+) -> "MinerUProvisioner":
     """造一个「装了包、未下模型」的 provisioner(bin 存在,缓存里无模型仓库)。"""
     (venv / "bin").mkdir(parents=True, exist_ok=True)
     (venv / "bin" / "mineru").write_text("#!/bin/sh\n")
     (venv / "bin" / "mineru").chmod(0o755)
     (venv / "bin" / "mineru-models-download").write_text("#!/bin/sh\n")
     (venv / "bin" / "mineru-models-download").chmod(0o755)
-    return MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hf_cache_dir)
+    return MinerUProvisioner(
+        venv, uv_bin="/usr/local/bin/uv",
+        hf_cache_dir=hf_cache_dir, ms_cache_dir=ms_cache_dir,
+    )
 
 
 # ---- v2: 真实模型缓存检测(替换 venv 哨兵) ----
 
 
 def test_models_ready_detects_existing_hf_cache(tmp_path: Path):
-    """缓存里已有 MinerU 模型仓库目录(非空)→ 模型部分判为就绪(无需哨兵)。"""
+    """缓存里已有 MinerU + PDF-Extract-Kit 两族模型仓库目录(各含权重)→ 模型判为就绪。"""
     venv = _venv_dir(tmp_path)
-    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
+    hub = _hf_cache_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=hub, ms_cache_dir=_ms_cache_dir(tmp_path))
     assert p.is_ready() is False  # 缓存空 → 未就绪
     # 用户机器上的真实情形:HF 缓存里有 MinerU2.5 + PDF-Extract-Kit 两个仓库目录。
-    _make_repo_dir(_hf_cache_dir(tmp_path), "models--opendatalab--MinerU2.5-2509-1.2B")
-    _make_repo_dir(_hf_cache_dir(tmp_path), "models--opendatalab--PDF-Extract-Kit-1.0")
+    _both_families_hf(hub)
     assert p.is_ready() is True
     assert p.state == "ready"
 
 
-def test_models_ready_when_only_pdf_extract_kit_present(tmp_path: Path):
-    """仅有 PDF-Extract-Kit 仓库(pipeline 后端)也算模型就绪。"""
+# ---- FIX 2: 必须两族都在 + 至少一个真实权重文件 ----
+
+
+def test_models_not_ready_when_only_pdf_extract_kit_present(tmp_path: Path):
+    """仅有 PDF-Extract-Kit(缺 MinerU)→ hybrid 不齐 → 未就绪。"""
     venv = _venv_dir(tmp_path)
-    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path), ms_cache_dir=_ms_cache_dir(tmp_path))
     _make_repo_dir(_hf_cache_dir(tmp_path), "models--opendatalab--PDF-Extract-Kit-1.0")
-    assert p.is_ready() is True
-
-
-def test_models_ready_when_only_mineru_present(tmp_path: Path):
-    """仅有 MinerU 仓库(vlm 后端)也算模型就绪。"""
-    venv = _venv_dir(tmp_path)
-    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
-    _make_repo_dir(_hf_cache_dir(tmp_path), "models--opendatalab--MinerU2.5-2509-1.2B")
-    assert p.is_ready() is True
-
-
-def test_empty_repo_dir_is_not_ready(tmp_path: Path):
-    """缓存里有同名仓库目录但为空(下了一半/被清空)→ 不算就绪。"""
-    venv = _venv_dir(tmp_path)
-    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
-    (_hf_cache_dir(tmp_path) / "models--opendatalab--MinerU2.5-2509-1.2B").mkdir(parents=True)
     assert p.is_ready() is False
+
+
+def test_models_not_ready_when_only_mineru_present(tmp_path: Path):
+    """仅有 MinerU(缺 PDF-Extract-Kit)→ hybrid 不齐 → 未就绪。"""
+    venv = _venv_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path), ms_cache_dir=_ms_cache_dir(tmp_path))
+    _make_repo_dir(_hf_cache_dir(tmp_path), "models--opendatalab--MinerU2.5-2509-1.2B")
+    assert p.is_ready() is False
+
+
+def test_both_families_but_no_weight_file_is_not_ready(tmp_path: Path):
+    """两族目录都在,但只有 refs/locks(无真实权重文件)→ 下了一半 → 未就绪。"""
+    venv = _venv_dir(tmp_path)
+    hub = _hf_cache_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=hub, ms_cache_dir=_ms_cache_dir(tmp_path))
+    for name in ("models--opendatalab--MinerU2.5-2509-1.2B",
+                 "models--opendatalab--PDF-Extract-Kit-1.0"):
+        repo = hub / name / "refs"
+        repo.mkdir(parents=True)
+        (repo / "main").write_text("abc123\n")  # 非权重文件
+        (hub / name / ".no_exist").mkdir()
+    assert p.is_ready() is False
+
+
+def test_one_family_has_weight_other_only_refs_is_not_ready(tmp_path: Path):
+    """一族有权重、另一族只有 refs(无权重)→ 仍未就绪(每族都要有真实权重)。"""
+    venv = _venv_dir(tmp_path)
+    hub = _hf_cache_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=hub, ms_cache_dir=_ms_cache_dir(tmp_path))
+    _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")  # 有权重
+    refs = hub / "models--opendatalab--PDF-Extract-Kit-1.0" / "refs"
+    refs.mkdir(parents=True)
+    (refs / "main").write_text("abc123\n")  # 仅 refs,无权重
+    assert p.is_ready() is False
+
+
+def test_weight_under_hf_snapshots_layout_is_ready(tmp_path: Path):
+    """HF 真实布局:权重落在 snapshots/<rev>/ 下(经 blobs 软链)→ 递归找到 → 就绪。"""
+    venv = _venv_dir(tmp_path)
+    hub = _hf_cache_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=hub, ms_cache_dir=_ms_cache_dir(tmp_path))
+    for name, weight in (
+        ("models--opendatalab--MinerU2.5-2509-1.2B", "model.safetensors"),
+        ("models--opendatalab--PDF-Extract-Kit-1.0", "doclayout_yolo.pt"),
+    ):
+        snap = hub / name / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        (snap / weight).write_text("weights\n")
+        (hub / name / "refs").mkdir()
+        (hub / name / "refs" / "main").write_text("abc123\n")
+    assert p.is_ready() is True
 
 
 def test_unrelated_cache_repo_is_not_ready(tmp_path: Path):
     """缓存里只有无关仓库(非 MinerU/PDF-Extract-Kit)→ 不算就绪(不误判)。"""
     venv = _venv_dir(tmp_path)
-    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path), ms_cache_dir=_ms_cache_dir(tmp_path))
     _make_repo_dir(_hf_cache_dir(tmp_path), "models--BAAI--bge-m3")
     assert p.is_ready() is False
 
 
 def test_missing_cache_root_is_not_ready(tmp_path: Path):
-    """缓存根本不存在(全新机器)→ 不崩,不算就绪。"""
+    """两个缓存根都不存在(全新机器)→ 不崩,不算就绪。"""
     venv = _venv_dir(tmp_path)
-    p = _install_only(venv, hf_cache_dir=tmp_path / "nonexistent" / "hub")
+    p = _install_only(
+        venv,
+        hf_cache_dir=tmp_path / "nonexistent" / "hub",
+        ms_cache_dir=tmp_path / "nonexistent_ms" / "hub",
+    )
+    assert p.is_ready() is False
+
+
+# ---- FIX 1: ModelScope 缓存也要检测(model_source=modelscope 时模型落 ModelScope 缓存) ----
+
+
+def test_models_ready_detects_modelscope_cache(tmp_path: Path):
+    """两族模型落在 ModelScope 缓存(OpenDataLab/<name>,权重直接在目录里)→ 就绪。"""
+    venv = _venv_dir(tmp_path)
+    ms = _ms_cache_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path), ms_cache_dir=ms)
+    assert p.is_ready() is False
+    _make_ms_repo_dir(ms, "OpenDataLab/MinerU2.5-2509-1.2B")
+    _make_ms_repo_dir(ms, "OpenDataLab/PDF-Extract-Kit-1.0", file_name="doclayout_yolo.pt")
+    assert p.is_ready() is True
+    assert p.state == "ready"
+
+
+def test_models_ready_detects_modelscope_lowercase_owner(tmp_path: Path):
+    """ModelScope 上 opendatalab 命名空间大小写不定(opendatalab/...)→ 仍能命中。"""
+    venv = _venv_dir(tmp_path)
+    ms = _ms_cache_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path), ms_cache_dir=ms)
+    _make_ms_repo_dir(ms, "opendatalab/MinerU2.5-2509-1.2B")
+    _make_ms_repo_dir(ms, "opendatalab/PDF-Extract-Kit-1.0", file_name="doclayout_yolo.pt")
+    assert p.is_ready() is True
+
+
+def test_models_ready_mixed_hf_and_modelscope(tmp_path: Path):
+    """一族在 HF 缓存、另一族在 ModelScope 缓存 → 两缓存合并判定 → 就绪。"""
+    venv = _venv_dir(tmp_path)
+    hub = _hf_cache_dir(tmp_path)
+    ms = _ms_cache_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=hub, ms_cache_dir=ms)
+    _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
+    _make_ms_repo_dir(ms, "OpenDataLab/PDF-Extract-Kit-1.0", file_name="doclayout_yolo.pt")
+    assert p.is_ready() is True
+
+
+def test_modelscope_only_one_family_is_not_ready(tmp_path: Path):
+    """ModelScope 缓存里只有一族 → 未就绪(两族都要)。"""
+    venv = _venv_dir(tmp_path)
+    ms = _ms_cache_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path), ms_cache_dir=ms)
+    _make_ms_repo_dir(ms, "OpenDataLab/MinerU2.5-2509-1.2B")
     assert p.is_ready() is False
 
 
@@ -252,8 +366,8 @@ def test_download_models_runs_download_and_becomes_ready(tmp_path: Path):
     def models_runner(cmd, timeout):
         calls.append(cmd)
         # 模拟成功的子进程:MinerU 把权重落到 HF/modelscope 缓存(不在 venv 内)。
-        # 就绪靠真实缓存检测,不靠哨兵——所以假 runner 必须把仓库目录造出来。
-        _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
+        # 就绪靠真实缓存检测,不靠哨兵——所以假 runner 必须把两族仓库目录造齐。
+        _both_families_hf(hub)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     p = _install_only(venv, hf_cache_dir=hub)
@@ -317,7 +431,7 @@ def test_duplicate_download_while_downloading_is_noop(tmp_path: Path):
         dl_calls["n"] += 1
         started.set()
         release.wait(timeout=5)  # 卡住第一次下载,使其保持 downloading_models
-        _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
+        _both_families_hf(hub)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv",
@@ -345,7 +459,7 @@ def test_ensure_models_ready_when_ready_returns_immediately(tmp_path: Path):
     p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hub,
                           models_runner=lambda c, t: pytest.fail("should not download"))
     _install_only(venv)
-    _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
+    _both_families_hf(hub)
     assert p.is_ready()
     p.ensure_models_ready(model_source="modelscope")  # no-op,不调 runner
 
@@ -357,7 +471,7 @@ def test_ensure_models_ready_runs_download_when_installed_no_models(tmp_path: Pa
 
     def models_runner(cmd, timeout):
         calls["n"] += 1
-        _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
+        _both_families_hf(hub)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv",
@@ -380,7 +494,7 @@ def test_ensure_models_ready_second_caller_waits_for_first(tmp_path: Path):
         dl_calls["n"] += 1
         started.set()
         release.wait(timeout=5)
-        _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
+        _both_families_hf(hub)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv",
@@ -463,8 +577,8 @@ def test_download_models_streams_progress_to_cb(tmp_path: Path, monkeypatch):
 
         def wait(self, timeout=None):
             self.returncode = 0
-            # 子进程成功 → 权重落到 HF 缓存(真实情形);就绪靠缓存检测。
-            _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
+            # 子进程成功 → 两族权重落到 HF 缓存(真实情形);就绪靠缓存检测。
+            _both_families_hf(hub)
             return 0
 
         def kill(self):
@@ -549,7 +663,7 @@ def test_redownload_failure_after_ready_keeps_state_but_surfaces_error(tmp_path:
     p = MinerUProvisioner(
         venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hub,
         models_runner=lambda c, t: (
-            _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B"),
+            _both_families_hf(hub),
             subprocess.CompletedProcess(c, 0, stdout="", stderr=""),
         )[1],
     )
@@ -574,7 +688,7 @@ def test_successful_download_clears_failed_stage(tmp_path: Path):
     p = MinerUProvisioner(
         venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hub,
         models_runner=lambda c, t: (
-            _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B"),
+            _both_families_hf(hub),
             subprocess.CompletedProcess(c, 0, stdout="", stderr=""),
         )[1],
     )
