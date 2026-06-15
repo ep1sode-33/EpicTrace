@@ -15,7 +15,7 @@
 **做**:
 - 会话生命周期:开始 / 暂停·继续 / 结束 session;源开关;同一时刻**单一活动 session**;所有事件带绝对时间戳。
 - 数据模型:`capture_sessions` + `capture_events` 两张新表;`IngestRecord` 加 `source_session_id`(可选回溯)。
-- **录制浮窗(HUD)**:录制期间的常驻置顶小浮窗(无边框、可拖动),含计时 + 笔记 / 截图 / 暂停 / 停止 / 展开。
+- **录制浮窗(HUD)**:录制期间的常驻置顶小浮窗(无边框、可拖动),含计时 + 笔记 / 截图 / 暂停 / 停止 / 展开 + 外录(麦克风)/ 内录(喇叭)开关(本期 disabled 占位)。
 - 三个轻量采集源:**笔记**(前端输入)、**剪贴板**(shell 轮询 `NSPasteboard.changeCount`,session 期间 + 去重)、**截图**(shell `js_api` + **全局快捷键** + 应用内/HUD 按钮)。
 - 采集后暂存区:列出 raw sessions;**图形时间线 v1**(事件按 `ts` 排列 + 时间刻度;可缩放轨道留作后续打磨)。
 - 接口缝:`AudioSource`、`Transcriber`、`Organizer`(延续「5 接口」家族)。
@@ -72,7 +72,7 @@
 
 延续 `LLMProvider / EmbeddingProvider / VectorStore / Segmenter / MediaProcessor`:
 
-- **`AudioSource`**:采音抽象(start/stop → 产出音频帧或落盘文件 + 时间戳)。本期只定义 + 文档化,无实现;「声音」源开关 disabled 占位。
+- **`AudioSource`**:采音抽象(start/stop → 产出音频帧或落盘文件 + 时间戳)。覆盖**外录(麦克风)**与**内录(系统音频)**两类来源——后续各落一个实现(mic plan / 系统内录 plan)。本期只定义 + 文档化,无实现;HUD 的外录/内录开关 disabled 占位。
 - **`Transcriber`**:ASR 抽象(音频 → 带词级时间戳的 transcript 段)。本期只定义 + 恒等/空默认。mic ASR plan 落地 faster-whisper 实现。
 - **`Organizer`**:`propose(session) -> OrganizationProposal`。归类提议抽象。本期默认实现 = 直通(见 §9)。真·归类 Agent 后续接入,**call site 不变**。
 
@@ -83,7 +83,8 @@
 | **笔记** | 前端/HUD 输入框 → `POST …/events {kind:note, payload:文本}` | 文本入 event | 纯前端,无原生依赖 |
 | **剪贴板** | shell 轮询 `changeCount`(session 期间)→ 变化读文本 → 去重(同上条不重复)→ POST | 文本入 event | 无 pywebview(dev)→ 该源不可用,前端标灰 |
 | **截图** | shell `js_api capture_screenshot` + 全局热键 / HUD 按钮 → 抓屏存图到 `staging_dir` → `POST {kind:screenshot, payload:相对路径, meta:{w,h}}` | 图片文件 + event | 无屏幕录制权限 → 引导授权;被拒标灰 + 提示,不崩 |
-| **声音** | 仅 `AudioSource`/`Transcriber` 接口缝 + disabled 开关 | — | 下一 plan |
+| **外录(mic)** | 仅 `AudioSource`/`Transcriber` 接口缝 + HUD disabled 开关 | — | 下一 plan |
+| **内录(系统音频)** | 仅 `AudioSource`/`Transcriber` 接口缝 + HUD disabled 开关(前身 `SystemAudioCapture.swift` 可移植) | — | 再下一 plan |
 
 ## 7. 录制浮窗(HUD)
 
@@ -94,6 +95,8 @@
   - 🔴 + `00:00:02`:录制中红点 + **active elapsed** 计时(暂停时变灰/暂停态)。
   - ✏️ **笔记**:点开一个极简输入条 → 提交 `note` 事件。
   - ⌧ **截图**:触发 `capture_screenshot`(等同全局热键)。
+  - 🎤 **外录(麦克风)**:开/关 mic 采集 —— **本期 disabled 占位**(mic ASR 下一 plan)。
+  - 🔊 **内录(喇叭)**:开/关系统音频采集 —— **本期 disabled 占位**(系统内录 再下一 plan)。
   - ⏸ **暂停 / 继续**:`pause`/`resume` 事件 + shell 暂停/恢复原生监听。
   - ⏹ **停止**:结束 session(→ staged),销毁 HUD,主窗跳采集后暂存区。
   - › **展开 / 收起**:在「完整按钮条 ↔ 只剩红点+计时的小药丸」间切换;并提供唤回主窗的入口。
