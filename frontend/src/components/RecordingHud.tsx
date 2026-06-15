@@ -14,10 +14,10 @@ import { api, type CaptureEvent } from "@/lib/api";
 import { native } from "@/lib/native";
 
 // HUD 窗口尺寸(配合 shell 的 resize_recording_hud):紧凑条 / 带笔记行 / 展开时间线。
-const BAR_W = 280;
+const BAR_W = 244;
 const BAR_H = 40;
-const NOTE_H = 78;
-const EXPANDED_H = 300;
+const NOTE_H = 76;
+const EXPANDED_H = 240;
 
 /** 将秒数格式化为 MM:SS */
 function formatTime(secs: number): string {
@@ -244,11 +244,11 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
 
   function renderContent(ev: CaptureEvent): ReactNode {
     if (ev.kind === "screenshot")
-      return <span className="text-foreground">📷 截图</span>;
+      return <span className="text-foreground">截图</span>;
     if (ev.kind === "pause")
-      return <span className="text-amber-600 dark:text-amber-400">⏸ 暂停</span>;
+      return <span className="text-amber-600 dark:text-amber-400">暂停</span>;
     if (ev.kind === "resume")
-      return <span className="text-emerald-600 dark:text-emerald-400">▶ 继续</span>;
+      return <span className="text-emerald-600 dark:text-emerald-400">继续</span>;
     return <span className="text-foreground">{ev.payload || "(无内容)"}</span>;
   }
 

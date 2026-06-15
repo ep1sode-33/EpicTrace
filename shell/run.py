@@ -229,8 +229,21 @@ class Api:
                 f"http://127.0.0.1:8765/?view=hud&session={session_id}",
                 js_api=self,
                 frameless=True, on_top=True, easy_drag=True, resizable=False,
-                width=280, height=40, x=60, y=60,
+                width=244, height=40, x=60, y=60,
             )
+            # on_top 默认把窗口级别设得过高,会盖住输入法候选窗。窗口显示后降到
+            # NSFloatingWindowLevel(=3,浮动面板级:在普通窗口之上、在输入法/菜单之下)。
+            def _tune_level() -> None:
+                try:
+                    from AppKit import NSApp
+
+                    for w in NSApp.windows():
+                        if w.title() == "EpicTrace 录制":
+                            w.setLevel_(3)  # NSFloatingWindowLevel
+                except Exception as e:  # noqa: BLE001 — 调级别失败不影响录制
+                    print(f"[EpicTrace] tune hud level: {e}", flush=True)
+
+            self._hud.events.shown += _tune_level
             return {"ok": True}
         except Exception as e:  # noqa: BLE001
             print(f"[EpicTrace] show_recording_hud failed: {e}", flush=True)
