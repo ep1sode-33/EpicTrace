@@ -229,7 +229,7 @@ class Api:
                 f"http://127.0.0.1:8765/?view=hud&session={session_id}",
                 js_api=self,
                 frameless=True, on_top=True, easy_drag=True, resizable=False,
-                width=300, height=44, x=60, y=60,
+                width=280, height=40, x=60, y=60,
             )
             return {"ok": True}
         except Exception as e:  # noqa: BLE001
