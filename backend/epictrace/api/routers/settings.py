@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import threading
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from epictrace.api.deps import get_provisioner
 from epictrace.llm.openai_compat import OpenAICompatLLM
 from epictrace.schemas import (
+    ExtractionSettingsIn,
+    ExtractionSettingsOut,
     ExtractionStatusOut,
     ProfileCreate,
     ProfileUpdate,
@@ -115,6 +117,43 @@ def extraction_provision(request: Request):
     def _run():
         try:
             prov.provision()
+        except Exception:  # noqa: BLE001 — 失败状态/last_error 已由 provisioner 记录
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return _provision_status(prov)
+
+
+@router.get("/extraction/settings", response_model=ExtractionSettingsOut)
+def get_extraction_settings(request: Request):
+    return _svc(request).get_extraction_settings()
+
+
+@router.put("/extraction/settings", response_model=ExtractionSettingsOut)
+def put_extraction_settings(payload: ExtractionSettingsIn, request: Request):
+    try:
+        return _svc(request).set_extraction_settings(
+            engine=payload.engine,
+            effort=payload.effort,
+            model_source=payload.model_source,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/extraction/download-models", response_model=ExtractionStatusOut)
+def extraction_download_models(request: Request):
+    """触发模型下载(后台线程,粗粒度状态)。立即返回当前状态;前端轮询 status。
+
+    机制同 extraction_provision:后台线程吞掉上抛异常(失败状态/last_error 由
+    provisioner 记录);重复触发由 provisioner 内部并发守卫 no-op。model_source 取
+    持久化设置(无 → AppConfig 默认)。"""
+    prov = get_provisioner(request)
+    model_source = _svc(request).get_extraction_settings()["model_source"]
+
+    def _run():
+        try:
+            prov.download_models(model_source=model_source)
         except Exception:  # noqa: BLE001 — 失败状态/last_error 已由 provisioner 记录
             pass
 

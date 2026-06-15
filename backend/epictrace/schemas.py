@@ -139,8 +139,21 @@ class SettingsOut(BaseModel):
     profiles: list[ProfileView]
 
 
+class ExtractionSettingsIn(BaseModel):
+    engine: str = "mineru"
+    effort: str
+    model_source: str
+
+
+class ExtractionSettingsOut(BaseModel):
+    engine: str
+    effort: str
+    model_source: str
+
+
 class ExtractionStatusOut(BaseModel):
-    state: str            # not_installed | installing | ready | failed
+    # not_installed | installing | installed_no_models | downloading_models | ready | failed
+    state: str
     ready: bool
     error: str | None = None
 
