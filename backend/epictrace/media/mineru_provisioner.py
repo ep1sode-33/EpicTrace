@@ -56,20 +56,17 @@ class MinerUProvisioner:
     def mineru_bin(self) -> str:
         return str(self._venv_dir / "bin" / "mineru")
 
-    def models_dir(self) -> Path:
-        # mineru-models-download 把权重 + mineru.json 落到 venv 内的模型根目录。
-        return self._venv_dir / "models"
+    def models_ready_sentinel(self) -> Path:
+        # App-owned 就绪 sentinel,落在 venv 根目录旁(<venv>/.models-ready)。
+        # 为何不查 MinerU 自己的磁盘 marker:已安装版本的 mineru-models-download 把权重
+        # 下进 HuggingFace/modelscope 缓存(~/.cache/huggingface),venv 内既没有 models/
+        # 目录也没有 mineru.json,没有稳定、跨版本的磁盘 marker 可依赖。
+        # mineru-models-download 是幂等的(HF 缓存已有时为快速 no-op),所以即便模型已存在,
+        # 由 sentinel 门控的重触发也很廉价——我们在一次成功下载后自行写入它作为权威就绪标志。
+        return self._venv_dir / ".models-ready"
 
     def _models_ready(self) -> bool:
-        # marker:mineru.json 存在,且模型根目录里有至少一个非 mineru.json 的条目(模型权重)。
-        root = self.models_dir()
-        marker = root / "mineru.json"
-        if not marker.is_file():
-            return False
-        try:
-            return any(c.name != "mineru.json" for c in root.iterdir())
-        except OSError:
-            return False
+        return self.models_ready_sentinel().is_file()
 
     def uv_bin(self) -> str:
         if self._uv_bin:
@@ -154,8 +151,10 @@ class MinerUProvisioner:
         model_source: str = "modelscope",
         progress_cb: Callable[[str], None] | None = None,
     ) -> str:
-        """下模型(跑 <venv>/bin/mineru-models-download --source <model_source>)。返回结束时 state。
+        """下模型(跑 <venv>/bin/mineru-models-download -s <model_source> -m all)。返回结束时 state。
 
+        hybrid 后端同时需要 pipeline 与 vlm 模型 → 传 -m all。成功后写 app-owned 就绪
+        sentinel(见 models_ready_sentinel)。
         前提:已 provision(包就绪)。并发安全:下载中再调 no-op(返回当前 state)。
         任何失败置 failed + last_error 再上抛(后台触发线程捕获)。"""
         with self._lock:
@@ -171,8 +170,11 @@ class MinerUProvisioner:
 
         try:
             emit("正在下载模型(约数 GB,首次较久)…")
-            cmd = [self.models_download_bin(), "--source", model_source]
+            # hybrid 需 pipeline + vlm 两套权重 → -m all。
+            cmd = [self.models_download_bin(), "-s", model_source, "-m", "all"]
             self._run_models_or_fail(cmd)
+            # 仅在子进程成功后写 app-owned 就绪 sentinel(权威就绪标志)。
+            self.models_ready_sentinel().write_text("ready\n")
             emit("模型下载完成")
         except Exception as e:  # noqa: BLE001 — 任何失败都落到 failed + last_error
             with self._lock:

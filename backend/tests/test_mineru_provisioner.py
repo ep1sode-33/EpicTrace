@@ -175,22 +175,26 @@ def test_download_models_runs_download_and_becomes_ready(tmp_path: Path):
 
     def models_runner(cmd, timeout):
         calls.append(cmd)
-        # 模拟下载:落 mineru.json + 一个模型目录,使 _models_ready 转真。
-        root = venv / "models"
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "mineru.json").write_text("{}")
-        (root / "layout").mkdir(exist_ok=True)
+        # 模拟成功的子进程:MinerU 把权重落到 HF/modelscope 缓存(不在 venv 内),
+        # 不造任何 marker。就绪 sentinel 由 download_models 成功后自行写入。
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    # 下载前:无 sentinel → 未就绪
+    assert p.models_ready_sentinel().exists() is False
     progress: list[str] = []
     p.download_models(progress_cb=progress.append)
 
     assert p.state == "ready"
     assert p.is_ready() is True
-    # 跑的是 venv 内的 mineru-models-download,且带 --source <model_source>
+    # 成功后写了 app-owned sentinel
+    assert p.models_ready_sentinel().is_file()
+    # 跑的是 venv 内的 mineru-models-download,且带 -s <source> 与 -m all(hybrid 需全部模型)
     assert calls[0][0] == str(venv / "bin" / "mineru-models-download")
-    assert "--source" in calls[0]
+    assert "-s" in calls[0]
+    assert "-m" in calls[0]
+    m_idx = calls[0].index("-m")
+    assert calls[0][m_idx + 1] == "all"
     assert len(progress) >= 1
 
 
@@ -201,13 +205,11 @@ def test_download_models_takes_model_source(tmp_path: Path):
 
     def models_runner(cmd, timeout):
         calls.append(cmd)
-        root = venv / "models"; root.mkdir(parents=True, exist_ok=True)
-        (root / "mineru.json").write_text("{}"); (root / "layout").mkdir(exist_ok=True)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
     p.download_models(model_source="huggingface")
-    src_idx = calls[0].index("--source")
+    src_idx = calls[0].index("-s")
     assert calls[0][src_idx + 1] == "huggingface"
 
 
@@ -236,8 +238,6 @@ def test_duplicate_download_while_downloading_is_noop(tmp_path: Path):
         dl_calls["n"] += 1
         started.set()
         release.wait(timeout=5)  # 卡住第一次下载,使其保持 downloading_models
-        root = venv / "models"; root.mkdir(parents=True, exist_ok=True)
-        (root / "mineru.json").write_text("{}"); (root / "layout").mkdir(exist_ok=True)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
