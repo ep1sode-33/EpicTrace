@@ -3,7 +3,7 @@ import { FolderInput, Plus, Settings2, SendHorizontal, Square } from "lucide-rea
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { pickFiles } from "@/lib/pickers";
+import { pickFiles, readClipboardFiles } from "@/lib/pickers";
 
 /**
  * 对话输入框。三态:
@@ -111,15 +111,14 @@ export function Composer({
               }
             }}
             onPaste={(e) => {
-              const paths = Array.from(e.clipboardData.files)
-                .map((f) => (f as File & { path?: string }).path)
-                .filter((p): p is string => Boolean(p));
-              if (paths.length) {
-                e.preventDefault();
-                onAttachPaths(paths);
-              } else if (e.clipboardData.files.length) {
-                onAttachUnsupported?.();
-              }
+              // 纯文本粘贴照常进输入框;粘贴的是文件时,浏览器 File 拿不到真实路径,
+              // 改从 pywebview 原生读系统剪贴板的文件路径(与拖拽走 cocoa 同理)。
+              if (!e.clipboardData.files.length) return;
+              e.preventDefault();
+              void readClipboardFiles().then((paths) => {
+                if (paths.length) onAttachPaths(paths);
+                else onAttachUnsupported?.();
+              });
             }}
           />
           {streaming ? (

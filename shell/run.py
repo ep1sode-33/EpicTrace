@@ -53,6 +53,23 @@ class Api:
         subprocess.run(["open", "-R", path])  # argv 列表形式,不经 shell,杜绝注入
         return {"ok": True}
 
+    def read_clipboard_files(self) -> list[str]:
+        """读 macOS 系统剪贴板里的文件绝对路径(Finder 复制文件 → file URL)。
+        浏览器 paste 事件的 File 没有真实路径,故粘贴文件时由前端调本方法,从原生剪贴板取路径
+        (与拖拽走 cocoa 拖拽板同理)。剪贴板非文件 / 出错 → 空列表(不影响主流程)。"""
+        try:
+            from AppKit import NSURL, NSPasteboard  # type: ignore
+
+            pb = NSPasteboard.generalPasteboard()
+            names = pb.propertyListForType_("NSFilenamesPboardType")
+            if names:
+                return [str(p) for p in names]
+            urls = pb.readObjectsForClasses_options_([NSURL], None) or []
+            return [str(u.path()) for u in urls if u.isFileURL()]
+        except Exception as e:  # noqa: BLE001 — 读剪贴板任何异常都退化为空
+            print(f"[EpicTrace] read_clipboard_files failed: {e}", flush=True)
+            return []
+
 
 def _serve() -> None:
     try:

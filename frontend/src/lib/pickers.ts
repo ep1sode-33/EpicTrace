@@ -7,6 +7,7 @@ declare global {
         pick_file(): Promise<string | null>;
         pick_files(): Promise<string[]>;
         reveal_in_finder(path: string): Promise<void>;
+        read_clipboard_files(): Promise<string[]>;
       };
     };
   }
@@ -34,6 +35,18 @@ export async function pickFiles(): Promise<string[]> {
   if (window.pywebview?.api) return window.pywebview.api.pick_files();
   const one = window.prompt("(开发态)输入文件绝对路径:")?.trim();
   return one ? [one] : [];
+}
+
+/** 读系统剪贴板里的文件路径(粘贴文件用)。仅打包态(pywebview)有原生剪贴板;开发态/无文件 → 空。 */
+export async function readClipboardFiles(): Promise<string[]> {
+  if (window.pywebview?.api?.read_clipboard_files) {
+    try {
+      return await window.pywebview.api.read_clipboard_files();
+    } catch {
+      return [];
+    }
+  }
+  return [];
 }
 
 export {};
