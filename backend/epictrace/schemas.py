@@ -180,3 +180,42 @@ class ReferenceOut(BaseModel):
     text_chars: int
     detached: bool
     created_at: datetime
+
+
+class CaptureEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    kind: str
+    ts: datetime
+    payload: str
+    meta: dict
+
+
+class CaptureSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    title: str
+    status: str
+    started_at: datetime
+    ended_at: datetime | None
+    sources: list[str]
+    staging_dir: str  # 内部路径:前端不展示,仅转发给 native.startMonitors 供 shell 存截图
+
+
+class CaptureSessionDetailOut(CaptureSessionOut):
+    events: list[CaptureEventOut] = []
+    elapsed_seconds: float = 0.0
+
+
+class StartSessionIn(BaseModel):
+    sources: list[str]
+
+
+class AppendEventIn(BaseModel):
+    kind: str
+    payload: str = ""
+    meta: dict = {}
+
+
+class OrganizeIn(BaseModel):
+    project_id: int
