@@ -48,7 +48,7 @@ export interface ExtractionStatus {
   failed_stage?: "install" | "download" | null;
 }
 export interface ExtractionSettings {
-  engine: "mineru";
+  engine: "pypdf" | "mineru";
   effort: "high" | "medium";
   model_source: "modelscope" | "huggingface" | "local";
 }

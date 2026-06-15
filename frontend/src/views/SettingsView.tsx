@@ -265,21 +265,25 @@ const STATE_LABEL: Record<ExtractionStatus["state"], string> = {
   failed: "失败",
 };
 
+const ENGINE_LABEL: Record<ExtractionSettings["engine"], string> = {
+  pypdf: "pypdf —— 简单文字处理",
+  mineru: "MinerU —— OCR/VLM 多重处理,质量高",
+};
 const EFFORT_LABEL: Record<ExtractionSettings["effort"], string> = {
-  high: "高(版面/表格/公式/OCR 全开,较慢)",
-  medium: "中(默认,文本问答足够,更快)",
+  high: "高",
+  medium: "中",
 };
 const SOURCE_LABEL: Record<ExtractionSettings["model_source"], string> = {
-  modelscope: "ModelScope(国内更快)",
+  modelscope: "ModelScope",
   huggingface: "HuggingFace",
-  local: "本地(已自备模型)",
+  local: "本地",
 };
 
 function ExtractionSection() {
   const [status, setStatus] = useState<ExtractionStatus | null>(null);
   const [settings, setSettings] = useState<ExtractionSettings | null>(null);
   const [busy, setBusy] = useState(false); // 安装/下载进行中
-  const [savingField, setSavingField] = useState<null | "effort" | "model_source">(null);
+  const [savingField, setSavingField] = useState<null | "engine" | "effort" | "model_source">(null);
   const [err, setErr] = useState<string | null>(null);
 
   // 进入页面:并行拉状态 + 设置。
@@ -345,13 +349,14 @@ function ExtractionSection() {
     }
   };
 
-  // effort / model_source 改动即持久化(乐观更新 + 失败回滚)。
+  // engine / effort / model_source 改动即持久化(乐观更新 + 失败回滚)。
   const update = async (patch: Partial<ExtractionSettings>) => {
     if (!settings) return;
     const prev = settings;
     const next: ExtractionSettings = { ...settings, ...patch };
     setSettings(next);
-    setSavingField(("effort" in patch ? "effort" : "model_source") as "effort" | "model_source");
+    const field = "engine" in patch ? "engine" : "effort" in patch ? "effort" : "model_source";
+    setSavingField(field as "engine" | "effort" | "model_source");
     setErr(null);
     try {
       setSettings(await api.putExtractionSettings(next));
@@ -380,100 +385,117 @@ function ExtractionSection() {
   // cached 模型仍可用(ready)但上次重下失败 → 仍要把失败暴露给用户。
   const downloadFailed = failedStage === "download" || (state === "failed" && installed);
 
+  const isMineru = settings?.engine === "mineru";
+
   return (
     <section className="mt-10 flex flex-col gap-3 border-t border-border/60 pt-8">
       <div className="flex flex-col gap-1">
-        <h2 className="text-sm font-semibold text-foreground">高质量提取</h2>
+        <h2 className="text-sm font-semibold text-foreground">文档处理引擎</h2>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          用版面/表格/公式/OCR 引擎替代基础 PDF/DOCX/PPTX 提取。装包与下模型分两步,装完全本地运行。
+          选择 PDF/DOCX/PPTX 的文本抽取引擎。
         </p>
       </div>
 
-      {/* 引擎选择器壳:当前唯一项 MinerU,默认选中。将来加引擎时此处扩为多项。 */}
-      <Field id="ext-engine" label="提取引擎">
-        <select
-          id="ext-engine"
-          value="mineru"
-          disabled
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-        >
-          <option value="mineru">MinerU</option>
-        </select>
-      </Field>
-
-      {/* 选中 MinerU 之下的旋钮(条件渲染:engine === "mineru")。 */}
-      <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5">
-        <span className="flex items-center gap-2 text-sm text-foreground">
-          {(installing || downloading) && <Loader2 className="size-3.5 animate-spin" />}
-          {/* 就绪但上次重下失败:仍标就绪(cached 可用),但用警告色提示一次失败的重下。 */}
-          {ready && !downloadFailed && <CheckCircle2 className="size-3.5 text-primary" strokeWidth={2.25} />}
-          {(state === "failed" || (ready && downloadFailed)) && (
-            <TriangleAlert className="size-3.5 text-destructive" />
-          )}
-          状态:{status ? STATE_LABEL[status.state] : "…"}
-          {ready && downloadFailed && <span className="text-destructive">(上次重新下载失败)</span>}
-        </span>
-        <div className="ml-auto flex gap-2">
-          {!installed && state !== "installing" && (
-            <Button type="button" size="sm" disabled={installing} onClick={install}
-                    title="安装高质量提取引擎(装包)">
-              {installing ? (<><Loader2 className="size-3.5 animate-spin" />安装中…</>)
-                : installFailed ? "重试安装" : "安装"}
-            </Button>
-          )}
-          {installed && !ready && (
-            <Button type="button" size="sm" disabled={downloading} onClick={download}
-                    title="下载模型(约数 GB)">
-              {downloading ? (<><Loader2 className="size-3.5 animate-spin" />下载中…</>)
-                : downloadFailed ? "重试下载" : "下载模型"}
-            </Button>
-          )}
-          {ready && (
-            <Button type="button" variant="outline" size="sm" disabled={downloading}
-                    onClick={download}
-                    title={downloadFailed ? "上次重新下载失败,可重试" : "按当前模型源重新下载模型"}>
-              {downloadFailed ? "重试下载模型" : "重新下载模型"}
-            </Button>
-          )}
-        </div>
-      </div>
-
-      {/* effort / model_source 下拉:改动即 PUT 持久化。 */}
+      {/* 引擎选择器:改动即 PUT 持久化(乐观更新 + 失败回滚)。 */}
       {settings && (
-        <div className="flex flex-col gap-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-3">
-          <Field id="ext-effort" label="解析力度(effort)">
-            <select
-              id="ext-effort"
-              value={settings.effort}
-              disabled={savingField !== null}
-              onChange={(e) => update({ effort: e.target.value as ExtractionSettings["effort"] })}
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-            >
-              {(["medium", "high"] as const).map((v) => (
-                <option key={v} value={v}>{EFFORT_LABEL[v]}</option>
-              ))}
-            </select>
-          </Field>
-          <Field id="ext-source" label="模型源(model source)">
-            <select
-              id="ext-source"
-              value={settings.model_source}
-              disabled={savingField !== null}
-              onChange={(e) => update({ model_source: e.target.value as ExtractionSettings["model_source"] })}
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-            >
-              {(["modelscope", "huggingface", "local"] as const).map((v) => (
-                <option key={v} value={v}>{SOURCE_LABEL[v]}</option>
-              ))}
-            </select>
-          </Field>
-          <p className="-mt-1 text-[0.7rem] leading-relaxed text-muted-foreground">
-            换模型源后需手动「重新下载模型」才生效(不会自动重下)。
-          </p>
-        </div>
+        <Field id="ext-engine" label="引擎">
+          <select
+            id="ext-engine"
+            value={settings.engine}
+            disabled={savingField !== null}
+            onChange={(e) => update({ engine: e.target.value as ExtractionSettings["engine"] })}
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+          >
+            {(["pypdf", "mineru"] as const).map((v) => (
+              <option key={v} value={v}>{ENGINE_LABEL[v]}</option>
+            ))}
+          </select>
+        </Field>
       )}
 
-      {(err || status?.error) && (
+      {/* pypdf:无旋钮,只给一行极简说明。 */}
+      {settings && !isMineru && (
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          内置,免安装,纯文本抽取。
+        </p>
+      )}
+
+      {/* 选中 MinerU 才显示:状态徽标 / 安装 / 下载 / 重新下载 / 解析力度 / 模型源。 */}
+      {isMineru && (
+        <>
+          <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5">
+            <span className="flex items-center gap-2 text-sm text-foreground">
+              {(installing || downloading) && <Loader2 className="size-3.5 animate-spin" />}
+              {/* 就绪但上次重下失败:仍标就绪(cached 可用),但用警告色提示一次失败的重下。 */}
+              {ready && !downloadFailed && <CheckCircle2 className="size-3.5 text-primary" strokeWidth={2.25} />}
+              {(state === "failed" || (ready && downloadFailed)) && (
+                <TriangleAlert className="size-3.5 text-destructive" />
+              )}
+              状态:{status ? STATE_LABEL[status.state] : "…"}
+              {ready && downloadFailed && <span className="text-destructive">(上次重新下载失败)</span>}
+            </span>
+            <div className="ml-auto flex gap-2">
+              {!installed && state !== "installing" && (
+                <Button type="button" size="sm" disabled={installing} onClick={install}
+                        title="安装 MinerU(装包)">
+                  {installing ? (<><Loader2 className="size-3.5 animate-spin" />安装中…</>)
+                    : installFailed ? "重试安装" : "安装"}
+                </Button>
+              )}
+              {installed && !ready && (
+                <Button type="button" size="sm" disabled={downloading} onClick={download}
+                        title="下载模型(约数 GB)">
+                  {downloading ? (<><Loader2 className="size-3.5 animate-spin" />下载中…</>)
+                    : downloadFailed ? "重试下载" : "下载模型"}
+                </Button>
+              )}
+              {ready && (
+                <Button type="button" variant="outline" size="sm" disabled={downloading}
+                        onClick={download}
+                        title={downloadFailed ? "上次重新下载失败,可重试" : "按当前模型源重新下载模型"}>
+                  {downloadFailed ? "重试下载模型" : "重新下载模型"}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {settings && (
+            <div className="flex flex-col gap-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-3">
+              <Field id="ext-effort" label="解析力度">
+                <select
+                  id="ext-effort"
+                  value={settings.effort}
+                  disabled={savingField !== null}
+                  onChange={(e) => update({ effort: e.target.value as ExtractionSettings["effort"] })}
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {(["medium", "high"] as const).map((v) => (
+                    <option key={v} value={v}>{EFFORT_LABEL[v]}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field id="ext-source" label="模型源">
+                <select
+                  id="ext-source"
+                  value={settings.model_source}
+                  disabled={savingField !== null}
+                  onChange={(e) => update({ model_source: e.target.value as ExtractionSettings["model_source"] })}
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {(["modelscope", "huggingface", "local"] as const).map((v) => (
+                    <option key={v} value={v}>{SOURCE_LABEL[v]}</option>
+                  ))}
+                </select>
+              </Field>
+              <p className="-mt-1 text-[0.7rem] leading-relaxed text-muted-foreground">
+                换模型源后需手动「重新下载模型」才生效。
+              </p>
+            </div>
+          )}
+        </>
+      )}
+
+      {(err || (isMineru && status?.error)) && (
         <p className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
           {err || status?.error}
         </p>
