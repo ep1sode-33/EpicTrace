@@ -239,3 +239,68 @@ def test_set_extraction_settings_rejects_bad_engine(tmp_path: Path):
     with pytest.raises(ValueError):
         _svc(tmp_path).set_extraction_settings(engine="docling", effort="medium",
                                                model_source="modelscope")
+
+
+def test_concurrent_profile_creates_do_not_drop(tmp_path: Path):
+    """FIX 6:并发 create_profile(各自一个 SettingsService 实例,模拟并发请求)
+    在锁的保护下不丢更新——最终全部 profile 都在(读-改-写不互相覆盖)。"""
+    import threading
+
+    n = 12
+    barrier = threading.Barrier(n)
+    errors: list[Exception] = []
+
+    def worker(i: int) -> None:
+        try:
+            barrier.wait(timeout=5)  # 尽量同时进入读-改-写,放大竞态
+            SettingsService(AppConfig(data_dir=tmp_path)).create_profile(
+                name=f"P{i}", base_url=f"http://h{i}", api_key="", model="m"
+            )
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    assert errors == []
+    names = {p["name"] for p in _svc(tmp_path).list_profiles()}
+    assert names == {f"P{i}" for i in range(n)}  # 无丢失
+
+
+def test_concurrent_set_extraction_and_profile_no_corruption(tmp_path: Path):
+    """FIX 6:extraction 设置写 与 profile 写 并发交错,settings.json 仍是合法 JSON
+    且两类键都在(extraction 不被 profile 写吞、反之亦然)。"""
+    import threading
+
+    def set_ext() -> None:
+        SettingsService(AppConfig(data_dir=tmp_path)).set_extraction_settings(
+            engine="mineru", effort="high", model_source="huggingface"
+        )
+
+    def add_prof(i: int) -> None:
+        SettingsService(AppConfig(data_dir=tmp_path)).create_profile(
+            name=f"P{i}", base_url="http://x", api_key="", model="m"
+        )
+
+    threads = [threading.Thread(target=set_ext)]
+    threads += [threading.Thread(target=add_prof, args=(i,)) for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    raw = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert raw["extraction"]["effort"] == "high"
+    assert {p["name"] for p in raw["profiles"]} == {f"P{i}" for i in range(6)}
+
+
+def test_write_is_atomic_no_temp_left_behind(tmp_path: Path):
+    """FIX 6:原子写——成功后只留 settings.json(无临时文件残留),且内容合法可读。"""
+    svc = _svc(tmp_path)
+    svc.create_profile(name="A", base_url="http://x", api_key="k", model="m")
+    files = list(tmp_path.iterdir())
+    assert [f.name for f in files] == ["settings.json"]  # 无 .tmp 残留
+    # 内容合法。
+    json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))

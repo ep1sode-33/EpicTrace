@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import threading
 from dataclasses import dataclass
 
 from epictrace.config import AppConfig
 from epictrace.media.mineru_provisioner import MinerUProvisioner
+
+# 进程内、按 settings.json 路径共享的锁:SettingsService 每请求新建实例,实例级锁无法
+# 串行化并发请求。这里按绝对路径维护一把锁(_path_locks),由 _registry_lock 守护其建立,
+# 使「同一个 settings.json」的所有读-改-写跨实例串行(本地单用户,进程内锁足够)。
+_registry_lock = threading.Lock()
+_path_locks: dict[str, threading.Lock] = {}
+
+
+def _lock_for(path: str) -> threading.Lock:
+    with _registry_lock:
+        lock = _path_locks.get(path)
+        if lock is None:
+            lock = threading.Lock()
+            _path_locks[path] = lock
+        return lock
 
 
 @dataclass
@@ -40,6 +57,8 @@ class SettingsService:
     def __init__(self, config: AppConfig) -> None:
         self._path = config.data_dir / "settings.json"
         self._config = config
+        # 按路径共享的锁:串行化对同一 settings.json 的读-改-写(跨请求/跨实例)。
+        self._lock = _lock_for(str(self._path.resolve()))
 
     # ---- 持久化 ----
     def _read_raw(self) -> dict:
@@ -95,10 +114,24 @@ class SettingsService:
         return normalized
 
     def _write(self, data: dict) -> None:
+        # 原子写:先写同目录临时文件,再 os.replace 覆盖目标(同卷上是原子 rename)。
+        # 这样写到一半崩溃也只会留下临时文件,settings.json 永远是上一份完整内容,不被截断。
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        # 唯一临时名(同进程并发写时不撞)。失败时尽力清理。
+        tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())  # 落盘后再 rename,确保替换的是完整内容
+            os.replace(tmp, self._path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     # ---- 查询 ----
     def list_profiles(self) -> list[dict]:
@@ -142,11 +175,13 @@ class SettingsService:
         if model_source not in _VALID_MODEL_SOURCE:
             raise ValueError(f"invalid model_source: {model_source}")
         # 只改 extraction;profiles/active_profile_id 等其余键原样保留(读 raw,不经 _load 归一)。
-        data = self._read_raw()
-        data["extraction"] = {
-            "engine": engine, "effort": effort, "model_source": model_source,
-        }
-        self._write(data)
+        # 锁内做读-改-写,避免与 profile 写并发交错丢更新。
+        with self._lock:
+            data = self._read_raw()
+            data["extraction"] = {
+                "engine": engine, "effort": effort, "model_source": model_source,
+            }
+            self._write(data)
         return self.get_extraction_settings()
 
     def extraction_status(self) -> dict:
@@ -156,6 +191,7 @@ class SettingsService:
             "state": prov.state,
             "ready": prov.is_ready(),
             "error": prov.last_error,
+            "failed_stage": prov.failed_stage,
         }
 
     def get_chat_llm(self) -> ChatLLMSettings | None:
@@ -180,24 +216,25 @@ class SettingsService:
         context_window: int = 32768,
     ) -> str:
         """新建 Profile,返回其 id。首个 Profile 自动成为活动。"""
-        data = self._load()
-        pid = _short_id()
-        existing_ids = {p.get("id") for p in data["profiles"]}
-        while pid in existing_ids:
+        with self._lock:
+            data = self._load()
             pid = _short_id()
-        data["profiles"].append(
-            {
-                "id": pid,
-                "name": name,
-                "base_url": base_url,
-                "api_key": api_key,
-                "model": model,
-                "context_window": context_window,
-            }
-        )
-        if data["active_profile_id"] is None:
-            data["active_profile_id"] = pid
-        self._write(data)
+            existing_ids = {p.get("id") for p in data["profiles"]}
+            while pid in existing_ids:
+                pid = _short_id()
+            data["profiles"].append(
+                {
+                    "id": pid,
+                    "name": name,
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "model": model,
+                    "context_window": context_window,
+                }
+            )
+            if data["active_profile_id"] is None:
+                data["active_profile_id"] = pid
+            self._write(data)
         return pid
 
     def update_profile(
@@ -212,42 +249,45 @@ class SettingsService:
     ) -> None:
         """更新 Profile 的字段。任一参数为 None → 保留原值;
         尤其 api_key=None 保留既有密钥(前端只回传打码视图,不该清空真 key)。"""
-        data = self._load()
-        for p in data["profiles"]:
-            if p.get("id") == profile_id:
-                if name is not None:
-                    p["name"] = name
-                if base_url is not None:
-                    p["base_url"] = base_url
-                if model is not None:
-                    p["model"] = model
-                if api_key is not None:
-                    p["api_key"] = api_key
-                if context_window is not None:
-                    p["context_window"] = context_window
-                self._write(data)
-                return
+        with self._lock:
+            data = self._load()
+            for p in data["profiles"]:
+                if p.get("id") == profile_id:
+                    if name is not None:
+                        p["name"] = name
+                    if base_url is not None:
+                        p["base_url"] = base_url
+                    if model is not None:
+                        p["model"] = model
+                    if api_key is not None:
+                        p["api_key"] = api_key
+                    if context_window is not None:
+                        p["context_window"] = context_window
+                    self._write(data)
+                    return
         # 未找到:静默不改(幂等,避免对已删除 id 抛错)
 
     def delete_profile(self, profile_id: str) -> None:
         """删除 Profile。若删的是活动 Profile,活动改指剩余的第一个,无则 None。"""
-        data = self._load()
-        before = len(data["profiles"])
-        data["profiles"] = [p for p in data["profiles"] if p.get("id") != profile_id]
-        if len(data["profiles"]) == before:
-            return  # 无此 id
-        if data["active_profile_id"] == profile_id:
-            data["active_profile_id"] = (
-                data["profiles"][0]["id"] if data["profiles"] else None
-            )
-        self._write(data)
+        with self._lock:
+            data = self._load()
+            before = len(data["profiles"])
+            data["profiles"] = [p for p in data["profiles"] if p.get("id") != profile_id]
+            if len(data["profiles"]) == before:
+                return  # 无此 id
+            if data["active_profile_id"] == profile_id:
+                data["active_profile_id"] = (
+                    data["profiles"][0]["id"] if data["profiles"] else None
+                )
+            self._write(data)
 
     def set_active(self, profile_id: str) -> None:
         """设活动 Profile;id 不存在则忽略(不改当前活动)。"""
-        data = self._load()
-        if any(p.get("id") == profile_id for p in data["profiles"]):
-            data["active_profile_id"] = profile_id
-            self._write(data)
+        with self._lock:
+            data = self._load()
+            if any(p.get("id") == profile_id for p in data["profiles"]):
+                data["active_profile_id"] = profile_id
+                self._write(data)
 
     # ---- 对外视图 ----
     def public_view(self) -> dict:
