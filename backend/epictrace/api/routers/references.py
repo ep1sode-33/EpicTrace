@@ -9,6 +9,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from epictrace.api.deps import get_db, get_embedder, get_attachment_store, get_provisioner
 from epictrace.db import Database
+from epictrace.media.errors import ExtractionEngineNotReady, ExtractionFailed
 from epictrace.models import Conversation
 from epictrace.schemas import ReferenceCreate, ReferenceOut
 from epictrace.services.references import ReferenceService
@@ -75,6 +76,12 @@ def add_reference(cid: int, payload: ReferenceCreate, request: Request,
         if payload.ingest_record_id is None:
             raise ValueError("ingest_record_id required")
         return svc.add_internal(cid, payload.ingest_record_id, cw)
+    except ExtractionEngineNotReady as e:
+        # 富文档引擎(MinerU)未就绪:干净 409(与 files/source 路由一致),前端可引导去设置安装。
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e))
+    except ExtractionFailed as e:
+        # 子进程失败/超时/缺输出:沿用本项目提取失败的 400 约定(见 files 路由)。
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 

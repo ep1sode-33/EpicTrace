@@ -364,10 +364,21 @@ function ExtractionSection() {
   };
 
   const state = status?.state;
-  const installed = state === "installed_no_models" || state === "downloading_models" || state === "ready" || state === "failed";
+  const failedStage = status?.failed_stage ?? null;
+  // 「装了包」的判定:不能把所有 failed 都当装好——装包失败(failed_stage==="install")
+  // 其实没装好,应回到「安装」。只有非 install 失败才算包就绪(failed_stage==="download"
+  // 意味着包已装、是下模型那步失败)。
+  const installFailed = state === "failed" && failedStage === "install";
+  const installed =
+    state === "installed_no_models" ||
+    state === "downloading_models" ||
+    state === "ready" ||
+    (state === "failed" && !installFailed);
   const ready = status?.ready === true;
   const installing = busy && !installed ? true : state === "installing";
   const downloading = state === "downloading_models" || (busy && installed && !ready);
+  // cached 模型仍可用(ready)但上次重下失败 → 仍要把失败暴露给用户。
+  const downloadFailed = failedStage === "download" || (state === "failed" && installed);
 
   return (
     <section className="mt-10 flex flex-col gap-3 border-t border-border/60 pt-8">
@@ -394,28 +405,34 @@ function ExtractionSection() {
       <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5">
         <span className="flex items-center gap-2 text-sm text-foreground">
           {(installing || downloading) && <Loader2 className="size-3.5 animate-spin" />}
-          {ready && <CheckCircle2 className="size-3.5 text-primary" strokeWidth={2.25} />}
-          {state === "failed" && <TriangleAlert className="size-3.5 text-destructive" />}
+          {/* 就绪但上次重下失败:仍标就绪(cached 可用),但用警告色提示一次失败的重下。 */}
+          {ready && !downloadFailed && <CheckCircle2 className="size-3.5 text-primary" strokeWidth={2.25} />}
+          {(state === "failed" || (ready && downloadFailed)) && (
+            <TriangleAlert className="size-3.5 text-destructive" />
+          )}
           状态:{status ? STATE_LABEL[status.state] : "…"}
+          {ready && downloadFailed && <span className="text-destructive">(上次重新下载失败)</span>}
         </span>
         <div className="ml-auto flex gap-2">
           {!installed && state !== "installing" && (
             <Button type="button" size="sm" disabled={installing} onClick={install}
                     title="安装高质量提取引擎(装包)">
-              {installing ? (<><Loader2 className="size-3.5 animate-spin" />安装中…</>) : "安装"}
+              {installing ? (<><Loader2 className="size-3.5 animate-spin" />安装中…</>)
+                : installFailed ? "重试安装" : "安装"}
             </Button>
           )}
           {installed && !ready && (
             <Button type="button" size="sm" disabled={downloading} onClick={download}
                     title="下载模型(约数 GB)">
               {downloading ? (<><Loader2 className="size-3.5 animate-spin" />下载中…</>)
-                : state === "failed" ? "重试下载" : "下载模型"}
+                : downloadFailed ? "重试下载" : "下载模型"}
             </Button>
           )}
           {ready && (
             <Button type="button" variant="outline" size="sm" disabled={downloading}
-                    onClick={download} title="按当前模型源重新下载模型">
-              重新下载模型
+                    onClick={download}
+                    title={downloadFailed ? "上次重新下载失败,可重试" : "按当前模型源重新下载模型"}>
+              {downloadFailed ? "重试下载模型" : "重新下载模型"}
             </Button>
           )}
         </div>

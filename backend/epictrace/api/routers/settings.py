@@ -98,7 +98,11 @@ def test_profile(payload: TestProfileIn) -> TestProfileOut:
 
 def _provision_status(prov) -> ExtractionStatusOut:
     error = getattr(prov, "last_error", None)
-    return ExtractionStatusOut(state=prov.state, ready=prov.is_ready(), error=error)
+    failed_stage = getattr(prov, "failed_stage", None)
+    return ExtractionStatusOut(
+        state=prov.state, ready=prov.is_ready(), error=error,
+        failed_stage=failed_stage,
+    )
 
 
 @router.get("/extraction/status", response_model=ExtractionStatusOut)

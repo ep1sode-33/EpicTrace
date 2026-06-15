@@ -8,6 +8,7 @@ from sqlalchemy import select
 from epictrace.db import Database
 from epictrace.indexing.chunker import chunk_text
 from epictrace.media import get_processor
+from epictrace.media.errors import ExtractionEngineNotReady, ExtractionFailed
 from epictrace.media.mineru import MinerUMediaProcessor
 from epictrace.media.provenance import write_provenance
 from epictrace.models import Conversation, ConversationReference, IngestRecord
@@ -77,7 +78,11 @@ class ReferenceService:
             if isinstance(proc, MinerUMediaProcessor):
                 self._ensure_models_ready(progress_cb)
             result = proc.process(p, progress_cb=progress_cb, cancel=cancel)
-        except Exception as e:  # noqa: BLE001 — 模型确保/提取失败都转成可读的 400(由路由映射)
+        except (ExtractionEngineNotReady, ExtractionFailed):
+            # 类型化的提取错误原样上抛:非流式路由据类型映射 409/400(与 files/source 路由一致),
+            # 流式路由把 str(e) 转成 error 事件。不在此吞成笼统 ValueError。
+            raise
+        except Exception as e:  # noqa: BLE001 — 其余(含模型确保失败)转成可读的 400(由路由映射)
             raise ValueError(f"extract failed: {e}")
         text = result.text
         if not text.strip():

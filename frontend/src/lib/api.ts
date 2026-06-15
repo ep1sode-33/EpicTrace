@@ -44,6 +44,8 @@ export interface ExtractionStatus {
     | "failed";
   ready: boolean;
   error?: string | null;
+  /** install | download | null —— 区分装包失败与下模型失败,前端据此把「重试」指向正确动作。 */
+  failed_stage?: "install" | "download" | null;
 }
 export interface ExtractionSettings {
   engine: "mineru";

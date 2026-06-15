@@ -33,6 +33,63 @@ def test_detach_reference(client, tmp_path: Path):
     assert client.get(f"/api/conversations/{cid}/references").json() == []
 
 
+def test_add_reference_engine_not_ready_is_409(client, tmp_path: Path, monkeypatch):
+    """FIX 4:非流式挂富文档,引擎未就绪 → 干净 409(而非未捕获的 500)。
+    与 files/source 路由一致;ExtractionEngineNotReady 从 add_external 原样上抛。"""
+    from epictrace.media.errors import ExtractionEngineNotReady
+    from epictrace.media.mineru import MinerUMediaProcessor
+
+    _, cid = _project_conv(client, tmp_path)
+    f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
+
+    class _Prov:
+        state = "not_installed"
+        def is_ready(self):
+            return False
+
+    real_proc = MinerUMediaProcessor(_Prov(), model_source="modelscope", timeout=1)
+
+    def _raise(self, p, *, progress_cb=None, cancel=None):
+        raise ExtractionEngineNotReady("未安装 MinerU")
+
+    monkeypatch.setattr(MinerUMediaProcessor, "process", _raise)
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: real_proc)
+
+    r = client.post(f"/api/conversations/{cid}/references",
+                    json={"kind": "external", "source_path": str(f)})
+    assert r.status_code == 409, r.text
+    assert "MinerU" in r.json()["detail"]
+
+
+def test_add_reference_extraction_failed_is_400(client, tmp_path: Path, monkeypatch):
+    """FIX 4:非流式挂富文档,提取失败 → 干净 400(而非 500)。"""
+    from epictrace.media.errors import ExtractionFailed
+    from epictrace.media.mineru import MinerUMediaProcessor
+
+    _, cid = _project_conv(client, tmp_path)
+    f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
+
+    class _Prov:
+        state = "ready"
+        def is_ready(self):
+            return True
+
+    real_proc = MinerUMediaProcessor(_Prov(), model_source="modelscope", timeout=1)
+
+    def _raise(self, p, *, progress_cb=None, cancel=None):
+        raise ExtractionFailed("mineru exited 2: boom")
+
+    monkeypatch.setattr(MinerUMediaProcessor, "process", _raise)
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: real_proc)
+
+    r = client.post(f"/api/conversations/{cid}/references",
+                    json={"kind": "external", "source_path": str(f)})
+    assert r.status_code == 400, r.text
+    assert "boom" in r.json()["detail"]
+
+
 def test_add_reference_bad_file_is_400(client, tmp_path: Path):
     _, cid = _project_conv(client, tmp_path)
     f = tmp_path / "empty.md"; f.write_text("   ", encoding="utf-8")

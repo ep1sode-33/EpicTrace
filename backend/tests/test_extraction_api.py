@@ -15,6 +15,7 @@ class _FakeProvisioner:
         self.provisioned = threading.Event()
         self.downloaded = threading.Event()
         self.last_error = None
+        self.failed_stage = None
 
     def is_ready(self):
         return self._installed and self._models
@@ -101,3 +102,32 @@ def test_download_models_kicks_off_and_becomes_ready(app_and_prov):
     assert r.status_code == 200
     assert prov.downloaded.wait(timeout=5)  # 后台线程跑完
     assert client.get("/api/extraction/status").json()["ready"] is True
+
+
+def test_status_default_failed_stage_is_null(app_and_prov):
+    client, _ = app_and_prov
+    body = client.get("/api/extraction/status").json()
+    assert "failed_stage" in body
+    assert body["failed_stage"] is None
+
+
+def test_status_exposes_failed_stage(app_and_prov):
+    """FIX 5:status 暴露 failed_stage(install/download),前端据此把「重试」指向正确动作。"""
+    client, prov = app_and_prov
+    prov.failed_stage = "download"
+    prov.last_error = "net down"
+    body = client.get("/api/extraction/status").json()
+    assert body["failed_stage"] == "download"
+    assert body["error"] == "net down"
+
+
+def test_status_surfaces_download_failure_even_when_ready(app_and_prov):
+    """FIX 5:cached 模型仍可用(ready),但一次失败的重下仍要经 failed_stage+error 暴露。"""
+    client, prov = app_and_prov
+    prov.provision(); prov.download_models()  # 就绪
+    prov.failed_stage = "download"
+    prov.last_error = "redownload boom"
+    body = client.get("/api/extraction/status").json()
+    assert body["state"] == "ready" and body["ready"] is True
+    assert body["failed_stage"] == "download"
+    assert body["error"] == "redownload boom"

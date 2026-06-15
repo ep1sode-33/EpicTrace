@@ -253,18 +253,24 @@ class MinerUProvisioner:
 
         关键:download_models 自身对「下载中重复触发」是 no-op,所以并发的第二个 caller
         不能简单地再调它(会立即 no-op 返回、抢先去提取)。这里据 _downloading 标志区分:
-        看到 downloading 就在 _cv 上等,而非调 download_models。"""
-        if self.is_ready():
-            return
-        with self._cv:
+        看到 downloading 就在 _cv 上等,而非调 download_models。
+        竞态收尾:「都看到 not downloading」时两者都会调 download_models,只有一个真正跑、
+        另一个 no-op 返回——no-op 那个不能直接返回(模型还没好),它会在下一圈循环里看到
+        downloading 并落到等待分支。循环直到就绪或抛错,保证返回时一定 is_ready()。"""
+        while True:
             if self.is_ready():
                 return
-            if self._downloading:
-                # 他线程正在下载:阻塞到结束,再据结果(就绪/失败)返回或抛。
-                self._wait_for_download_locked(timeout)
-                return
-        # 未在下载 → 由本线程驱动一次下载(并发竞争者会落到上面的 downloading 等待分支)。
-        self.download_models(model_source=model_source, progress_cb=progress_cb)
+            with self._cv:
+                if self.is_ready():
+                    return
+                if self._downloading:
+                    # 他线程(或刚才竞态里赢的线程)正在下载:阻塞到结束,据结果返回或抛
+                    # (_wait_for_download_locked 仅在就绪时返回,失败/超时抛 RuntimeError)。
+                    self._wait_for_download_locked(timeout)
+                    return
+            # 未在下载 → 本线程尝试驱动一次下载。竞态中 no-op 的线程会回到循环顶重判,
+            # 在下一圈落到上面的 downloading 等待分支(不会抢先放行)。
+            self.download_models(model_source=model_source, progress_cb=progress_cb)
 
     def _wait_for_download_locked(self, timeout: float) -> None:
         """调用方须持 _cv。等到当前下载结束(_downloading 落下),再据就绪/失败决定返回或抛。"""

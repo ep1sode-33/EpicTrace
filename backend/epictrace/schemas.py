@@ -156,6 +156,9 @@ class ExtractionStatusOut(BaseModel):
     state: str
     ready: bool
     error: str | None = None
+    # install | download | None —— 区分装包失败与下模型失败,前端据此把「重试」指向正确动作。
+    # 即便 cached 模型仍可用(state==ready),一次失败的重下也经此 + error 暴露。
+    failed_stage: str | None = None
 
 
 class ReferenceCreate(BaseModel):
