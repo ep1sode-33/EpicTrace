@@ -197,3 +197,45 @@ def test_extraction_status_reports_state(tmp_path):
     status = svc.extraction_status()
     assert status["state"] == "not_installed"
     assert status["ready"] is False
+
+
+def test_extraction_settings_default(tmp_path: Path):
+    svc = _svc(tmp_path)
+    es = svc.get_extraction_settings()
+    # 无持久化设置 → 回退 AppConfig 默认(engine=mineru, effort=medium, model_source=modelscope)。
+    assert es == {"engine": "mineru", "effort": "medium", "model_source": "modelscope"}
+
+
+def test_set_extraction_settings_persists_and_roundtrips(tmp_path: Path):
+    svc = _svc(tmp_path)
+    out = svc.set_extraction_settings(engine="mineru", effort="high", model_source="huggingface")
+    assert out == {"engine": "mineru", "effort": "high", "model_source": "huggingface"}
+    # 新建一个 service 读盘:持久化生效。
+    assert _svc(tmp_path).get_extraction_settings() == {
+        "engine": "mineru", "effort": "high", "model_source": "huggingface",
+    }
+    # 与 profiles 共存:不互相覆盖。
+    svc.create_profile(name="A", base_url="http://x", api_key="k", model="m")
+    assert _svc(tmp_path).get_extraction_settings()["effort"] == "high"
+    assert _svc(tmp_path).public_view()["configured"] is True
+
+
+def test_set_extraction_settings_rejects_bad_effort(tmp_path: Path):
+    import pytest
+    with pytest.raises(ValueError):
+        _svc(tmp_path).set_extraction_settings(engine="mineru", effort="ultra",
+                                               model_source="modelscope")
+
+
+def test_set_extraction_settings_rejects_bad_model_source(tmp_path: Path):
+    import pytest
+    with pytest.raises(ValueError):
+        _svc(tmp_path).set_extraction_settings(engine="mineru", effort="medium",
+                                               model_source="s3")
+
+
+def test_set_extraction_settings_rejects_bad_engine(tmp_path: Path):
+    import pytest
+    with pytest.raises(ValueError):
+        _svc(tmp_path).set_extraction_settings(engine="docling", effort="medium",
+                                               model_source="modelscope")

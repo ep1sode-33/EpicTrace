@@ -22,6 +22,11 @@ def _short_id() -> str:
     return secrets.token_hex(4)
 
 
+_VALID_EFFORT = {"high", "medium"}
+_VALID_MODEL_SOURCE = {"modelscope", "huggingface", "local"}
+_VALID_ENGINE = {"mineru"}
+
+
 class SettingsService:
     """读写 ~/.epictrace/settings.json。本地单用户,明文存盘(桌面 APP)。
 
@@ -47,7 +52,11 @@ class SettingsService:
         return {}
 
     def _load(self) -> dict:
-        """读取并就地迁移旧形状,返回规范化的 {profiles, active_profile_id}。"""
+        """读取并就地迁移旧形状,返回规范化设置。
+
+        归一 profiles/active_profile_id,但保留其余顶层键(如 extraction),
+        使 profile 变更经 _write 回写时不会把 extraction 等键吞掉。
+        """
         data = self._read_raw()
         profiles = data.get("profiles")
         if not isinstance(profiles, list):
@@ -55,29 +64,35 @@ class SettingsService:
             old = data.get("chat_llm")
             if isinstance(old, dict):
                 pid = _short_id()
-                migrated = {
-                    "profiles": [
-                        {
-                            "id": pid,
-                            "name": "默认",
-                            "base_url": old.get("base_url", ""),
-                            "api_key": old.get("api_key", ""),
-                            "model": old.get("model", ""),
-                        }
-                    ],
-                    "active_profile_id": pid,
-                }
+                migrated = dict(data)
+                migrated.pop("chat_llm", None)
+                migrated["profiles"] = [
+                    {
+                        "id": pid,
+                        "name": "默认",
+                        "base_url": old.get("base_url", ""),
+                        "api_key": old.get("api_key", ""),
+                        "model": old.get("model", ""),
+                    }
+                ]
+                migrated["active_profile_id"] = pid
                 # 关键:立刻落盘固定 id。否则每次 _load 都生成新随机 id,前端拿到的 id 与
                 # 下次请求迁移出的 id 对不上 → update/delete/set_active 全部静默 no-op
                 # (表现为"保存不下去、删不掉、名称改不动")。
                 self._write(migrated)
                 return migrated
-            return {"profiles": [], "active_profile_id": None}
+            normalized = dict(data)
+            normalized["profiles"] = []
+            normalized["active_profile_id"] = None
+            return normalized
         active = data.get("active_profile_id")
         ids = {p.get("id") for p in profiles if isinstance(p, dict)}
         if active not in ids:
             active = None
-        return {"profiles": profiles, "active_profile_id": active}
+        normalized = dict(data)
+        normalized["profiles"] = profiles
+        normalized["active_profile_id"] = active
+        return normalized
 
     def _write(self, data: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,10 +119,44 @@ class SettingsService:
         """是否存在一个活动 Profile(== 可用于对话)。"""
         return self.get_active_profile() is not None
 
+    def get_extraction_settings(self) -> dict:
+        """{engine, effort, model_source}。无持久化 → 回退 AppConfig 默认。"""
+        data = self._read_raw()
+        ext = data.get("extraction")
+        if not isinstance(ext, dict):
+            ext = {}
+        return {
+            "engine": ext.get("engine", "mineru"),
+            "effort": ext.get("effort", self._config.extraction_effort),
+            "model_source": ext.get("model_source", self._config.model_source),
+        }
+
+    def set_extraction_settings(
+        self, *, engine: str, effort: str, model_source: str
+    ) -> dict:
+        """校验后持久化 extraction 对象,返回更新后的设置。非法值 → ValueError。"""
+        if engine not in _VALID_ENGINE:
+            raise ValueError(f"invalid engine: {engine}")
+        if effort not in _VALID_EFFORT:
+            raise ValueError(f"invalid effort: {effort}")
+        if model_source not in _VALID_MODEL_SOURCE:
+            raise ValueError(f"invalid model_source: {model_source}")
+        # 只改 extraction;profiles/active_profile_id 等其余键原样保留(读 raw,不经 _load 归一)。
+        data = self._read_raw()
+        data["extraction"] = {
+            "engine": engine, "effort": effort, "model_source": model_source,
+        }
+        self._write(data)
+        return self.get_extraction_settings()
+
     def extraction_status(self) -> dict:
         """高质量提取引擎(MinerU)的 provisioning 状态。"""
         prov = MinerUProvisioner(self._config.mineru_venv_dir)
-        return {"state": prov.state, "ready": prov.is_ready()}
+        return {
+            "state": prov.state,
+            "ready": prov.is_ready(),
+            "error": prov.last_error,
+        }
 
     def get_chat_llm(self) -> ChatLLMSettings | None:
         """活动 Profile 的 base_url/api_key/model;无活动 Profile 时返回 None。"""
