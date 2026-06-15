@@ -762,8 +762,9 @@ function Conversation({
 
   const send = useCallback(
     async (content: string) => {
-      // 草稿态需先落库;非草稿则要求已有 cid。两种情况下流式进行中都不接受新发送。
-      if (streaming) return;
+      // 草稿态需先落库;非草稿则要求已有 cid。流式进行中、或外部附件仍在处理(提取/下模型/索引)
+      // 时都不接受新发送——附件未就绪就提问会答非所问。
+      if (streaming || attaching) return;
       if (conversationId == null && !draft) return;
 
       const assistantId = `assistant-${Date.now()}`;
@@ -790,7 +791,7 @@ function Conversation({
 
       streamTo(cid, content, assistantId);
     },
-    [conversationId, draft, streaming, ensureConversation, streamTo],
+    [conversationId, draft, streaming, attaching, ensureConversation, streamTo],
   );
 
   // —— 本对话引用:附加(外部/内部)/解挂 ——
@@ -1093,6 +1094,7 @@ function Conversation({
             <Composer
               llmConfigured={llmConfigured}
               streaming={streaming}
+              attaching={attaching}
               onSend={send}
               onStop={stop}
               onOpenSettings={onOpenSettings}

@@ -16,6 +16,7 @@ import { pickFiles } from "@/lib/pickers";
 export function Composer({
   llmConfigured,
   streaming,
+  attaching = false,
   onSend,
   onStop,
   onOpenSettings,
@@ -25,6 +26,8 @@ export function Composer({
 }: {
   llmConfigured: boolean;
   streaming: boolean;
+  /** 附件处理中(提取/下模型/索引):阻塞发送,直到引用就绪——否则会在引用未到位时提问、答非所问。 */
+  attaching?: boolean;
   onSend: (content: string) => void;
   onStop: () => void;
   onOpenSettings: () => void;
@@ -45,7 +48,7 @@ export function Composer({
 
   const submit = () => {
     const text = value.trim();
-    if (!text || streaming || !llmConfigured) return;
+    if (!text || streaming || attaching || !llmConfigured) return;
     onSend(text);
     setValue("");
     if (taRef.current) taRef.current.style.height = "auto";
@@ -134,7 +137,7 @@ export function Composer({
             <Button
               type="button"
               size="icon"
-              disabled={!llmConfigured || !value.trim()}
+              disabled={!llmConfigured || !value.trim() || attaching}
               onClick={submit}
               aria-label="发送"
               className="mb-px"
