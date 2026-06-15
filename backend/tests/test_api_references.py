@@ -185,3 +185,48 @@ def test_stream_attach_client_disconnect_cancels_worker(client, tmp_path: Path, 
     assert saw_cancel.is_set()
     # 断开后不应发出 done 事件。
     assert [e for e, _ in _sse_events(body) if e == "done"] == []
+
+
+def test_stream_attach_downloads_models_then_extracts(client, tmp_path: Path, monkeypatch):
+    """无模型(installed_no_models)发文件:先经 status 进度报「下载模型」,下完转 ready,再提取出 done。"""
+    _, cid = _project_conv(client, tmp_path)
+    f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
+
+    class _Prov:
+        def __init__(self):
+            self._ready = False
+        @property
+        def state(self):
+            return "ready" if self._ready else "installed_no_models"
+        def is_ready(self):
+            return self._ready
+        def download_models(self, *, model_source="modelscope", progress_cb=None):
+            if progress_cb:
+                progress_cb("正在下载模型(约数 GB,首次较久)…")
+            self._ready = True
+
+    prov = _Prov()
+    client.app.state.provisioner = prov
+
+    class _Proc:
+        def supports(self, _p):
+            return True
+        def process(self, _p, *, progress_cb=None, cancel=None):
+            progress_cb and progress_cb("解析中 1/1")
+            return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+
+    monkeypatch.setattr("epictrace.services.references.get_processor",
+                        lambda p, config: _Proc())
+
+    with client.stream("POST", f"/api/conversations/{cid}/references/stream",
+                       json={"kind": "external", "source_path": str(f)}) as r:
+        assert r.status_code == 200
+        body = "".join(chunk for chunk in r.iter_text())
+    events = _sse_events(body)
+    statuses = [d for e, d in events if e == "status"]
+    # 先有下载模型的进度,再有提取进度。
+    assert any("下载模型" in s for s in statuses)
+    assert "解析中 1/1" in statuses
+    assert prov.is_ready() is True  # 下载已发生
+    done = [d for e, d in events if e == "done"]
+    assert len(done) == 1

@@ -11,6 +11,7 @@ from epictrace.media import get_processor
 from epictrace.media.provenance import write_provenance
 from epictrace.models import Conversation, ConversationReference, IngestRecord
 from epictrace.services.budget import estimate_tokens, fits_fulltext
+from epictrace.services.settings import SettingsService
 
 _log = logging.getLogger("epictrace")
 
@@ -30,14 +31,26 @@ class ReferenceService:
     做 size-gate(小→fulltext / 外部大→indexed / 内部大→focus)。给了 embedder+attachment_store
     时,外部大文件会切块+embed 进会话级临时集合(indexed);否则仅登记为 deferred。"""
 
-    def __init__(self, db: Database, embedder=None, attachment_store=None) -> None:
+    def __init__(self, db: Database, embedder=None, attachment_store=None,
+                 provisioner=None) -> None:
         self._db = db
         self._embedder = embedder
         self._attachment_store = attachment_store
+        self._provisioner = provisioner
 
     def _used_fulltext_tokens(self, conversation_id: int) -> int:
         return sum(estimate_tokens(r.get("extracted_text") or "")
                    for r in self.list_active(conversation_id) if r["mode"] == "fulltext")
+
+    def _ensure_models_ready(self, progress_cb=None) -> None:
+        """provisioner 为 installed_no_models 时先下模型(进度走 progress_cb)。
+        无 provisioner / 非该状态 → no-op(ready 直接提取;not_installed 由 process 抛错)。"""
+        prov = self._provisioner
+        if prov is None:
+            return
+        if getattr(prov, "state", None) == "installed_no_models":
+            ext = SettingsService(self._db.config).get_extraction_settings()
+            prov.download_models(model_source=ext["model_source"], progress_cb=progress_cb)
 
     def add_external(self, conversation_id: int, path: str, context_window: int,
                      progress_cb=None, cancel=None) -> dict:
@@ -47,6 +60,10 @@ class ReferenceService:
         proc = get_processor(p, self._db.config)
         if proc is None:
             raise ValueError("unsupported file type")
+        # 富文档(MinerU)且「装了包但没下模型」→ 先下模型(进度走同一 progress_cb 通道),
+        # 下完再提取。not_installed / ready 都不在此处理:not_installed 由 process()
+        # 抛 ExtractionEngineNotReady,ready 直接提取。
+        self._ensure_models_ready(progress_cb)
         try:
             result = proc.process(p, progress_cb=progress_cb, cancel=cancel)
         except Exception as e:  # noqa: BLE001 — 提取失败转成可读的 400(由路由映射)
