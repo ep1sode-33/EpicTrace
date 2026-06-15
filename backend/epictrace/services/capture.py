@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from epictrace.db import Database
 from epictrace.models import CaptureEvent, CaptureSession
@@ -22,6 +23,12 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _naive(dt: datetime) -> datetime:
+    """归一到 naive-UTC。SQLite 取回的 datetime 是 naive,而 clock()/_utcnow 是 tz-aware;
+    两者直接相减会 TypeError。算时长前统一抹掉 tzinfo(均按 UTC 看待)。"""
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
 class CaptureService:
     """会话生命周期 + 带时间戳事件 + 暂停语义 + 暂存目录。clock 可注入便于测试。"""
 
@@ -31,26 +38,32 @@ class CaptureService:
 
     # —— 会话 ——
     def start(self, sources: list[str]) -> CaptureSession:
-        with self._db.session() as s:
-            active = s.execute(
-                select(CaptureSession).where(CaptureSession.status == "recording")
-            ).scalars().first()
-            if active is not None:
-                raise ActiveSessionExists()
-            now = self._clock()
-            sess = CaptureSession(
-                title=f"会话 @{now.strftime('%Y-%m-%d %H:%M')}",
-                status="recording", started_at=now, sources=list(sources),
-                staging_dir="",  # 落库拿到 id 后再定
-            )
-            s.add(sess)
-            s.flush()
-            sess.staging_dir = str(self._db.config.data_dir / "sessions" / str(sess.id))
-            Path(sess.staging_dir).mkdir(parents=True, exist_ok=True)
-            s.flush()
-            s.refresh(sess)
-            s.expunge(sess)
-            return sess
+        try:
+            with self._db.session() as s:
+                # 快路径预检:已有 recording 的就直接拒(避免无谓写入)。
+                active = s.execute(
+                    select(CaptureSession).where(CaptureSession.status == "recording")
+                ).scalars().first()
+                if active is not None:
+                    raise ActiveSessionExists()
+                now = self._clock()
+                sess = CaptureSession(
+                    title=f"会话 @{now.strftime('%Y-%m-%d %H:%M')}",
+                    status="recording", started_at=now, sources=list(sources),
+                    staging_dir="",  # 落库拿到 id 后再定
+                )
+                s.add(sess)
+                # flush 触发 INSERT;并发下若已有 recording,部分唯一索引会抛 IntegrityError。
+                s.flush()
+                sess.staging_dir = str(self._db.config.data_dir / "sessions" / str(sess.id))
+                Path(sess.staging_dir).mkdir(parents=True, exist_ok=True)
+                s.flush()
+                s.refresh(sess)
+                s.expunge(sess)
+                return sess
+        except IntegrityError as e:
+            # uq_one_recording_session 命中:并发竞态下另一条 recording 已先落库。
+            raise ActiveSessionExists() from e
 
     def stop(self, session_id: int) -> CaptureSession:
         with self._db.session() as s:
@@ -77,7 +90,25 @@ class CaptureService:
             staging = sess.staging_dir
             s.delete(sess)
         if staging:
-            shutil.rmtree(staging, ignore_errors=True)
+            self._rmtree_staging(staging)
+
+    def _rmtree_staging(self, staging: str) -> None:
+        """只删 data_dir/sessions/ 之内、且非符号链接的暂存目录。staging_dir 落库值
+        若被篡改指向别处(路径穿越 / 符号链接),只跳过删除并记日志,绝不 rmtree。"""
+        import logging
+
+        sessions_root = (self._db.config.data_dir / "sessions").resolve()
+        p = Path(staging)
+        if p.is_symlink():
+            logging.getLogger("epictrace").warning(
+                "跳过删除符号链接 staging_dir: %s", staging)
+            return
+        resolved = p.resolve()
+        if resolved == sessions_root or sessions_root not in resolved.parents:
+            logging.getLogger("epictrace").warning(
+                "跳过删除越界 staging_dir(不在 sessions/ 内): %s", staging)
+            return
+        shutil.rmtree(resolved, ignore_errors=True)
 
     def active_session(self) -> CaptureSession | None:
         with self._db.session() as s:
@@ -129,18 +160,20 @@ class CaptureService:
         """实际录制时长 = 总时长减去所有 pause→resume 区间。"""
         with self._db.session() as s:
             sess = self._require(s, session_id)
-            start = sess.started_at
-            end = sess.ended_at or self._clock()
-            marks = [e for e in sess.events if e.kind in ("pause", "resume")]
+            # 全部归一到 naive-UTC 再做算术:DB 取回的是 naive,clock()/_utcnow 是 tz-aware。
+            start = _naive(sess.started_at)
+            end = _naive(sess.ended_at or self._clock())
+            marks = [(e.kind, _naive(e.ts)) for e in sess.events
+                     if e.kind in ("pause", "resume")]
         total = 0.0
         cursor = start
         paused = False
-        for e in marks:
-            if e.kind == "pause" and not paused:
-                total += (e.ts - cursor).total_seconds()
+        for kind, ts in marks:
+            if kind == "pause" and not paused:
+                total += (ts - cursor).total_seconds()
                 paused = True
-            elif e.kind == "resume" and paused:
-                cursor = e.ts
+            elif kind == "resume" and paused:
+                cursor = ts
                 paused = False
         if not paused:
             total += (end - cursor).total_seconds()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, ForeignKey, String, Text
+from sqlalchemy import JSON, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from epictrace.db import Base
@@ -124,6 +124,16 @@ class CaptureSession(Base):
         cascade="all, delete-orphan",
         order_by="CaptureEvent.ts",
     )
+
+
+# 单一活动 session 的并发护栏:SQLite 部分唯一索引,只允许存在一条 status='recording'。
+# 服务层的预检是快路径;此索引在并发下做最终保证(INSERT 触发 IntegrityError)。
+Index(
+    "uq_one_recording_session",
+    CaptureSession.status,
+    unique=True,
+    sqlite_where=text("status = 'recording'"),
+)
 
 
 class CaptureEvent(Base):

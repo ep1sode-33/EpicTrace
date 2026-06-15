@@ -33,6 +33,14 @@ class Database:
         from epictrace import models  # noqa: F401
 
         Base.metadata.create_all(self._engine)
+        # 轻量迁移:create_all 不会给「已存在」的表补新列。旧库的 ingest_records
+        # 缺 source_session_id 时,归类会报 'no such column'。检测缺列则 ALTER 补上。
+        with self._engine.begin() as conn:
+            cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(ingest_records)")}
+            if "source_session_id" not in cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE ingest_records ADD COLUMN source_session_id INTEGER"
+                )
 
     @contextmanager
     def session(self) -> Iterator[Session]:
