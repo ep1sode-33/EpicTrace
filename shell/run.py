@@ -201,6 +201,29 @@ class Api:
                     print(f"[EpicTrace] remove hotkey monitor: {e}", flush=True)
         self._cap = None
 
+    def show_recording_hud(self, session_id: int) -> dict:
+        """开第二个无边框、置顶、可拖动的小窗口渲染 HUD(指向前端 ?view=hud 路由)。"""
+        try:
+            self._hud = webview.create_window(
+                "EpicTrace 录制",
+                f"http://127.0.0.1:8765/?view=hud&session={session_id}",
+                frameless=True, on_top=True, easy_drag=True, resizable=False,
+                width=360, height=52, x=40, y=40,
+            )
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            print(f"[EpicTrace] show_recording_hud failed: {e}", flush=True)
+            return {"ok": False, "reason": str(e)}
+
+    def hide_recording_hud(self) -> None:
+        hud = getattr(self, "_hud", None)
+        if hud is not None:
+            try:
+                hud.destroy()
+            except Exception as e:  # noqa: BLE001
+                print(f"[EpicTrace] hide_recording_hud failed: {e}", flush=True)
+        self._hud = None
+
 
 def _serve() -> None:
     try:
