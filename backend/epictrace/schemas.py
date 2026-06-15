@@ -140,7 +140,8 @@ class SettingsOut(BaseModel):
 
 
 class ExtractionSettingsIn(BaseModel):
-    engine: str = "mineru"
+    # 默认须与服务默认(pypdf)一致:省略 engine 的部分 PUT 不应静默切到 MinerU。
+    engine: str = "pypdf"
     effort: str
     model_source: str
 

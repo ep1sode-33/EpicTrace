@@ -89,6 +89,16 @@ def test_put_extraction_settings_persists(app_and_prov):
     assert client.get("/api/extraction/settings").json()["effort"] == "high"
 
 
+def test_put_without_engine_keeps_pypdf(app_and_prov):
+    """FIX 4:省略 engine 的 PUT 不应静默切到 MinerU——schema 默认须与服务一致(pypdf)。"""
+    client, _ = app_and_prov
+    r = client.put("/api/extraction/settings",
+                   json={"effort": "high", "model_source": "modelscope"})
+    assert r.status_code == 200
+    assert r.json()["engine"] == "pypdf"
+    assert client.get("/api/extraction/settings").json()["engine"] == "pypdf"
+
+
 def test_put_extraction_settings_rejects_bad_value(app_and_prov):
     client, _ = app_and_prov
     r = client.put("/api/extraction/settings",
