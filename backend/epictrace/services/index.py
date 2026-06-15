@@ -26,13 +26,15 @@ class IndexJob:
 
 
 class IndexService:
-    def __init__(self, db: Database, embedder: EmbeddingProvider, vector_store) -> None:
+    def __init__(self, db: Database, embedder: EmbeddingProvider, vector_store,
+                 provisioner=None) -> None:
         # vector_store 可以是 VectorStore 实例,或返回它的可调用(getter)。
         # 用 getter 时,Milvus(gRPC)的构造会被推迟到 _run 里、在 warmup 之后,
         # 避免 'gRPC 激活后再加载模型' 段错误(macOS)。
         self._db = db
         self._embedder = embedder
         self._vector_store = vector_store
+        self._provisioner = provisioner
 
     def _resolve_store(self) -> VectorStore:
         vs = self._vector_store
@@ -106,11 +108,32 @@ class IndexService:
         t.start()
         return t
 
+    def _ensure_models_ready(self, job: IndexJob) -> None:
+        """provisioner 为 installed_no_models 时先下模型。下载失败记进 job.errors(不静默),
+        不抛(让后续 per-file 提取按既有失败路径各自呈现)。无 provisioner / 非该状态 → no-op。"""
+        prov = self._provisioner
+        if prov is None:
+            return
+        if getattr(prov, "state", None) != "installed_no_models":
+            return
+        from epictrace.services.settings import SettingsService
+
+        ext = SettingsService(self._db.config).get_extraction_settings()
+        try:
+            prov.download_models(model_source=ext["model_source"])
+        except Exception as e:  # noqa: BLE001 — 失败不静默:记 job 级错误,后续 per-file 提取也会失败并各自记录
+            with job._lock:
+                job.errors.append(f"model download failed: {e}")
+
     def _run(self, job: IndexJob) -> None:
         targets = getattr(job, "_targets", [])
         # 关键顺序:先加载模型(warmup),再构造/使用 Milvus(gRPC)。
         # 反过来(gRPC 已激活后再 fork 加载模型)会在 macOS 上段错误。
         self._embedder.warmup()
+        # 有富文档要提取且 MinerU「装了包没下模型」→ 先下模型(进度记进 job.errors 之外的状态:
+        # 这里把下载失败计入 errors,使该轮按既有失败路径呈现,不静默)。
+        if targets:
+            self._ensure_models_ready(job)
         store = self._resolve_store()
         for rec_id, path_str in targets:
             try:

@@ -135,3 +135,58 @@ def test_reindex_unknown_project_is_noop_job(tmp_path):
     job = svc.reindex_project(99999)
     svc._run(job)
     assert job.total == 0
+
+
+def test_index_downloads_models_when_installed_no_models(tmp_path, monkeypatch):
+    """项目索引时 provisioner 为 installed_no_models → 先 download_models 再提取;
+    用 provisioner.downloaded 断言下载发生,且文件最终被索引(job.status==done)。"""
+    from epictrace.config import AppConfig
+    from epictrace.db import Database
+    from epictrace.interfaces.media import MediaResult
+    from epictrace.models import IngestRecord, Project
+    from epictrace.services.index import IndexService
+    from tests.fakes import FakeEmbedder, FakeVectorStore
+
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    # 造一个项目 + 一个待索引的 pdf 记录。
+    src = tmp_path / "a.pdf"; src.write_bytes(b"%PDF")
+    with db.session() as s:
+        proj = Project(title="P", folder_path=str(tmp_path)); s.add(proj); s.flush()
+        rec = IngestRecord(project_id=proj.id, original_filename="a.pdf",
+                           stored_path=str(src), content_hash="h", size_bytes=4,
+                           mtime=0.0, ingest_method="file_direct", description="",
+                           indexed=False)
+        s.add(rec); s.flush()
+        pid = proj.id
+
+    class _Prov:
+        def __init__(self):
+            self._ready = False
+            self.downloaded = False
+        @property
+        def state(self):
+            return "ready" if self._ready else "installed_no_models"
+        def is_ready(self):
+            return self._ready
+        def download_models(self, *, model_source="modelscope", progress_cb=None):
+            self.downloaded = True
+            self._ready = True
+
+    prov = _Prov()
+
+    class _Proc:
+        def supports(self, _p):
+            return True
+        def process(self, _p, *, progress_cb=None, cancel=None):
+            return MediaResult(text="页表把虚拟地址映射到物理地址", metadata={})
+
+    monkeypatch.setattr("epictrace.services.index.get_processor",
+                        lambda p, config: _Proc())
+
+    svc = IndexService(db, FakeEmbedder(), FakeVectorStore(), provisioner=prov)
+    job = svc.index_project(pid)
+    svc._run(job)  # 同步跑,确定性
+
+    assert prov.downloaded is True
+    assert job.status == "done"
+    assert job.done == 1
