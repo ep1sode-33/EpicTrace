@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import JSON, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from epictrace.db import Base
@@ -43,6 +43,9 @@ class IngestRecord(Base):
     extracted_text: Mapped[str] = mapped_column(Text, default="")
     indexed: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    source_session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("capture_sessions.id"), nullable=True, default=None
+    )
 
     project: Mapped["Project"] = relationship(back_populates="ingest_records")
 
@@ -103,3 +106,34 @@ class ConversationReference(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
     conversation: Mapped["Conversation"] = relationship(back_populates="references")
+
+
+class CaptureSession(Base):
+    __tablename__ = "capture_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(512))
+    status: Mapped[str] = mapped_column(String(16), default="recording")  # recording|staged|organized
+    started_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(default=None)
+    staging_dir: Mapped[str] = mapped_column(String(1024))
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+
+    events: Mapped[list["CaptureEvent"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="CaptureEvent.ts",
+    )
+
+
+class CaptureEvent(Base):
+    __tablename__ = "capture_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("capture_sessions.id"))
+    kind: Mapped[str] = mapped_column(String(32))  # note|clipboard|screenshot|pause|resume|audio
+    ts: Mapped[datetime] = mapped_column(default=_utcnow)
+    payload: Mapped[str] = mapped_column(Text, default="")
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    session: Mapped["CaptureSession"] = relationship(back_populates="events")
