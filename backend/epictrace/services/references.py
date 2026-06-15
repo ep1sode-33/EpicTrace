@@ -8,9 +8,12 @@ from sqlalchemy import select
 from epictrace.db import Database
 from epictrace.indexing.chunker import chunk_text
 from epictrace.media import get_processor
+from epictrace.media.errors import ExtractionEngineNotReady, ExtractionFailed
+from epictrace.media.mineru import MinerUMediaProcessor
 from epictrace.media.provenance import write_provenance
 from epictrace.models import Conversation, ConversationReference, IngestRecord
 from epictrace.services.budget import estimate_tokens, fits_fulltext
+from epictrace.services.settings import SettingsService
 
 _log = logging.getLogger("epictrace")
 
@@ -30,14 +33,33 @@ class ReferenceService:
     做 size-gate(小→fulltext / 外部大→indexed / 内部大→focus)。给了 embedder+attachment_store
     时,外部大文件会切块+embed 进会话级临时集合(indexed);否则仅登记为 deferred。"""
 
-    def __init__(self, db: Database, embedder=None, attachment_store=None) -> None:
+    def __init__(self, db: Database, embedder=None, attachment_store=None,
+                 provisioner=None) -> None:
         self._db = db
         self._embedder = embedder
         self._attachment_store = attachment_store
+        self._provisioner = provisioner
 
     def _used_fulltext_tokens(self, conversation_id: int) -> int:
         return sum(estimate_tokens(r.get("extracted_text") or "")
                    for r in self.list_active(conversation_id) if r["mode"] == "fulltext")
+
+    def _ensure_models_ready(self, progress_cb=None) -> None:
+        """提取前的「门」:provisioner 为 installed_no_models 或 downloading_models 时,
+        阻塞到模型就绪(ensure_models_ready 内部:未下则下,正在下则等),失败/超时上抛。
+        无 provisioner / ready / not_installed → no-op(ready 直接提取;not_installed 由 process 抛错)。
+
+        关键(对应并发 bug):仅在 installed_no_models 触发会导致第二个并发 caller 看到
+        downloading_models 时跳过、抢先提取 → 模型未就绪提取失败。这里把 downloading_models
+        也交给 ensure_models_ready 阻塞等待,直到就绪才返回。"""
+        prov = self._provisioner
+        if prov is None:
+            return
+        if getattr(prov, "state", None) in ("installed_no_models", "downloading_models"):
+            ext = SettingsService(self._db.config).get_extraction_settings()
+            prov.ensure_models_ready(
+                model_source=ext["model_source"], progress_cb=progress_cb
+            )
 
     def add_external(self, conversation_id: int, path: str, context_window: int,
                      progress_cb=None, cancel=None) -> dict:
@@ -48,8 +70,19 @@ class ReferenceService:
         if proc is None:
             raise ValueError("unsupported file type")
         try:
+            # 仅富文档(MinerU)需要模型;文本/代码/数据文件走 TextMediaProcessor,
+            # 即使 installed_no_models 也不该触发(几 GB 的)模型下载(FIX 2)。
+            # 富文档且「装了包但没下模型 / 正在下」→ 阻塞到模型就绪再提取(FIX 1)。
+            # not_installed / ready 不在此处理:not_installed 由 process() 抛
+            # ExtractionEngineNotReady,ready 直接提取。
+            if isinstance(proc, MinerUMediaProcessor):
+                self._ensure_models_ready(progress_cb)
             result = proc.process(p, progress_cb=progress_cb, cancel=cancel)
-        except Exception as e:  # noqa: BLE001 — 提取失败转成可读的 400(由路由映射)
+        except (ExtractionEngineNotReady, ExtractionFailed):
+            # 类型化的提取错误原样上抛:非流式路由据类型映射 409/400(与 files/source 路由一致),
+            # 流式路由把 str(e) 转成 error 事件。不在此吞成笼统 ValueError。
+            raise
+        except Exception as e:  # noqa: BLE001 — 其余(含模型确保失败)转成可读的 400(由路由映射)
             raise ValueError(f"extract failed: {e}")
         text = result.text
         if not text.strip():
