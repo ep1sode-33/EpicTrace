@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
 import uvicorn
 import webview
@@ -80,6 +81,50 @@ class Api:
         except Exception as e:  # noqa: BLE001 — 读剪贴板任何异常都退化为空
             print(f"[EpicTrace] read_clipboard_files failed: {e}", flush=True)
             return []
+
+    def capture_screenshot(self) -> str | None:
+        """抓全屏存 PNG 进当前 session 的 staging_dir,POST screenshot 事件,返回文件名;失败→None。
+        需「屏幕录制」权限;无活动监听(_cap 未设)或抓屏被拒 → None。"""
+        cap = getattr(self, "_cap", None)
+        if not cap:
+            return None
+        try:
+            import time
+            import Quartz
+            from AppKit import NSBitmapImageRep, NSBitmapImageFileTypePNG
+
+            image = Quartz.CGWindowListCreateImage(
+                Quartz.CGRectInfinite, Quartz.kCGWindowListOptionOnScreenOnly,
+                Quartz.kCGNullWindowID, Quartz.kCGWindowImageDefault)
+            if image is None:
+                return None
+            rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
+            png = rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
+            name = f"shot-{int(time.time() * 1000)}.png"
+            out = Path(cap["dir"]) / name
+            out.parent.mkdir(parents=True, exist_ok=True)
+            png.writeToFile_atomically_(str(out), True)
+            self._post_event(cap["sid"], "screenshot", name)
+            return name
+        except Exception as e:  # noqa: BLE001 — 抓屏任何异常降级
+            print(f"[EpicTrace] capture_screenshot failed: {e}", flush=True)
+            return None
+
+    def _post_event(self, session_id: int, kind: str, payload: str) -> None:
+        """shell 把采到的事件直接 POST 给后端(截图/剪贴板共用);失败重试一次后记日志。"""
+        import urllib.request
+
+        body = json.dumps({"kind": kind, "payload": payload}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:8765/api/capture/sessions/{session_id}/events",
+            data=body, headers={"Content-Type": "application/json"}, method="POST")
+        for attempt in (1, 2):
+            try:
+                urllib.request.urlopen(req, timeout=3)
+                return
+            except Exception as e:  # noqa: BLE001
+                if attempt == 2:
+                    print(f"[EpicTrace] post event failed ({kind}): {e}", flush=True)
 
 
 def _serve() -> None:
