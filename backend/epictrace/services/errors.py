@@ -34,3 +34,8 @@ class SessionNotRecording(Exception):
 
 class SessionAlreadyOrganized(Exception):
     """对已 organized 的 session 再次 organize。"""
+
+
+class SessionNotStaged(Exception):
+    """对一个非 staged 的 session(如仍在 recording)做 organize。
+    录制中不应中途归类;须先 stop(→staged)再 organize。"""

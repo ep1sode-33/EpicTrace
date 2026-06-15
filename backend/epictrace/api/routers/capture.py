@@ -18,12 +18,18 @@ from epictrace.schemas import (
     RenameIn,
     StartSessionIn,
 )
+from epictrace.api.routers.projects import _ensure_project, _has_running_job
+from epictrace.media.errors import ExtractionEngineNotReady, ExtractionFailed
 from epictrace.services.capture import CaptureService
 from epictrace.services.errors import (
     ActiveSessionExists,
     CaptureSessionNotFound,
+    InvalidSourcePath,
+    ProjectNotFound,
     SessionAlreadyOrganized,
     SessionNotRecording,
+    SessionNotStaged,
+    SourceFileNotFound,
 )
 from epictrace.services.index import IndexService
 from epictrace.services.organize import OrganizeService
@@ -135,17 +141,35 @@ def delete_session(sid: int, db: Database = Depends(get_db)) -> dict:
 def organize_session(sid: int, payload: OrganizeIn, request: Request,
                      db: Database = Depends(get_db)) -> IndexStatusOut:
     """物化 + 入库(OrganizeService),然后复用项目索引后台 job(进度走现有 index/status 轮询)。"""
-    try:
-        OrganizeService(db).organize(session_id=sid, project_id=payload.project_id)
-    except CaptureSessionNotFound:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
-    except SessionAlreadyOrganized:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="session already organized")
-    # 入库后启动该项目的后台索引 job(与 /projects/{id}/index 同一套机制 + 锁 + 轮询)。
+    pid = payload.project_id
+    # 先校验目标项目存在(404),避免归类/入库时才以 500 暴出。
+    _ensure_project(db, pid)
     svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request))
+    # 「检查在跑 + 归类入库 + 启动新 job」整段在锁内:与 /projects/{id}/index 同一套并发护栏,
+    # 避免该项目已有索引 job 在跑时再归类起两个并发 job(破坏性)。
     with request.app.state.index_lock:
-        job = svc.index_project(payload.project_id)
-        request.app.state.index_jobs[payload.project_id] = job
+        if _has_running_job(request, pid):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="indexing already in progress for this project")
+        try:
+            OrganizeService(db).organize(session_id=sid, project_id=pid)
+        except CaptureSessionNotFound:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+        except ProjectNotFound:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project not found")
+        except SessionAlreadyOrganized:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="session already organized")
+        except SessionNotStaged:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="session not staged (stop it before organizing)")
+        except (SourceFileNotFound, InvalidSourcePath) as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        except (ExtractionEngineNotReady, ExtractionFailed) as e:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+        # 入库后启动该项目的后台索引 job(与 /projects/{id}/index 同一套机制 + 锁 + 轮询)。
+        job = svc.index_project(pid)
+        request.app.state.index_jobs[pid] = job
         svc.run_in_background(job)
     with job._lock:
         return IndexStatusOut(project_id=job.project_id, total=job.total, done=job.done,
