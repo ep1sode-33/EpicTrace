@@ -145,6 +145,57 @@ class MinerUProvisioner:
                 self._installing = False
         return self.state
 
+    def models_download_bin(self) -> str:
+        return str(self._venv_dir / "bin" / "mineru-models-download")
+
+    def download_models(
+        self,
+        *,
+        model_source: str = "modelscope",
+        progress_cb: Callable[[str], None] | None = None,
+    ) -> str:
+        """下模型(跑 <venv>/bin/mineru-models-download --source <model_source>)。返回结束时 state。
+
+        前提:已 provision(包就绪)。并发安全:下载中再调 no-op(返回当前 state)。
+        任何失败置 failed + last_error 再上抛(后台触发线程捕获)。"""
+        with self._lock:
+            if self._downloading:
+                return self.state
+            self._downloading = True
+            self._failed = False
+            self.last_error = None
+
+        def emit(msg: str) -> None:
+            if progress_cb is not None:
+                progress_cb(msg)
+
+        try:
+            emit("正在下载模型(约数 GB,首次较久)…")
+            cmd = [self.models_download_bin(), "--source", model_source]
+            self._run_models_or_fail(cmd)
+            emit("模型下载完成")
+        except Exception as e:  # noqa: BLE001 — 任何失败都落到 failed + last_error
+            with self._lock:
+                self._failed = True
+                self.last_error = str(e)[:500]
+            _log.warning("MinerU model download failed: %s", e, exc_info=True)
+            raise
+        finally:
+            with self._lock:
+                self._downloading = False
+        return self.state
+
+    def _run_models_or_fail(self, cmd: list[str]) -> None:
+        try:
+            proc = self._models_runner(cmd, _DOWNLOAD_TIMEOUT)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            raise RuntimeError(f"model download failed: {e}") from e
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"mineru-models-download exited {proc.returncode}: "
+                f"{(proc.stderr or '').strip()[:500]}"
+            )
+
     def _run_or_fail(self, cmd: list[str]) -> None:
         try:
             proc = self._uv_runner(cmd, _PROVISION_TIMEOUT)

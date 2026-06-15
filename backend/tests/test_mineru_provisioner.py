@@ -155,3 +155,99 @@ def test_provision_uv_bin_error_sets_failed_with_last_error(tmp_path: Path, monk
     assert p.state == "failed"
     assert p.last_error
     assert "uv" in p.last_error.lower()
+
+
+def _install_only(venv: Path) -> "MinerUProvisioner":
+    """造一个「装了包、未下模型」的 provisioner(bin 存在,models 缺)。"""
+    (venv / "bin").mkdir(parents=True, exist_ok=True)
+    (venv / "bin" / "mineru").write_text("#!/bin/sh\n")
+    (venv / "bin" / "mineru").chmod(0o755)
+    (venv / "bin" / "mineru-models-download").write_text("#!/bin/sh\n")
+    (venv / "bin" / "mineru-models-download").chmod(0o755)
+    return MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv")
+
+
+def test_download_models_runs_download_and_becomes_ready(tmp_path: Path):
+    venv = _venv_dir(tmp_path)
+    p = _install_only(venv)
+    assert p.state == "installed_no_models"
+    calls: list[list[str]] = []
+
+    def models_runner(cmd, timeout):
+        calls.append(cmd)
+        # 模拟下载:落 mineru.json + 一个模型目录,使 _models_ready 转真。
+        root = venv / "models"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "mineru.json").write_text("{}")
+        (root / "layout").mkdir(exist_ok=True)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    progress: list[str] = []
+    p.download_models(progress_cb=progress.append)
+
+    assert p.state == "ready"
+    assert p.is_ready() is True
+    # 跑的是 venv 内的 mineru-models-download,且带 --source <model_source>
+    assert calls[0][0] == str(venv / "bin" / "mineru-models-download")
+    assert "--source" in calls[0]
+    assert len(progress) >= 1
+
+
+def test_download_models_takes_model_source(tmp_path: Path):
+    venv = _venv_dir(tmp_path)
+    _install_only(venv)
+    calls: list[list[str]] = []
+
+    def models_runner(cmd, timeout):
+        calls.append(cmd)
+        root = venv / "models"; root.mkdir(parents=True, exist_ok=True)
+        (root / "mineru.json").write_text("{}"); (root / "layout").mkdir(exist_ok=True)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    p.download_models(model_source="huggingface")
+    src_idx = calls[0].index("--source")
+    assert calls[0][src_idx + 1] == "huggingface"
+
+
+def test_download_models_failure_sets_failed(tmp_path: Path):
+    venv = _venv_dir(tmp_path)
+    _install_only(venv)
+
+    def models_runner(cmd, timeout):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="net down")
+
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    with pytest.raises(RuntimeError):
+        p.download_models()
+    assert p.state == "failed"
+    assert p.is_ready() is False
+    assert p.last_error and "net down" in p.last_error
+
+
+def test_duplicate_download_while_downloading_is_noop(tmp_path: Path):
+    venv = _venv_dir(tmp_path)
+    _install_only(venv)
+    release = threading.Event(); started = threading.Event()
+    dl_calls = {"n": 0}
+
+    def models_runner(cmd, timeout):
+        dl_calls["n"] += 1
+        started.set()
+        release.wait(timeout=5)  # 卡住第一次下载,使其保持 downloading_models
+        root = venv / "models"; root.mkdir(parents=True, exist_ok=True)
+        (root / "mineru.json").write_text("{}"); (root / "layout").mkdir(exist_ok=True)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    t = threading.Thread(target=p.download_models, daemon=True)
+    t.start()
+    assert started.wait(timeout=5)
+    assert p.state == "downloading_models"
+    p.download_models()  # 第二次必须立刻 no-op,不开第二次下载
+    assert p.state == "downloading_models"
+    release.set()
+    t.join(timeout=5)
+    assert p.state == "ready"
+    assert dl_calls["n"] == 1  # 只跑了一次下载
