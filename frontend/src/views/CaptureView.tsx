@@ -96,6 +96,17 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
       api
         .getSession(sid)
         .then((detail) => {
+          // 若 session 已被本窗、HUD 或别处停止 → 退出录制态(否则主窗会一直显示「录制中」)。
+          if (detail.status !== "recording") {
+            stopTimer();
+            stopPolling();
+            setSession(null);
+            setElapsed(0);
+            elapsedRef.current = 0;
+            setPaused(false);
+            onSessionStopped?.();
+            return;
+          }
           setSession(detail);
           // 定期用后端值校准计时
           elapsedRef.current = detail.elapsed_seconds;

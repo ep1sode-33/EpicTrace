@@ -83,8 +83,10 @@ class Api:
             return []
 
     def capture_screenshot(self) -> str | None:
-        """抓全屏存 PNG 进当前 session 的 staging_dir,POST screenshot 事件,返回文件名;失败→None。
-        需「屏幕录制」权限;无活动监听(_cap 未设)或抓屏被拒 → None。"""
+        """用系统 screencapture 抓全屏存 PNG 进当前 session 的 staging_dir,POST 截图事件,返回文件名;
+        失败→None。需「屏幕录制」权限;无活动监听(_cap 未设)或未选 screenshot 源 → None。
+        用 screencapture CLI 而非 Quartz CGWindowListCreateImage:后者在新版 macOS 已废/受限,
+        常返回空图(=用户看到的「截图失效」),CLI 走系统标准路径、权限提示也正常。"""
         cap = getattr(self, "_cap", None)
         if not cap:
             return None
@@ -92,21 +94,21 @@ class Api:
         if "screenshot" not in (cap.get("sources") or []):
             return None
         try:
+            import subprocess
             import time
-            import Quartz
-            from AppKit import NSBitmapImageRep, NSBitmapImageFileTypePNG
 
-            image = Quartz.CGWindowListCreateImage(
-                Quartz.CGRectInfinite, Quartz.kCGWindowListOptionOnScreenOnly,
-                Quartz.kCGNullWindowID, Quartz.kCGWindowImageDefault)
-            if image is None:
-                return None
-            rep = NSBitmapImageRep.alloc().initWithCGImage_(image)
-            png = rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
             name = f"shot-{int(time.time() * 1000)}.png"
             out = Path(cap["dir"]) / name
             out.parent.mkdir(parents=True, exist_ok=True)
-            png.writeToFile_atomically_(str(out), True)
+            # -x 静默(无快门声),-t png 指定格式;抓整屏。
+            result = subprocess.run(
+                ["/usr/sbin/screencapture", "-x", "-t", "png", str(out)],
+                capture_output=True, timeout=10,
+            )
+            if result.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
+                print(f"[EpicTrace] screencapture failed rc={result.returncode} "
+                      f"(需「屏幕录制」权限?)", flush=True)
+                return None
             self._post_event(cap["sid"], "screenshot", name)
             return name
         except Exception as e:  # noqa: BLE001 — 抓屏任何异常降级
@@ -218,18 +220,30 @@ class Api:
         self._cap = None
 
     def show_recording_hud(self, session_id: int) -> dict:
-        """开第二个无边框、置顶、可拖动的小窗口渲染 HUD(指向前端 ?view=hud 路由)。"""
+        """开第二个无边框、置顶、可拖动的**紧凑**小窗口渲染 HUD(指向前端 ?view=hud 路由)。
+        **必须传 js_api=self**:否则 HUD 窗口里 window.pywebview.api 为 undefined,
+        导致 HUD 的停止/截图/收起全是空操作(停止点了不停、窗口销毁不掉卡在「已停止」)。"""
         try:
             self._hud = webview.create_window(
                 "EpicTrace 录制",
                 f"http://127.0.0.1:8765/?view=hud&session={session_id}",
+                js_api=self,
                 frameless=True, on_top=True, easy_drag=True, resizable=False,
-                width=360, height=52, x=40, y=40,
+                width=300, height=44, x=60, y=60,
             )
             return {"ok": True}
         except Exception as e:  # noqa: BLE001
             print(f"[EpicTrace] show_recording_hud failed: {e}", flush=True)
             return {"ok": False, "reason": str(e)}
+
+    def resize_recording_hud(self, width: int, height: int) -> None:
+        """调整 HUD 窗口尺寸(箭头向下展开时间线预览 / 收起时用)。"""
+        hud = getattr(self, "_hud", None)
+        if hud is not None:
+            try:
+                hud.resize(int(width), int(height))
+            except Exception as e:  # noqa: BLE001
+                print(f"[EpicTrace] resize_recording_hud failed: {e}", flush=True)
 
     def hide_recording_hud(self) -> None:
         hud = getattr(self, "_hud", None)

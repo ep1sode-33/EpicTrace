@@ -1,7 +1,23 @@
-import { useEffect, useRef, useState } from "react";
-import { Camera, ChevronRight, Mic, Pause, Play, Square, StickyNote, Volume2 } from "lucide-react";
-import { api } from "@/lib/api";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  Camera,
+  ChevronDown,
+  ChevronUp,
+  Mic,
+  Pause,
+  Play,
+  Square,
+  StickyNote,
+  Volume2,
+} from "lucide-react";
+import { api, type CaptureEvent } from "@/lib/api";
 import { native } from "@/lib/native";
+
+// HUD 窗口尺寸(配合 shell 的 resize_recording_hud):紧凑条 / 带笔记行 / 展开时间线。
+const BAR_W = 300;
+const BAR_H = 44;
+const NOTE_H = 84;
+const EXPANDED_H = 300;
 
 /** 将秒数格式化为 MM:SS */
 function formatTime(secs: number): string {
@@ -10,30 +26,65 @@ function formatTime(secs: number): string {
   return `${m}:${s}`;
 }
 
+/** 紧凑图标按钮(HUD 专用,小尺寸) */
+function IconBtn({
+  onClick,
+  disabled,
+  title,
+  danger,
+  children,
+}: {
+  onClick?: () => void;
+  disabled?: boolean;
+  title?: string;
+  danger?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`flex size-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent ${
+        danger
+          ? "text-red-500 hover:bg-red-500/10"
+          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function RecordingHud({ sessionId }: { sessionId: number }) {
   const [elapsed, setElapsed] = useState(0);
   const [paused, setPaused] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [stopped, setStopped] = useState(false);
   const [sources, setSources] = useState<string[]>([]);
   const [stagingDir, setStagingDir] = useState("");
+  const [events, setEvents] = useState<CaptureEvent[]>([]);
 
   const elapsedRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 供 syncHeight 取最新值(避免闭包旧值)
+  const expandedRef = useRef(false);
+  const noteOpenRef = useRef(false);
 
-  // 拉取初始 session 信息
   useEffect(() => {
     if (!sessionId) return;
     api
       .getSession(sessionId)
-      .then((detail) => {
-        elapsedRef.current = detail.elapsed_seconds;
-        setElapsed(detail.elapsed_seconds);
-        setSources(detail.sources);
-        setStagingDir(detail.staging_dir);
+      .then((d) => {
+        elapsedRef.current = d.elapsed_seconds;
+        setElapsed(d.elapsed_seconds);
+        setSources(d.sources);
+        setStagingDir(d.staging_dir);
+        setEvents(d.events);
         startTimer();
         startPolling();
       })
@@ -52,37 +103,56 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       setElapsed(elapsedRef.current);
     }, 1000);
   }
-
   function stopTimer() {
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
   }
-
   function startPolling() {
     stopPolling();
     pollRef.current = setInterval(() => {
       api
         .getSession(sessionId)
-        .then((detail) => {
-          // 定期校准计时
-          elapsedRef.current = detail.elapsed_seconds;
-          setElapsed(detail.elapsed_seconds);
-          if (detail.status !== "recording") {
+        .then((d) => {
+          elapsedRef.current = d.elapsed_seconds;
+          setElapsed(d.elapsed_seconds);
+          setEvents(d.events);
+          // session 已停止 → 收尾并销毁 HUD 窗口
+          if (d.status !== "recording") {
             stopTimer();
             stopPolling();
+            setStopped(true);
+            void native.hideHud();
           }
         })
         .catch(() => {});
-    }, 2000);
+    }, 1500);
   }
-
   function stopPolling() {
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
+  }
+
+  // 据 expanded / noteOpen 计算窗口高度并通知 shell resize。
+  function syncHeight(nextExpanded: boolean, nextNoteOpen: boolean) {
+    const h = nextExpanded ? EXPANDED_H : nextNoteOpen ? NOTE_H : BAR_H;
+    void native.resizeHud(BAR_W, h);
+  }
+
+  function toggleExpand() {
+    const next = !expanded;
+    setExpanded(next);
+    expandedRef.current = next;
+    syncHeight(next, noteOpenRef.current);
+  }
+  function toggleNote() {
+    const next = !noteOpen;
+    setNoteOpen(next);
+    noteOpenRef.current = next;
+    syncHeight(expandedRef.current, next);
   }
 
   async function handlePauseResume() {
@@ -109,7 +179,6 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       stopPolling();
       await native.stopMonitors();
       await api.stopSession(sessionId);
-      // HUD 窗口由 shell 的 hide_recording_hud 销毁;这里先标记已停止
       setStopped(true);
       await native.hideHud();
     } catch {
@@ -122,7 +191,8 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
     try {
       await api.appendEvent(sessionId, "note", noteText.trim());
       setNoteText("");
-      setNoteOpen(false);
+      const d = await api.getSession(sessionId);
+      setEvents(d.events);
     } catch {
       /* 静默降级 */
     }
@@ -138,142 +208,108 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
 
   if (stopped) {
     return (
-      <div className="flex h-screen items-center justify-center bg-background/80 text-xs text-muted-foreground">
+      <div className="flex h-screen items-center justify-center bg-background text-[11px] text-muted-foreground">
         已停止
       </div>
     );
   }
 
-  // 收起态:只显示红点 + 计时 + 展开按钮
-  if (collapsed) {
-    return (
-      <div className="flex h-screen items-center gap-2 bg-background/90 px-3 backdrop-blur">
-        <span
-          className={`size-2 rounded-full ${paused ? "bg-amber-500" : "animate-pulse bg-red-500"}`}
-          aria-hidden
-        />
-        <span className="font-mono text-xs font-semibold tabular-nums text-foreground">
-          {formatTime(elapsed)}
-        </span>
-        <button
-          type="button"
-          onClick={() => setCollapsed(false)}
-          className="ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="展开"
-        >
-          <ChevronRight className="size-3.5 rotate-180" />
-        </button>
-      </div>
-    );
-  }
+  const feed = [...events]
+    .filter((e) => ["note", "clipboard", "screenshot"].includes(e.kind))
+    .reverse();
+
+  const noteInput = (
+    <input
+      autoFocus
+      type="text"
+      value={noteText}
+      onChange={(e) => setNoteText(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void handleNote();
+        }
+        if (e.key === "Escape") toggleNote();
+      }}
+      placeholder="记笔记… Enter 提交"
+      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+    />
+  );
 
   return (
-    <div className="flex h-screen flex-col justify-center gap-1 bg-background/90 backdrop-blur">
-      {/* 主控制行 */}
-      <div className="flex items-center gap-1.5 px-2">
-        {/* 录制状态指示 */}
+    <div className="flex h-screen flex-col overflow-hidden bg-background/95 backdrop-blur select-none">
+      {/* 紧凑控制条 */}
+      <div className="flex h-11 shrink-0 items-center gap-0.5 px-1.5">
         <span
-          className={`size-2 shrink-0 rounded-full ${paused ? "bg-amber-500" : "animate-pulse bg-red-500"}`}
+          className={`ml-1 size-2 shrink-0 rounded-full ${paused ? "bg-amber-500" : "animate-pulse bg-red-500"}`}
           aria-hidden
         />
-        {/* 计时 */}
-        <span className="w-12 font-mono text-xs font-semibold tabular-nums text-foreground">
+        <span className="mx-1 w-10 font-mono text-xs font-semibold tabular-nums text-foreground">
           {formatTime(elapsed)}
         </span>
-
-        {/* 笔记按钮 */}
-        <button
-          type="button"
-          onClick={() => setNoteOpen((o) => !o)}
-          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="记笔记"
-        >
+        <span className="mr-0.5 h-4 w-px bg-border" aria-hidden />
+        <IconBtn onClick={toggleNote} title="记笔记">
           <StickyNote className="size-3.5" />
-        </button>
-
-        {/* 截图按钮 */}
-        <button
-          type="button"
+        </IconBtn>
+        <IconBtn
           onClick={handleScreenshot}
           disabled={!native.available()}
-          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
-          title={native.available() ? "截取屏幕" : "需在桌面 app 内"}
+          title={native.available() ? "截图" : "需在桌面 app 内"}
         >
           <Camera className="size-3.5" />
-        </button>
-
-        {/* 外录(禁用) */}
-        <button
-          type="button"
-          disabled
-          className="rounded p-1 text-muted-foreground opacity-40 cursor-not-allowed"
-          title="即将到来"
-        >
+        </IconBtn>
+        <IconBtn disabled title="外录 · 即将到来">
           <Mic className="size-3.5" />
-        </button>
-
-        {/* 内录(禁用) */}
-        <button
-          type="button"
-          disabled
-          className="rounded p-1 text-muted-foreground opacity-40 cursor-not-allowed"
-          title="即将到来"
-        >
+        </IconBtn>
+        <IconBtn disabled title="内录 · 即将到来">
           <Volume2 className="size-3.5" />
-        </button>
-
-        {/* 暂停/继续 */}
-        <button
-          type="button"
-          onClick={handlePauseResume}
-          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title={paused ? "继续" : "暂停"}
-        >
+        </IconBtn>
+        <IconBtn onClick={handlePauseResume} title={paused ? "继续" : "暂停"}>
           {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
-        </button>
-
-        {/* 停止 */}
-        <button
-          type="button"
-          onClick={handleStop}
-          className="rounded p-1 text-red-500 hover:bg-red-500/10"
-          title="停止录制"
-        >
-          <Square className="size-3.5" />
-        </button>
-
-        {/* 收起 */}
-        <button
-          type="button"
-          onClick={() => setCollapsed(true)}
-          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="收起"
-        >
-          <ChevronRight className="size-3.5" />
-        </button>
+        </IconBtn>
+        <IconBtn onClick={handleStop} danger title="停止">
+          <Square className="size-3.5 fill-current" />
+        </IconBtn>
+        <span className="mx-0.5 h-4 w-px bg-border" aria-hidden />
+        <IconBtn onClick={toggleExpand} title={expanded ? "收起" : "展开时间线"}>
+          {expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+        </IconBtn>
       </div>
 
-      {/* 笔记内联输入行(展开时显示) */}
-      {noteOpen && (
-        <div className="flex items-center gap-1 px-2">
-          <input
-            autoFocus
-            type="text"
-            value={noteText}
-            onChange={(e) => setNoteText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void handleNote();
-              }
-              if (e.key === "Escape") {
-                setNoteOpen(false);
-                setNoteText("");
-              }
-            }}
-            placeholder="记笔记… Enter 提交"
-            className="flex-1 rounded border border-input bg-background px-2 py-1 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-          />
+      {/* 未展开时的笔记输入行 */}
+      {noteOpen && !expanded && <div className="px-2 pb-2">{noteInput}</div>}
+
+      {/* 展开:向下预览时间线 */}
+      {expanded && (
+        <div className="flex min-h-0 flex-1 flex-col gap-1.5 border-t border-border/60 px-2 py-1.5">
+          {noteOpen && noteInput}
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {feed.length === 0 ? (
+              <p className="py-4 text-center text-xs text-muted-foreground">暂无采集内容</p>
+            ) : (
+              <ul className="space-y-0.5">
+                {feed.map((ev) => (
+                  <li
+                    key={ev.id}
+                    className="flex items-start gap-1.5 rounded px-1 py-0.5 text-xs hover:bg-muted/40"
+                  >
+                    <span className="leading-tight">
+                      {ev.kind === "note" ? "✏️" : ev.kind === "clipboard" ? "📋" : "📷"}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-foreground">
+                      {ev.payload || "(截图)"}
+                    </span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                      {new Date(ev.ts).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
       )}
     </div>
