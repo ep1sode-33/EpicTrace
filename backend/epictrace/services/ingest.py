@@ -49,7 +49,8 @@ class IngestService:
         self._db = db
 
     def ingest_file(
-        self, project_id: int, source_path: str, ingest_method: str, description: str
+        self, project_id: int, source_path: str, ingest_method: str, description: str,
+        source_session_id: int | None = None,
     ) -> IngestRecord:
         src = Path(source_path)
         if not src.exists():
@@ -85,6 +86,7 @@ class IngestService:
                     ingest_method=ingest_method,
                     description=description,
                     extracted_text=extracted,
+                    source_session_id=source_session_id,
                 )
                 s.add(rec)
                 s.flush()
