@@ -11,8 +11,28 @@ def _venv_dir(tmp_path: Path) -> Path:
     return tmp_path / ".MinerU-venv"
 
 
+def _hf_cache_dir(tmp_path: Path) -> Path:
+    """假的 HF hub 缓存根(测试注入,不碰真 ~/.cache)。"""
+    return tmp_path / "hf_cache" / "hub"
+
+
+def _make_repo_dir(hub: Path, repo_name: str, *, file_name: str = "model.safetensors") -> Path:
+    """在假 HF hub 缓存下造一个非空的模型仓库目录(models--owner--name + 一个文件)。"""
+    repo = hub / repo_name
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / file_name).write_text("weights\n")
+    return repo
+
+
+def _prov(tmp_path: Path, **kw) -> MinerUProvisioner:
+    """注入假 HF 缓存根,默认 uv_bin 已给。"""
+    kw.setdefault("uv_bin", "/usr/local/bin/uv")
+    kw.setdefault("hf_cache_dir", _hf_cache_dir(tmp_path))
+    return MinerUProvisioner(_venv_dir(tmp_path), **kw)
+
+
 def test_not_ready_before_provision(tmp_path: Path):
-    p = MinerUProvisioner(_venv_dir(tmp_path), uv_bin="/usr/local/bin/uv")
+    p = _prov(tmp_path)
     assert p.is_ready() is False
     assert p.state == "not_installed"
 
@@ -44,7 +64,8 @@ def test_provision_installs_packages_only_not_models(tmp_path: Path):
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     progress: list[str] = []
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", uv_runner=uv_runner)
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", uv_runner=uv_runner,
+                          hf_cache_dir=_hf_cache_dir(tmp_path))
     p.provision(progress_cb=progress.append)
 
     assert p.state == "installed_no_models"
@@ -103,7 +124,8 @@ def test_state_is_installing_while_provisioning(tmp_path: Path):
             (venv / "bin" / "mineru").chmod(0o755)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", uv_runner=uv_runner)
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", uv_runner=uv_runner,
+                          hf_cache_dir=_hf_cache_dir(tmp_path))
     p.provision()
     assert "installing" in observed
     assert p.state == "installed_no_models"
@@ -126,7 +148,8 @@ def test_duplicate_provision_while_installing_is_noop(tmp_path: Path):
             (venv / "bin" / "mineru").chmod(0o755)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", uv_runner=uv_runner)
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", uv_runner=uv_runner,
+                          hf_cache_dir=_hf_cache_dir(tmp_path))
     t = threading.Thread(target=p.provision, daemon=True)
     t.start()
     assert started.wait(timeout=5)
@@ -157,38 +180,92 @@ def test_provision_uv_bin_error_sets_failed_with_last_error(tmp_path: Path, monk
     assert "uv" in p.last_error.lower()
 
 
-def _install_only(venv: Path) -> "MinerUProvisioner":
-    """造一个「装了包、未下模型」的 provisioner(bin 存在,models 缺)。"""
+def _install_only(venv: Path, *, hf_cache_dir: Path | None = None) -> "MinerUProvisioner":
+    """造一个「装了包、未下模型」的 provisioner(bin 存在,缓存里无模型仓库)。"""
     (venv / "bin").mkdir(parents=True, exist_ok=True)
     (venv / "bin" / "mineru").write_text("#!/bin/sh\n")
     (venv / "bin" / "mineru").chmod(0o755)
     (venv / "bin" / "mineru-models-download").write_text("#!/bin/sh\n")
     (venv / "bin" / "mineru-models-download").chmod(0o755)
-    return MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv")
+    return MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hf_cache_dir)
+
+
+# ---- v2: 真实模型缓存检测(替换 venv 哨兵) ----
+
+
+def test_models_ready_detects_existing_hf_cache(tmp_path: Path):
+    """缓存里已有 MinerU 模型仓库目录(非空)→ 模型部分判为就绪(无需哨兵)。"""
+    venv = _venv_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
+    assert p.is_ready() is False  # 缓存空 → 未就绪
+    # 用户机器上的真实情形:HF 缓存里有 MinerU2.5 + PDF-Extract-Kit 两个仓库目录。
+    _make_repo_dir(_hf_cache_dir(tmp_path), "models--opendatalab--MinerU2.5-2509-1.2B")
+    _make_repo_dir(_hf_cache_dir(tmp_path), "models--opendatalab--PDF-Extract-Kit-1.0")
+    assert p.is_ready() is True
+    assert p.state == "ready"
+
+
+def test_models_ready_when_only_pdf_extract_kit_present(tmp_path: Path):
+    """仅有 PDF-Extract-Kit 仓库(pipeline 后端)也算模型就绪。"""
+    venv = _venv_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
+    _make_repo_dir(_hf_cache_dir(tmp_path), "models--opendatalab--PDF-Extract-Kit-1.0")
+    assert p.is_ready() is True
+
+
+def test_models_ready_when_only_mineru_present(tmp_path: Path):
+    """仅有 MinerU 仓库(vlm 后端)也算模型就绪。"""
+    venv = _venv_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
+    _make_repo_dir(_hf_cache_dir(tmp_path), "models--opendatalab--MinerU2.5-2509-1.2B")
+    assert p.is_ready() is True
+
+
+def test_empty_repo_dir_is_not_ready(tmp_path: Path):
+    """缓存里有同名仓库目录但为空(下了一半/被清空)→ 不算就绪。"""
+    venv = _venv_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
+    (_hf_cache_dir(tmp_path) / "models--opendatalab--MinerU2.5-2509-1.2B").mkdir(parents=True)
+    assert p.is_ready() is False
+
+
+def test_unrelated_cache_repo_is_not_ready(tmp_path: Path):
+    """缓存里只有无关仓库(非 MinerU/PDF-Extract-Kit)→ 不算就绪(不误判)。"""
+    venv = _venv_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=_hf_cache_dir(tmp_path))
+    _make_repo_dir(_hf_cache_dir(tmp_path), "models--BAAI--bge-m3")
+    assert p.is_ready() is False
+
+
+def test_missing_cache_root_is_not_ready(tmp_path: Path):
+    """缓存根本不存在(全新机器)→ 不崩,不算就绪。"""
+    venv = _venv_dir(tmp_path)
+    p = _install_only(venv, hf_cache_dir=tmp_path / "nonexistent" / "hub")
+    assert p.is_ready() is False
 
 
 def test_download_models_runs_download_and_becomes_ready(tmp_path: Path):
     venv = _venv_dir(tmp_path)
-    p = _install_only(venv)
-    assert p.state == "installed_no_models"
+    hub = _hf_cache_dir(tmp_path)
     calls: list[list[str]] = []
 
     def models_runner(cmd, timeout):
         calls.append(cmd)
-        # 模拟成功的子进程:MinerU 把权重落到 HF/modelscope 缓存(不在 venv 内),
-        # 不造任何 marker。就绪 sentinel 由 download_models 成功后自行写入。
+        # 模拟成功的子进程:MinerU 把权重落到 HF/modelscope 缓存(不在 venv 内)。
+        # 就绪靠真实缓存检测,不靠哨兵——所以假 runner 必须把仓库目录造出来。
+        _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
-    # 下载前:无 sentinel → 未就绪
-    assert p.models_ready_sentinel().exists() is False
+    p = _install_only(venv, hf_cache_dir=hub)
+    p._models_runner = models_runner
+    assert p.state == "installed_no_models"
+    # 下载前:缓存无仓库 → 未就绪
+    assert p.is_ready() is False
     progress: list[str] = []
     p.download_models(progress_cb=progress.append)
 
     assert p.state == "ready"
     assert p.is_ready() is True
-    # 成功后写了 app-owned sentinel
-    assert p.models_ready_sentinel().is_file()
     # 跑的是 venv 内的 mineru-models-download,且带 -s <source> 与 -m all(hybrid 需全部模型)
     assert calls[0][0] == str(venv / "bin" / "mineru-models-download")
     assert "-s" in calls[0]
@@ -215,12 +292,14 @@ def test_download_models_takes_model_source(tmp_path: Path):
 
 def test_download_models_failure_sets_failed(tmp_path: Path):
     venv = _venv_dir(tmp_path)
-    _install_only(venv)
+    hub = _hf_cache_dir(tmp_path)
 
     def models_runner(cmd, timeout):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="net down")
 
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv",
+                          hf_cache_dir=hub, models_runner=models_runner)
+    _install_only(venv)
     with pytest.raises(RuntimeError):
         p.download_models()
     assert p.state == "failed"
@@ -230,7 +309,7 @@ def test_download_models_failure_sets_failed(tmp_path: Path):
 
 def test_duplicate_download_while_downloading_is_noop(tmp_path: Path):
     venv = _venv_dir(tmp_path)
-    _install_only(venv)
+    hub = _hf_cache_dir(tmp_path)
     release = threading.Event(); started = threading.Event()
     dl_calls = {"n": 0}
 
@@ -238,9 +317,12 @@ def test_duplicate_download_while_downloading_is_noop(tmp_path: Path):
         dl_calls["n"] += 1
         started.set()
         release.wait(timeout=5)  # 卡住第一次下载,使其保持 downloading_models
+        _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv",
+                          hf_cache_dir=hub, models_runner=models_runner)
+    _install_only(venv)
     t = threading.Thread(target=p.download_models, daemon=True)
     t.start()
     assert started.wait(timeout=5)
@@ -257,26 +339,30 @@ def test_duplicate_download_while_downloading_is_noop(tmp_path: Path):
 
 
 def test_ensure_models_ready_when_ready_returns_immediately(tmp_path: Path):
-    """已就绪(sentinel 在)→ ensure_models_ready 立即返回,不跑任何下载。"""
+    """已就绪(缓存里有模型)→ ensure_models_ready 立即返回,不跑任何下载。"""
     venv = _venv_dir(tmp_path)
-    _install_only(venv)
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv",
+    hub = _hf_cache_dir(tmp_path)
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hub,
                           models_runner=lambda c, t: pytest.fail("should not download"))
-    p.models_ready_sentinel().write_text("ready\n")
+    _install_only(venv)
+    _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
     assert p.is_ready()
     p.ensure_models_ready(model_source="modelscope")  # no-op,不调 runner
 
 
 def test_ensure_models_ready_runs_download_when_installed_no_models(tmp_path: Path):
     venv = _venv_dir(tmp_path)
-    _install_only(venv)
+    hub = _hf_cache_dir(tmp_path)
     calls = {"n": 0}
 
     def models_runner(cmd, timeout):
         calls["n"] += 1
+        _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv",
+                          hf_cache_dir=hub, models_runner=models_runner)
+    _install_only(venv)
     p.ensure_models_ready(model_source="modelscope")
     assert calls["n"] == 1
     assert p.is_ready()
@@ -286,7 +372,7 @@ def test_ensure_models_ready_second_caller_waits_for_first(tmp_path: Path):
     """两个并发 caller:只跑一次下载,两者都在下载完成(ready)后才返回——
     不会有第二个 caller 在 downloading 时跳过、抢先提取。"""
     venv = _venv_dir(tmp_path)
-    _install_only(venv)
+    hub = _hf_cache_dir(tmp_path)
     release = threading.Event(); started = threading.Event()
     dl_calls = {"n": 0}
 
@@ -294,9 +380,12 @@ def test_ensure_models_ready_second_caller_waits_for_first(tmp_path: Path):
         dl_calls["n"] += 1
         started.set()
         release.wait(timeout=5)
+        _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv",
+                          hf_cache_dir=hub, models_runner=models_runner)
+    _install_only(venv)
     ready_when_returned: list[bool] = []
 
     def caller():
@@ -321,7 +410,7 @@ def test_ensure_models_ready_second_caller_waits_for_first(tmp_path: Path):
 def test_ensure_models_ready_waiter_sees_failure(tmp_path: Path):
     """下载失败时,阻塞等待的 caller 也要看到失败(抛错),而非误以为就绪。"""
     venv = _venv_dir(tmp_path)
-    _install_only(venv)
+    hub = _hf_cache_dir(tmp_path)
     release = threading.Event(); started = threading.Event()
 
     def models_runner(cmd, timeout):
@@ -329,7 +418,9 @@ def test_ensure_models_ready_waiter_sees_failure(tmp_path: Path):
         release.wait(timeout=5)
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="net down")
 
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", models_runner=models_runner)
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv",
+                          hf_cache_dir=hub, models_runner=models_runner)
+    _install_only(venv)
     errors: list[Exception] = []
 
     def caller():
@@ -356,6 +447,7 @@ def test_download_models_streams_progress_to_cb(tmp_path: Path, monkeypatch):
     """无注入 runner + 有 progress_cb → 走 Popen 流式读 stderr,把下载进度逐条回调。
     用假 Popen,完全不碰真 mineru-models-download/网络。"""
     venv = _venv_dir(tmp_path)
+    hub = _hf_cache_dir(tmp_path)
     _install_only(venv)
     captured_kwargs: dict = {}
 
@@ -371,6 +463,8 @@ def test_download_models_streams_progress_to_cb(tmp_path: Path, monkeypatch):
 
         def wait(self, timeout=None):
             self.returncode = 0
+            # 子进程成功 → 权重落到 HF 缓存(真实情形);就绪靠缓存检测。
+            _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B")
             return 0
 
         def kill(self):
@@ -379,20 +473,21 @@ def test_download_models_streams_progress_to_cb(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         "epictrace.media.mineru_provisioner.subprocess.Popen", _FakePopen
     )
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv")
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hub)
     seen: list[str] = []
     p.download_models(model_source="modelscope", progress_cb=seen.append)
     # stdout 必须 DEVNULL(避免管道死锁,与 mineru_runner 一致)。
     assert captured_kwargs.get("stdout") is subprocess.DEVNULL
     assert len(seen) >= 2  # 收到增量进度(不止开头那一条静态文案)
     assert any("下载" in s for s in seen)
-    # 成功仍写 sentinel → 就绪。
+    # 成功后缓存有模型 → 就绪。
     assert p.is_ready() is True
 
 
 def test_download_models_streaming_failure_surfaces(tmp_path: Path, monkeypatch):
-    """流式路径下子进程非零退出 → 失败(failed_stage=download + last_error),不写 sentinel。"""
+    """流式路径下子进程非零退出 → 失败(failed_stage=download + last_error),缓存无模型。"""
     venv = _venv_dir(tmp_path)
+    hub = _hf_cache_dir(tmp_path)
     _install_only(venv)
 
     class _FakePopen:
@@ -410,7 +505,7 @@ def test_download_models_streaming_failure_surfaces(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(
         "epictrace.media.mineru_provisioner.subprocess.Popen", _FakePopen
     )
-    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv")
+    p = MinerUProvisioner(venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hub)
     with pytest.raises(RuntimeError):
         p.download_models(model_source="modelscope", progress_cb=lambda _m: None)
     assert p.is_ready() is False
@@ -437,7 +532,7 @@ def test_download_failure_sets_failed_stage_download(tmp_path: Path):
     venv = _venv_dir(tmp_path)
     _install_only(venv)
     p = MinerUProvisioner(
-        venv, uv_bin="/usr/local/bin/uv",
+        venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=_hf_cache_dir(tmp_path),
         models_runner=lambda c, t: subprocess.CompletedProcess(c, 1, stdout="", stderr="x"),
     )
     with pytest.raises(RuntimeError):
@@ -446,21 +541,25 @@ def test_download_failure_sets_failed_stage_download(tmp_path: Path):
 
 
 def test_redownload_failure_after_ready_keeps_state_but_surfaces_error(tmp_path: Path):
-    """已成功下载(sentinel 在 → cached 可用),稍后重下失败:state 仍可用(ready),
+    """已成功下载(缓存里有模型 → cached 可用),稍后重下失败:state 仍可用(ready),
     但 failed_stage=download + last_error 暴露失败(否则 UI 完全看不到重下失败)。"""
     venv = _venv_dir(tmp_path)
+    hub = _hf_cache_dir(tmp_path)
     _install_only(venv)
     p = MinerUProvisioner(
-        venv, uv_bin="/usr/local/bin/uv",
-        models_runner=lambda c, t: subprocess.CompletedProcess(c, 0, stdout="", stderr=""),
+        venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hub,
+        models_runner=lambda c, t: (
+            _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B"),
+            subprocess.CompletedProcess(c, 0, stdout="", stderr=""),
+        )[1],
     )
-    p.download_models()  # 首次成功 → sentinel 写入
+    p.download_models()  # 首次成功 → 缓存里有模型
     assert p.is_ready() and p.state == "ready"
     # 切到一个会失败的 runner 重下。
     p._models_runner = lambda c, t: subprocess.CompletedProcess(c, 1, stdout="", stderr="redownload boom")
     with pytest.raises(RuntimeError):
         p.download_models()
-    # cached 模型仍在 → 仍可用(state ready,sentinel 未删)。
+    # cached 模型仍在 → 仍可用(state ready,缓存未删)。
     assert p.state == "ready"
     assert p.is_ready() is True
     # 但失败被暴露。
@@ -470,10 +569,14 @@ def test_redownload_failure_after_ready_keeps_state_but_surfaces_error(tmp_path:
 
 def test_successful_download_clears_failed_stage(tmp_path: Path):
     venv = _venv_dir(tmp_path)
+    hub = _hf_cache_dir(tmp_path)
     _install_only(venv)
     p = MinerUProvisioner(
-        venv, uv_bin="/usr/local/bin/uv",
-        models_runner=lambda c, t: subprocess.CompletedProcess(c, 0, stdout="", stderr=""),
+        venv, uv_bin="/usr/local/bin/uv", hf_cache_dir=hub,
+        models_runner=lambda c, t: (
+            _make_repo_dir(hub, "models--opendatalab--MinerU2.5-2509-1.2B"),
+            subprocess.CompletedProcess(c, 0, stdout="", stderr=""),
+        )[1],
     )
     p._failed_stage = "download"; p.last_error = "old error"
     p.download_models()

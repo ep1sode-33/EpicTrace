@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import logging
 import re
 import shutil
@@ -20,6 +21,48 @@ _PROVISION_TIMEOUT = 3600
 _DOWNLOAD_TIMEOUT = 3600
 
 _log = logging.getLogger("epictrace")
+
+# 默认 HuggingFace hub 缓存根。mineru-models-download 把权重落进这里(及/或 modelscope
+# 缓存),仓库目录命名形如 `models--<owner>--<name>`。判定模型就绪即检测此处真实缓存。
+_DEFAULT_HF_CACHE_DIR = Path.home() / ".cache" / "huggingface" / "hub"
+
+# MinerU 所需模型的 HF 仓库目录名匹配模式(opendatalab 下的 MinerU 权重 + PDF-Extract-Kit)。
+# hybrid 后端用 MinerU2.5(vlm)+ PDF-Extract-Kit(pipeline);任一存在(非空)即视模型可用。
+_MINERU_REPO_GLOBS = (
+    "models--opendatalab--*MinerU*",
+    "models--opendatalab--*PDF-Extract-Kit*",
+)
+
+
+def _dir_has_payload(path: Path) -> bool:
+    """目录存在且含至少一个文件(递归)——空目录(下了一半/被清空)不算就绪。"""
+    if not path.is_dir():
+        return False
+    for child in path.rglob("*"):
+        if child.is_file():
+            return True
+    return False
+
+
+def detect_mineru_models(cache_dir: Path) -> bool:
+    """检测 HF hub 缓存里是否存在 MinerU 的模型仓库目录(非空)。
+
+    纯文件系统探测,不起子进程;cache_dir 不存在 → False(不崩)。
+    匹配 `models--opendatalab--*MinerU*` 或 `*PDF-Extract-Kit*`(任一非空即可)。
+    """
+    if not cache_dir.is_dir():
+        return False
+    try:
+        entries = list(cache_dir.iterdir())
+    except OSError:
+        return False
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        if any(fnmatch.fnmatch(entry.name, g) for g in _MINERU_REPO_GLOBS):
+            if _dir_has_payload(entry):
+                return True
+    return False
 
 # 模型下载(mineru-models-download → HuggingFace/ModelScope)进度行解析。
 # 下载器把 tqdm 进度条写到 stderr(回车刷新同一行),形如:
@@ -118,11 +161,14 @@ class MinerUProvisioner:
         uv_bin: str | None = None,
         uv_runner: UvRunner | None = None,
         models_runner: ModelsRunner | None = None,
+        hf_cache_dir: Path | None = None,
     ) -> None:
         self._venv_dir = Path(venv_dir)
         self._uv_bin = uv_bin
         self._uv_runner = uv_runner or _default_uv_runner
         self._models_runner = models_runner
+        # 模型就绪检测根:HF hub 缓存。可注入(测试用 tmp 目录假造仓库,不碰真 ~/.cache)。
+        self._hf_cache_dir = Path(hf_cache_dir) if hf_cache_dir is not None else _DEFAULT_HF_CACHE_DIR
         self._failed = False
         # 失败阶段:install(装包)/ download(下模型)/ None(无失败)。
         # 区分二者使前端能把「重试」按钮指向正确动作;并在 cached 模型仍可用(state==ready)时
@@ -140,19 +186,16 @@ class MinerUProvisioner:
     def mineru_bin(self) -> str:
         return str(self._venv_dir / "bin" / "mineru")
 
-    def models_ready_sentinel(self) -> Path:
-        # App-owned 就绪 sentinel,落在 venv 根目录旁(<venv>/.models-ready)。
-        # 为何不查 MinerU 自己的磁盘 marker:已安装版本的 mineru-models-download 把权重
-        # 下进 HuggingFace/modelscope 缓存(~/.cache/huggingface),venv 内既没有 models/
-        # 目录也没有 mineru.json,没有稳定、跨版本的磁盘 marker 可依赖。
-        # mineru-models-download 是幂等的(HF 缓存已有时为快速 no-op),所以即便模型已存在,
-        # 由 sentinel 门控的重触发也很廉价——我们在一次成功下载后自行写入它作为权威就绪标志。
-        # 已知取舍(接受):若用户在 APP 外手动删了缓存里的模型,sentinel 仍在 → state 显示
-        # ready,失败只会在真正提取时暴露(而非 status)。这是有意为之,不在此处做磁盘探测。
-        return self._venv_dir / ".models-ready"
+    def hf_cache_dir(self) -> Path:
+        """模型就绪检测的 HF hub 缓存根(默认 ~/.cache/huggingface/hub,可注入)。"""
+        return self._hf_cache_dir
 
     def _models_ready(self) -> bool:
-        return self.models_ready_sentinel().is_file()
+        # 检测真实模型缓存:HF hub 下存在 MinerU 的模型仓库目录(非空)即视就绪。
+        # 不再用 venv 哨兵——哨兵会误判「模型已在 HF 缓存里但本 APP 没下过」的情形。
+        # 已知取舍(接受):成功一次后,若用户在 APP 外手动删了缓存模型,这里会立刻反映为
+        # 未就绪(真实探测,正是想要的行为)。
+        return detect_mineru_models(self._hf_cache_dir)
 
     def uv_bin(self) -> str:
         if self._uv_bin:
@@ -168,7 +211,7 @@ class MinerUProvisioner:
         return self._failed_stage
 
     def is_ready(self) -> bool:
-        # 必须是真实文件(目录占位不算就绪)+ 模型已下;保持廉价,不起子进程探测。
+        # 必须是真实文件(目录占位不算就绪)+ 模型已在缓存;保持廉价,不起子进程探测。
         return Path(self.mineru_bin()).is_file() and self._models_ready()
 
     @property
@@ -291,8 +334,8 @@ class MinerUProvisioner:
     ) -> str:
         """下模型(跑 <venv>/bin/mineru-models-download -s <model_source> -m all)。返回结束时 state。
 
-        hybrid 后端同时需要 pipeline 与 vlm 模型 → 传 -m all。成功后写 app-owned 就绪
-        sentinel(见 models_ready_sentinel)并清失败标志。
+        hybrid 后端同时需要 pipeline 与 vlm 模型 → 传 -m all。子进程把权重落进 HF/modelscope
+        缓存;就绪靠真实缓存检测(detect_mineru_models),不再写哨兵。成功后清失败标志。
         进度:未注入 models_runner(生产)且给了 progress_cb → 走 Popen 流式读 stderr 把
         下载进度逐条回调;注入了 models_runner(测试)或无 progress_cb → 一次性(不流式)。
         前提:已 provision(包就绪)。并发安全:下载中再调 no-op(返回当前 state),且唤醒
@@ -312,8 +355,8 @@ class MinerUProvisioner:
             # hybrid 需 pipeline + vlm 两套权重 → -m all。
             cmd = [self.models_download_bin(), "-s", model_source, "-m", "all"]
             self._run_models_or_fail(cmd, progress_cb)
-            # 仅在子进程成功后写 app-owned 就绪 sentinel(权威就绪标志),并清失败标志。
-            self.models_ready_sentinel().write_text("ready\n")
+            # 子进程成功 → 权重已落 HF/modelscope 缓存;就绪由 detect_mineru_models 检测。
+            # 仅清失败标志(不写哨兵)。
             with self._cv:
                 self._failed = False
                 self._failed_stage = None
@@ -321,7 +364,7 @@ class MinerUProvisioner:
             emit("模型下载完成")
         except Exception as e:  # noqa: BLE001 — 任何失败都落到 failed + last_error
             with self._cv:
-                # 注意:不删 sentinel——若曾成功下过,cached 模型仍可用(state 仍 ready);
+                # 注意:cached 模型若仍在缓存里(曾成功下过),state 仍 ready;
                 # 失败经 failed_stage + last_error 暴露,UI 据此显示重下失败。
                 self._failed = True
                 self._failed_stage = "download"
