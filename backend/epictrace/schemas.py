@@ -139,26 +139,10 @@ class SettingsOut(BaseModel):
     profiles: list[ProfileView]
 
 
-class ExtractionSettingsIn(BaseModel):
-    engine: str = "mineru"
-    effort: str
-    model_source: str
-
-
-class ExtractionSettingsOut(BaseModel):
-    engine: str
-    effort: str
-    model_source: str
-
-
 class ExtractionStatusOut(BaseModel):
-    # not_installed | installing | installed_no_models | downloading_models | ready | failed
-    state: str
+    state: str            # not_installed | installing | ready | failed
     ready: bool
     error: str | None = None
-    # install | download | None —— 区分装包失败与下模型失败,前端据此把「重试」指向正确动作。
-    # 即便 cached 模型仍可用(state==ready),一次失败的重下也经此 + error 暴露。
-    failed_stage: str | None = None
 
 
 class ReferenceCreate(BaseModel):

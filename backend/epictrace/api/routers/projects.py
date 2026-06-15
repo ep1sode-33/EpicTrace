@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from epictrace.api.deps import get_db, get_embedder, get_provisioner, get_vector_store
+from epictrace.api.deps import get_db, get_embedder, get_vector_store
 from epictrace.db import Database
 from epictrace.schemas import IndexStatusOut, ProjectCreate, ProjectOut, RenameIn, ScanResultOut
 from epictrace.services.index import IndexService
@@ -124,8 +124,7 @@ def index_project(project_id: int, request: Request, db: Database = Depends(get_
     _ensure_project(db, project_id)
     # vector store 传 getter 延迟构造:Milvus(gRPC)会在后台线程 warmup 模型之后才创建,
     # 避免 'gRPC 激活后再 fork 加载模型' 的段错误(见 services/index.py._run)。
-    svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request),
-                       provisioner=get_provisioner(request))
+    svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request))
     # 「检查在跑 + 启动新 job」整体在锁内,避免双击/重试/正在跑时再点起两个并发(破坏性)job。
     with request.app.state.index_lock:
         if _has_running_job(request, project_id):
@@ -147,8 +146,7 @@ def reindex_project(project_id: int, request: Request, db: Database = Depends(ge
     # 同 index_project:vector store 传 getter 延迟构造。注意 reindex_project 会在本请求线程里
     # 先 delete_by_project(同步清向量)——getter(get_vector_store)保证「先 warmup 模型再起
     # Milvus」,避免 'gRPC 激活后再 fork 加载模型' 段错误(见 deps.get_vector_store)。
-    svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request),
-                       provisioner=get_provisioner(request))
+    svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request))
     # 整段在锁内:先确认没有在跑的 job,再做 reindex_project 的破坏性清向量 + 翻回待索引 + 启动。
     # 否则双击/重试/正在跑时再点会触发两次并发的破坏性重建(本地工具,清向量无 build-then-swap)。
     with request.app.state.index_lock:

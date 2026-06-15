@@ -11,7 +11,6 @@ from epictrace.indexing.chunker import chunk_text
 from epictrace.interfaces.embedding import EmbeddingProvider
 from epictrace.interfaces.vector_store import VectorStore
 from epictrace.media import get_processor
-from epictrace.media.mineru import MinerUMediaProcessor
 from epictrace.models import IngestRecord
 
 
@@ -27,15 +26,13 @@ class IndexJob:
 
 
 class IndexService:
-    def __init__(self, db: Database, embedder: EmbeddingProvider, vector_store,
-                 provisioner=None) -> None:
+    def __init__(self, db: Database, embedder: EmbeddingProvider, vector_store) -> None:
         # vector_store 可以是 VectorStore 实例,或返回它的可调用(getter)。
         # 用 getter 时,Milvus(gRPC)的构造会被推迟到 _run 里、在 warmup 之后,
         # 避免 'gRPC 激活后再加载模型' 段错误(macOS)。
         self._db = db
         self._embedder = embedder
         self._vector_store = vector_store
-        self._provisioner = provisioner
 
     def _resolve_store(self) -> VectorStore:
         vs = self._vector_store
@@ -109,45 +106,11 @@ class IndexService:
         t.start()
         return t
 
-    def _ensure_models_ready(self, job: IndexJob) -> None:
-        """提取前的「门」:provisioner 为 installed_no_models 或 downloading_models 时,
-        阻塞到模型就绪(ensure_models_ready 内部:未下则下,正在下则等)。失败记进
-        job.errors(不静默),不抛(让后续 per-file 提取按既有失败路径各自呈现)。
-        无 provisioner / ready / not_installed → no-op。
-
-        downloading_models 也走这里阻塞等待——否则并发的第二条索引/提取会跳过、抢先提取。"""
-        prov = self._provisioner
-        if prov is None:
-            return
-        if getattr(prov, "state", None) not in ("installed_no_models", "downloading_models"):
-            return
-        from epictrace.services.settings import SettingsService
-
-        ext = SettingsService(self._db.config).get_extraction_settings()
-        try:
-            prov.ensure_models_ready(model_source=ext["model_source"])
-        except Exception as e:  # noqa: BLE001 — 失败不静默:记 job 级错误,后续 per-file 提取也会失败并各自记录
-            with job._lock:
-                job.errors.append(f"model download failed: {e}")
-
-    def _targets_need_mineru(self, targets: list) -> bool:
-        """本轮目标里是否有任一文件由 MinerU 处理(富文档)——只有它需要模型下载。"""
-        for _rec_id, path_str in targets:
-            proc = get_processor(Path(path_str), self._db.config)
-            if isinstance(proc, MinerUMediaProcessor):
-                return True
-        return False
-
     def _run(self, job: IndexJob) -> None:
         targets = getattr(job, "_targets", [])
         # 关键顺序:先加载模型(warmup),再构造/使用 Milvus(gRPC)。
         # 反过来(gRPC 已激活后再 fork 加载模型)会在 macOS 上段错误。
         self._embedder.warmup()
-        # 仅当本轮有富文档(走 MinerU)才确保模型就绪;纯文本/代码/数据文件(TextMediaProcessor)
-        # 即使 installed_no_models 也不该触发(几 GB 的)模型下载(FIX 2)。失败计入 job.errors
-        # (不静默),后续 per-file 提取也会各自记录。
-        if targets and self._targets_need_mineru(targets):
-            self._ensure_models_ready(job)
         store = self._resolve_store()
         for rec_id, path_str in targets:
             try:
