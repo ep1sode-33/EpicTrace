@@ -2,8 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   Check,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   Loader2,
   Pencil,
   Plug,
@@ -283,15 +281,15 @@ const ASR_MODEL_LABEL: Record<AsrModel, string> = {
 };
 
 /**
- * ASR(语音转写)设置区:模型大小下拉 + 下载/进度/状态,以及一个折叠的「高级」区
- * (VAD 开关 + 各阈值/确认纪律旋钮)。改动即 PUT 持久化(乐观更新 + 失败回滚),与 Extraction 同款。
+ * ASR(语音转写)设置区:模型大小下拉 + 下载/进度/状态。改动即 PUT 持久化
+ * (乐观更新 + 失败回滚),与 Extraction 同款。面向普通用户,不暴露 VAD/阈值旋钮
+ * (这些走后端默认 + 离线评测脚本调参,见 scripts/asr_eval.py)。
  */
 function AsrSection() {
   const [settings, setSettings] = useState<AsrSettings | null>(null);
   const [status, setStatus] = useState<AsrStatus | null>(null);
   const [busy, setBusy] = useState(false); // 下载进行中
   const [saving, setSaving] = useState(false); // 任一字段持久化中
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   // 进入页面:并行拉设置 + 状态。
@@ -414,152 +412,12 @@ function AsrSection() {
         </div>
       </div>
 
-      {/* 高级:VAD + 阈值/确认纪律旋钮(默认折叠;弱音/讲座调参用)。 */}
-      <button
-        type="button"
-        onClick={() => setAdvancedOpen((v) => !v)}
-        className="flex items-center gap-1 self-start text-xs font-medium text-muted-foreground hover:text-foreground"
-      >
-        {advancedOpen ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
-        高级设置
-      </button>
-
-      {advancedOpen && settings && (
-        <div className="flex flex-col gap-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-3">
-          {/* VAD 开关 */}
-          <label className="flex items-center justify-between gap-3 text-sm">
-            <span className="flex flex-col gap-0.5">
-              <span className="font-medium text-foreground">VAD(语音活动检测)</span>
-              <span className="text-[0.7rem] leading-relaxed text-muted-foreground">
-                静音段不喂模型,显著减少讲座停顿处的幻觉。
-              </span>
-            </span>
-            <input
-              type="checkbox"
-              checked={settings.vad}
-              disabled={saving}
-              onChange={(e) => update({ vad: e.target.checked })}
-              className="size-4 shrink-0 accent-primary"
-            />
-          </label>
-
-          {/* 幻觉过滤开关 */}
-          <label className="flex items-center justify-between gap-3 text-sm">
-            <span className="flex flex-col gap-0.5">
-              <span className="font-medium text-foreground">文本幻觉过滤</span>
-              <span className="text-[0.7rem] leading-relaxed text-muted-foreground">
-                丢弃「谢谢观看」「请订阅」等近静音脑补串。
-              </span>
-            </span>
-            <input
-              type="checkbox"
-              checked={settings.halluc_filter_enabled}
-              disabled={saving}
-              onChange={(e) => update({ halluc_filter_enabled: e.target.checked })}
-              className="size-4 shrink-0 accent-primary"
-            />
-          </label>
-
-          {/* RMS 归一化开关 */}
-          <label className="flex items-center justify-between gap-3 text-sm">
-            <span className="flex flex-col gap-0.5">
-              <span className="font-medium text-foreground">弱音 RMS 归一化</span>
-              <span className="text-[0.7rem] leading-relaxed text-muted-foreground">
-                把过弱的输入抬到目标响度后再转写(上限防噪声放大)。
-              </span>
-            </span>
-            <input
-              type="checkbox"
-              checked={settings.rms_normalize}
-              disabled={saving}
-              onChange={(e) => update({ rms_normalize: e.target.checked })}
-              className="size-4 shrink-0 accent-primary"
-            />
-          </label>
-
-          {/* 数值阈值 */}
-          <NumberField id="asr-vad-threshold" label="VAD 阈值" value={settings.vad_threshold}
-            step={0.05} min={0} max={1} disabled={saving || !settings.vad}
-            hint="越高越严格(更易把弱音判为静音)。"
-            onCommit={(v) => update({ vad_threshold: v })} />
-          <NumberField id="asr-no-speech" label="no_speech 阈值" value={settings.no_speech}
-            step={0.05} min={0} max={1} disabled={saving}
-            hint="解码回退触发器,非过滤器。默认 0.6。"
-            onCommit={(v) => update({ no_speech: v })} />
-          <NumberField id="asr-compression" label="compression_ratio 阈值" value={settings.compression_ratio}
-            step={0.1} min={0} disabled={saving}
-            hint="过高的压缩比触发温度回退。默认 2.4。"
-            onCommit={(v) => update({ compression_ratio: v })} />
-          <NumberField id="asr-force-confirm" label="force_confirm_after(轮)" value={settings.force_confirm_after}
-            step={1} min={1} disabled={saving}
-            hint="连续 N 轮无进展则强制确认当前段,防弱音卡死。"
-            onCommit={(v) => update({ force_confirm_after: Math.round(v) })} />
-        </div>
-      )}
-
       {(err || status?.error) && (
         <p className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
           {err || status?.error}
         </p>
       )}
     </section>
-  );
-}
-
-/**
- * 数值旋钮:本地 string 态编辑,失焦/回车时 onCommit(数值)。空值/非数不提交(回填原值)。
- * 与 AsrSection 的乐观持久化配合——一次提交一个键,失败回滚由调用方处理。
- */
-function NumberField({
-  id, label, value, step, min, max, disabled, hint, onCommit,
-}: {
-  id: string;
-  label: string;
-  value: number;
-  step: number;
-  min?: number;
-  max?: number;
-  disabled?: boolean;
-  hint?: string;
-  onCommit: (v: number) => void;
-}) {
-  const [text, setText] = useState(String(value));
-  // 外部值变化(回滚/重载)时同步本地态。
-  useEffect(() => setText(String(value)), [value]);
-
-  const commit = () => {
-    const v = Number(text);
-    if (text.trim() === "" || Number.isNaN(v) || v === value) {
-      setText(String(value)); // 非法/未变 → 回填
-      return;
-    }
-    onCommit(v);
-  };
-
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label htmlFor={id} className="text-xs font-medium text-muted-foreground">{label}</label>
-      <Input
-        id={id}
-        type="number"
-        inputMode="decimal"
-        value={text}
-        step={step}
-        min={min}
-        max={max}
-        disabled={disabled}
-        className="h-9 font-mono text-xs"
-        onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            commit();
-          }
-        }}
-      />
-      {hint && <p className="-mt-0.5 text-[0.7rem] leading-relaxed text-muted-foreground">{hint}</p>}
-    </div>
   );
 }
 

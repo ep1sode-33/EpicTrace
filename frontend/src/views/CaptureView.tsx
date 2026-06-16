@@ -39,9 +39,17 @@ function sourceEmoji(meta: Record<string, unknown>): string {
 }
 
 export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => void } = {}) {
-  const [selectedSources, setSelectedSources] = useState<Set<string>>(
-    new Set(["note", "clipboard", "screenshot"]),
-  );
+  const [selectedSources, setSelectedSources] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem("epictrace.capture.sources");
+      if (saved) return new Set<string>(JSON.parse(saved) as string[]);
+    } catch {
+      /* 忽略损坏的本地存储 */
+    }
+    return new Set<string>(); // 首次默认全不勾选,不替用户做主
+  });
+  // 语音模型是否就绪(null=未知/加载中);决定能否开音频源转录。
+  const [asrReady, setAsrReady] = useState<boolean | null>(null);
   const [session, setSession] = useState<CaptureSessionDetail | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [paused, setPaused] = useState(false);
@@ -54,6 +62,23 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const elapsedRef = useRef(0); // 同步 ref 供 timer 使用
+
+  // 记住上次选的采集源(下次进来恢复)。
+  useEffect(() => {
+    try {
+      localStorage.setItem("epictrace.capture.sources", JSON.stringify([...selectedSources]));
+    } catch {
+      /* 忽略 */
+    }
+  }, [selectedSources]);
+
+  // 拉一次语音模型就绪状态(决定音频源能否开)。
+  useEffect(() => {
+    api
+      .getAsrStatus()
+      .then((s) => setAsrReady(s.ready))
+      .catch(() => setAsrReady(null));
+  }, []);
 
   // 检查启动时是否已有活动 session(页面刷新/重新进入时恢复状态)
   useEffect(() => {
@@ -141,10 +166,27 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
   }
 
   async function handleStart() {
+    const sources = Array.from(selectedSources);
+    const audioSelected = sources.includes("mic") || sources.includes("system_audio");
+    if (audioSelected) {
+      // 模型没下却开音频源 → 会静默漏录转写(用户以为在转,其实没转)。硬挡。
+      let ready = asrReady;
+      try {
+        ready = (await api.getAsrStatus()).ready;
+        setAsrReady(ready);
+      } catch {
+        /* 拉取失败用已知值 */
+      }
+      if (!ready) {
+        setError(
+          "语音模型未下载,麦克风/系统声音不会被转录(会漏录重要内容)。请先到「设置 → ASR」下载模型,或取消勾选音频源。",
+        );
+        return;
+      }
+    }
     setStarting(true);
     setError(null);
     try {
-      const sources = Array.from(selectedSources);
       const sess = await api.startSession(sources);
       // 拉取 detail（含 events 和 elapsed_seconds）
       const detail = await api.getSession(sess.id);
@@ -280,9 +322,21 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
                   strokeWidth={1.75}
                 />
                 <span className="flex-1 text-sm font-medium text-foreground">{label}</span>
+                {(id === "mic" || id === "system_audio") && asrReady === false && (
+                  <span className="rounded-full border border-amber-600/25 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-300">
+                    需下载模型
+                  </span>
+                )}
               </li>
             ))}
           </ul>
+
+          {asrReady === false &&
+            (selectedSources.has("mic") || selectedSources.has("system_audio")) && (
+              <p className="mt-3 text-xs text-amber-700 dark:text-amber-400">
+                ⚠ 语音模型未下载,音频源不会转录 —— 请先到「设置 → ASR」下载。
+              </p>
+            )}
 
           <Button
             className="mt-8 gap-1.5"
