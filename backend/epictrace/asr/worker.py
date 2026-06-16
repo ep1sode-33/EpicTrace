@@ -188,7 +188,6 @@ def main(argv: list[str] | None = None) -> int:
     from epictrace.asr.loop import StreamLoop
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    engine = _build_engine(cfg, str(cache_dir))
 
     # SIGTERM(supervisor stop 发出)→ 置停止标志,主循环检测后退出,finally 兜底 flush + 关 wav。
     stop_flag = {"stop": False}
@@ -198,6 +197,9 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, _on_sigterm)
 
+    # 冷启动(STEP 2):先起音源 + 开 wav,让 RingBuffer 从 session 打开那一刻就开始攒 PCM、
+    # wav 立刻开录;模型加载(可能数秒)期间的说话不再丢失。RingBuffer/base_offset 保住绝对
+    # 时间,配合 STEP 1 的有界滑窗,首批 tick 会在窗口内追上开局攒下的 backlog。
     # 起选中音源。worker 内部用 mic/device 二元通道命名(system_audio → device)。
     sources: dict[str, object] = {}
     wavs: dict[str, object] = {}
@@ -226,6 +228,12 @@ def main(argv: list[str] | None = None) -> int:
         _log.error("ASR worker: no audio source started, exiting")
         return 1
 
+    # 启动诊断:采集已起、PCM 正在攒 —— 在(可能耗时的)模型加载之前就让真机终端确认。
+    print(f"[EpicTrace ASR] worker 启动(采集已起,加载模型中): session={args.session_id} "
+          f"sources={list(sources.keys())} model={cfg.model}", flush=True)
+
+    # 采集已 live,RingBuffer 开始攒 PCM;现在才加载模型 + 建 StreamLoop(STEP 2)。
+    engine = _build_engine(cfg, str(cache_dir))
     loop = StreamLoop(
         engine, cfg,
         on_confirmed=lambda seg: _post_confirmed(args.session_id, seg),
@@ -235,10 +243,6 @@ def main(argv: list[str] | None = None) -> int:
     # 静音只是把对应通道从「被读取/转写/落 wav」中剔除(loop.set_sources 仅喂活跃源)。
     active: set[str] = set(sources.keys())
     loop.set_sources(dict(sources))
-
-    # 启动诊断:让真机终端能确认 worker 跑起来了 + 起了哪些源。
-    print(f"[EpicTrace ASR] worker 启动: session={args.session_id} "
-          f"sources={list(sources.keys())} model={cfg.model}", flush=True)
 
     written = {ch: 0 for ch in sources}
     last_diag = time.time()
