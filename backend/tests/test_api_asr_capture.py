@@ -223,6 +223,46 @@ def test_non_audio_session_not_gated_when_model_absent(tmp_path):
     assert prov.asked == []                        # 非音频源根本不查就绪态
 
 
+def test_asr_mute_post_then_get(tmp_path):
+    """Feature B:POST asr-mute 软静音一路 → GET 返回该 session 的 muted 列表。"""
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions",
+                 json={"sources": ["mic", "system_audio"]}).json()["id"]
+    # 初始无静音。
+    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": []}
+    # 静音 system_audio → 204 + GET 反映。
+    r = c.post(f"/api/capture/sessions/{sid}/asr-mute",
+               json={"source": "system_audio", "muted": True})
+    assert r.status_code == 204
+    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": ["system_audio"]}
+
+
+def test_asr_mute_then_unmute_clears(tmp_path):
+    """Feature B:静音后取消静音 → muted 列表清空(不残留)。重复静音不重复入列。"""
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions",
+                 json={"sources": ["mic", "system_audio"]}).json()["id"]
+    c.post(f"/api/capture/sessions/{sid}/asr-mute", json={"source": "mic", "muted": True})
+    # 重复静音同源:幂等,不出现两次。
+    c.post(f"/api/capture/sessions/{sid}/asr-mute", json={"source": "mic", "muted": True})
+    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": ["mic"]}
+    # 取消静音 → 清空。
+    c.post(f"/api/capture/sessions/{sid}/asr-mute", json={"source": "mic", "muted": False})
+    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": []}
+
+
+def test_asr_mute_cleared_on_stop(tmp_path):
+    """Feature B:停止 session 清掉其 muted 条目(下次同 id 不串状态)。"""
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
+    c.post(f"/api/capture/sessions/{sid}/asr-mute", json={"source": "mic", "muted": True})
+    c.post(f"/api/capture/sessions/{sid}/stop")
+    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": []}
+
+
 def test_start_supervisor_error_does_not_block_session(tmp_path):
     class _Boom:
         def start(self, **kw):

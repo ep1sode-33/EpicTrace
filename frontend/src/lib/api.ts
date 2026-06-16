@@ -247,6 +247,15 @@ export const api = {
   getSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}`).then(j<CaptureSessionDetail>),
   // 实时暂定段快照(内存态,不落库)。HUD 在现有轮询里与 getSession 一起拉,渲染为「暂定」行。
   getSessionPartial: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}/partial`).then(j<CapturePartial>),
+  // 软静音集(内存态):被静音的音频源 id 列表("mic"/"system_audio")。worker 周期性轮询同一接口。
+  getAsrMute: (sid: number) =>
+    fetch(`${BASE}/api/capture/sessions/${sid}/asr-mute`).then(j<{ muted: string[] }>),
+  // 软静音切换某路音频源(不重启 worker):204,无 body。
+  setAsrMute: (sid: number, source: string, muted: boolean) =>
+    fetch(`${BASE}/api/capture/sessions/${sid}/asr-mute`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, muted }),
+    }).then(() => {}),
   appendEvent: (sid: number, kind: string, payload = "") =>
     fetch(`${BASE}/api/capture/sessions/${sid}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, payload }) }).then(j<CaptureEvent>),
   pauseSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}/pause`, { method: "POST" }).then(() => {}),

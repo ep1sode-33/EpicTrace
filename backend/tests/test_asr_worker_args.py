@@ -78,6 +78,26 @@ def test_worker_main_fails_fast_when_model_absent(tmp_path, monkeypatch):
     assert rc == 1
 
 
+def test_active_channels_from_muted():
+    """Feature B:由「已起的 worker 通道集」+「前端静音源 id 列表」算出仍活跃的通道。
+
+    前端源 id(mic/system_audio)→ worker 通道(mic/device);静音的源对应的通道被剔除,
+    其余保留。未起的源即便出现在静音列表里也无副作用。"""
+    from epictrace.asr.worker import active_channels
+
+    started = {"mic", "device"}
+    # 无静音 → 全活跃。
+    assert active_channels(started, []) == {"mic", "device"}
+    # 静音 system_audio(→device)→ 只剩 mic。
+    assert active_channels(started, ["system_audio"]) == {"mic"}
+    # 静音 mic → 只剩 device。
+    assert active_channels(started, ["mic"]) == {"device"}
+    # 两路都静音 → 空集。
+    assert active_channels(started, ["mic", "system_audio"]) == set()
+    # 静音了一个根本没起的源 → 不影响已起的。
+    assert active_channels({"mic"}, ["system_audio"]) == {"mic"}
+
+
 def test_shutdown_stops_sources_and_closes_wavs():
     """FIX B:收尾函数停所有源 + 关所有 wav;一处异常不漏其余。"""
     from epictrace.asr.worker import _shutdown

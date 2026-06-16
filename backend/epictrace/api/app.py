@@ -67,6 +67,9 @@ def create_app(
     # partial(实时暂定段)内存态:session_id -> {source: text}。confirmed 段走持久事件,
     # partial 不落库,仅经 SSE 推 HUD。
     app.state.asr_partials = {}
+    # ASR 软静音内存态:session_id -> [muted 前端源 id]("mic"/"system_audio")。
+    # worker 周期性轮询某 session 的静音集,软静音的源不被读取/转写/落 wav(不重启 worker)。
+    app.state.asr_muted = {}
     app.state.index_jobs = {}  # project_id -> IndexJob(最近一次)
     # 守护 index/reindex 的「检查在跑 + 启动新 job」临界区:双击/重试/正在跑时再点
     # 不应起第二个并发的(破坏性)重建。见 routers/projects.py。

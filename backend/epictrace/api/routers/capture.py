@@ -16,6 +16,7 @@ from epictrace.api.deps import (
 from epictrace.db import Database
 from epictrace.schemas import (
     AppendEventIn,
+    AsrMuteIn,
     CaptureEventOut,
     CaptureSessionDetailOut,
     CaptureSessionOut,
@@ -205,6 +206,7 @@ def stop_session(sid: int, request: Request, db: Database = Depends(get_db)) -> 
     _stop_asr(request, sid)
     sess = svc.stop(sid)  # 此刻才翻 staged
     request.app.state.asr_partials.pop(sid, None)  # 清掉该 session 的内存态 partial
+    request.app.state.asr_muted.pop(sid, None)      # 清掉软静音集(下次同 id 不串状态)
     return CaptureSessionOut.model_validate(sess)
 
 
@@ -220,6 +222,32 @@ def get_partial(sid: int, request: Request) -> dict:
     """读该 session 的实时暂定段快照({source: text})。供 HUD 现有 1.5s 轮询(不另起 SSE)
     与 getSession 一起拉取;内存态、无则空 dict。"""
     return dict(request.app.state.asr_partials.get(sid, {}))
+
+
+@router.post("/sessions/{sid}/asr-mute", status_code=status.HTTP_204_NO_CONTENT)
+def set_asr_mute(sid: int, payload: AsrMuteIn, request: Request) -> None:
+    """软静音切换某路音频源(Feature B):更新该 session 的 muted 集(内存态),不重启 worker。
+
+    worker 周期性轮询 GET 接口拿到此集后,软静音的源不再被读取/转写/落 wav(源对象仍存活)。
+    幂等:重复静音同源不重复入列;取消静音移除;空集不残留键。
+    """
+    muted_map: dict[int, list[str]] = request.app.state.asr_muted
+    cur = list(muted_map.get(sid, []))
+    if payload.muted:
+        if payload.source not in cur:
+            cur.append(payload.source)
+    else:
+        cur = [s for s in cur if s != payload.source]
+    if cur:
+        muted_map[sid] = cur
+    else:
+        muted_map.pop(sid, None)
+
+
+@router.get("/sessions/{sid}/asr-mute")
+def get_asr_mute(sid: int, request: Request) -> dict:
+    """读该 session 的软静音集(内存态)。worker 周期性轮询;无则空列表。"""
+    return {"muted": list(request.app.state.asr_muted.get(sid, []))}
 
 
 @router.patch("/sessions/{sid}", response_model=CaptureSessionOut)
@@ -238,6 +266,7 @@ def delete_session(sid: int, request: Request, db: Database = Depends(get_db)) -
     # 先停 ASR worker(若仍在跑),再删 session + staging(避免 worker 还往已删目录写 wav)。
     _stop_asr(request, sid)
     request.app.state.asr_partials.pop(sid, None)
+    request.app.state.asr_muted.pop(sid, None)
     try:
         CaptureService(db).delete(sid)
     except CaptureSessionNotFound:

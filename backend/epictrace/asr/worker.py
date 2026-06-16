@@ -30,6 +30,30 @@ _BACKEND = "http://127.0.0.1:8765"
 # worker 内部把 system_audio 源映射成 StreamState/事件里的 "device"(spec 用 mic/device 二元)。
 _SOURCE_TO_CHANNEL = {"mic": "mic", "system_audio": "device"}
 _TICK_INTERVAL = 0.5  # 秒:两路交替循环每轮间隔
+_MUTE_POLL_INTERVAL = 1.0  # 秒:轮询后端软静音集的间隔(比 0.5s tick 慢,避免每轮打网络)
+
+
+def active_channels(started: set[str], muted_sources: list[str]) -> set[str]:
+    """由已起的 worker 通道集 + 前端静音源 id 列表,算出仍活跃(应被读取/转写/落 wav)的通道。
+
+    纯函数(可单测):前端源 id(mic/system_audio)经 _SOURCE_TO_CHANNEL 映射成 worker 通道
+    (mic/device),从已起通道集里剔除被静音的;未起的源即便在静音列表里也无副作用。
+    """
+    muted_channels = {_SOURCE_TO_CHANNEL[s] for s in muted_sources if s in _SOURCE_TO_CHANNEL}
+    return {ch for ch in started if ch not in muted_channels}
+
+
+def _fetch_muted(session_id: int) -> list[str]:
+    """GET 后端某 session 的软静音集;失败回空(网络抖动不应误静音/误恢复)。"""
+    url = f"{_BACKEND}/api/capture/sessions/{session_id}/asr-mute"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        muted = data.get("muted", [])
+        return list(muted) if isinstance(muted, list) else []
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        _log.warning("ASR worker GET asr-mute failed: %s", e)
+        return []
 
 
 @dataclass(frozen=True)
@@ -207,7 +231,10 @@ def main(argv: list[str] | None = None) -> int:
         on_confirmed=lambda seg: _post_confirmed(args.session_id, seg),
         on_partial=lambda seg: _post_partial(args.session_id, seg),
     )
-    loop.set_sources(sources)
+    # 当前活跃通道集(软静音逻辑维护):初始全部已起的通道。源对象始终存活,
+    # 静音只是把对应通道从「被读取/转写/落 wav」中剔除(loop.set_sources 仅喂活跃源)。
+    active: set[str] = set(sources.keys())
+    loop.set_sources(dict(sources))
 
     # 启动诊断:让真机终端能确认 worker 跑起来了 + 起了哪些源。
     print(f"[EpicTrace ASR] worker 启动: session={args.session_id} "
@@ -215,9 +242,22 @@ def main(argv: list[str] | None = None) -> int:
 
     written = {ch: 0 for ch in sources}
     last_diag = time.time()
+    last_mute_poll = time.time()
     try:
         while not stop_flag["stop"]:
+            # 周期性轮询软静音集(比 0.5s tick 慢):重算活跃通道,变化才更新 loop 的源集。
+            # 软静音的通道不被读取/落 wav(下方按 active 过滤),且不喂 loop(不被转写)。
+            now = time.time()
+            if now - last_mute_poll >= _MUTE_POLL_INTERVAL:
+                last_mute_poll = now
+                next_active = active_channels(set(sources.keys()),
+                                              _fetch_muted(args.session_id))
+                if next_active != active:
+                    active = next_active
+                    loop.set_sources({ch: sources[ch] for ch in active})
             for channel, s in sources.items():
+                if channel not in active:
+                    continue  # 软静音:不读、不落 wav
                 pcm = s.read()
                 # 增量把新样本写入 wav(read 返回全量,只写未写过的尾巴)。
                 if pcm.shape[0] > written[channel]:
@@ -230,6 +270,9 @@ def main(argv: list[str] | None = None) -> int:
             if now - last_diag >= 5.0:
                 last_diag = now
                 for channel, s in sources.items():
+                    if channel not in active:
+                        print(f"[EpicTrace ASR] {channel}: 已软静音(不转写/不落 wav)", flush=True)
+                        continue
                     buf = s.read()
                     if buf.size:
                         recent = buf[-SAMPLE_RATE * 2:]  # 最近 ~2s

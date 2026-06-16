@@ -279,3 +279,9 @@ class OrganizeIn(BaseModel):
 class PartialIn(BaseModel):
     source: str  # "mic" | "device"
     text: str
+
+
+class AsrMuteIn(BaseModel):
+    """软静音切换:source 为前端源 id("mic"|"system_audio"),muted=True 静音 / False 取消。"""
+    source: str
+    muted: bool
