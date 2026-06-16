@@ -42,15 +42,27 @@ function fmtRel(secs: number): string {
   return `+${m}:${s}`;
 }
 
-/** 事件图标 */
-function kindIcon(kind: string): string {
+/** 时间线圆点颜色(按事件类型) */
+function dotColor(kind: string): string {
   switch (kind) {
-    case "note": return "✏️";
-    case "clipboard": return "📋";
-    case "screenshot": return "📷";
-    case "pause": return "⏸";
-    case "resume": return "▶️";
-    default: return "•";
+    case "note": return "bg-sky-500";
+    case "clipboard": return "bg-zinc-400";
+    case "screenshot": return "bg-violet-500";
+    case "pause": return "bg-amber-500";
+    case "resume": return "bg-emerald-500";
+    default: return "bg-muted-foreground";
+  }
+}
+
+/** 事件类型中文标签 */
+function kindLabel(kind: string): string {
+  switch (kind) {
+    case "note": return "笔记";
+    case "clipboard": return "剪贴板";
+    case "screenshot": return "截图";
+    case "pause": return "暂停";
+    case "resume": return "继续";
+    default: return kind;
   }
 }
 
@@ -210,14 +222,13 @@ export function CaptureStagingView({ onOrganized }: Props) {
                               </span>
                               {/* 时间线节点 */}
                               <span className="relative z-10 mt-1 flex size-3 shrink-0 items-center justify-center">
-                                <span className="size-2 rounded-full bg-border" aria-hidden />
+                                <span className={`size-2 rounded-full ${dotColor(ev.kind)}`} aria-hidden />
                               </span>
                               {/* 事件内容 */}
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-1.5">
-                                  <span className="text-sm">{kindIcon(ev.kind)}</span>
-                                  <span className="text-xs font-medium text-foreground capitalize">
-                                    {ev.kind}
+                                  <span className="text-xs font-medium text-foreground">
+                                    {kindLabel(ev.kind)}
                                   </span>
                                 </div>
                                 {ev.payload && (
