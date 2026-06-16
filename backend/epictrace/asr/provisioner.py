@@ -13,29 +13,39 @@ DownloadRunner = Callable[[str, Path, ProgressCb], None]
 _log = logging.getLogger("epictrace")
 
 # 默认 HuggingFace hub 缓存根。faster-whisper(WhisperModel(model, download_root=...))把权重落进
-# 这里,仓库目录命名形如 `models--Systran--faster-whisper-<model>`;distil 系列经第三方镜像,
-# 目录名形如 `models--*distil*<model>*`(owner 不固定),故两族 glob 都查。
+# 这里,仓库目录命名形如 `models--<owner>--<repo>`。
 _DEFAULT_HF_CACHE_DIR = Path.home() / ".cache" / "huggingface" / "hub"
+
+# 模型名 → faster-whisper 解析出的 HF repo 名(取自 faster_whisper.utils._MODELS)。distil 系列
+# 解析到 faster-distil-whisper-<...>,目录是 models--Systran--faster-distil-whisper-large-v3,
+# 旧的 `faster-whisper-distil-large-v3` glob 命不中(FIX G)。普通模型解析到 faster-whisper-<model>。
+_DISTIL_REPO = {
+    "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+    "distil-large-v2": "Systran/faster-distil-whisper-large-v2",
+}
+
+
+def _repo_glob(model: str) -> str:
+    """返回该模型在 HF 缓存里期望的目录名 glob(models--<owner>--<repo>)。"""
+    repo = _DISTIL_REPO.get(model)
+    if repo is not None:
+        return "models--" + repo.replace("/", "--")
+    # 普通模型:Systran/faster-whisper-<model>。
+    return f"models--Systran--faster-whisper-{model}"
 
 
 def detect_asr_model(cache_dir: Path, model: str) -> bool:
     """检测 HF 缓存里是否已下该 faster-whisper 模型。
 
     纯文件系统探测,不起子进程;缓存根不存在 → False(不崩)。
-    匹配 Systran 官方仓库目录(models--Systran--faster-whisper-<model>)或 distil 镜像
-    (models--*distil*<model>*),任一命中即视为就绪。
+    按模型名解析出对应 HF repo 目录(distil 走别名映射,见 _DISTIL_REPO),命中即就绪。
     """
     if not cache_dir.is_dir():
         return False
-    globs = (
-        f"models--Systran--faster-whisper-{model}",
-        f"models--*distil*{model}*",
-    )
     try:
-        for g in globs:
-            for entry in cache_dir.glob(g):
-                if entry.is_dir():
-                    return True
+        for entry in cache_dir.glob(_repo_glob(model)):
+            if entry.is_dir():
+                return True
     except OSError:
         return False
     return False

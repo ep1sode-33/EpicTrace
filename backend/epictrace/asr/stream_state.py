@@ -29,10 +29,10 @@ class StreamState:
             return False
         return True
 
-    def _confirm(self, seg: TranscriptSegment, out: list[TranscriptSegment], *,
-                 force: bool = False) -> None:
-        # force=True 为弱音强制确认(never-drop 逃生口):跳过幻觉/去重门,无条件确认。
-        if force or self._accept(seg):
+    def _confirm(self, seg: TranscriptSegment, out: list[TranscriptSegment]) -> None:
+        # 只在通过幻觉/去重门时才 emit(confirmed 落库);不通过仅推游标(不丢音、不写垃圾)。
+        # stall 恢复的强制确认也走这里 —— 故幻觉永不会作为 confirmed 进存储(FIX E)。
+        if self._accept(seg):
             self._recent.append(seg.text)
             out.append(TranscriptSegment(
                 text=self._filter.clean(seg.text), start=seg.start, end=seg.end,
@@ -49,11 +49,12 @@ class StreamState:
             self.partial = segments[-1]
             self._rounds_no_progress = 0
         else:
-            # 只有一段:作 partial;连续 N 轮没新确认后再来一轮 → 强制确认它(弱音防卡死)
+            # 只有一段:作 partial;连续 N 轮没新确认后再来一轮 → 强制确认它(弱音防卡死)。
+            # 强制确认仍跑过滤门:幻觉/重复只推游标不 emit,真实文本才落库(FIX E)。
             self.partial = segments[0]
             self._rounds_no_progress += 1
             if self._rounds_no_progress > self._force_after:
-                self._confirm(segments[0], out, force=True)
+                self._confirm(segments[0], out)
                 self.partial = None
                 self._rounds_no_progress = 0
         if out:

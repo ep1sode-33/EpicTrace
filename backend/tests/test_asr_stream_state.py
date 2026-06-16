@@ -32,6 +32,27 @@ def test_force_confirm_after_no_progress():
     assert any("勉强这一句" in c.text for c in confirmed)
 
 
+def test_force_path_drops_hallucination_but_advances_cursor():
+    """FIX E:force 强制确认路径也跑幻觉过滤;幻觉段不 emit,但游标仍推进(防卡死、不写垃圾)。"""
+    st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=2)
+    for _ in range(2):
+        st.ingest([_seg("谢谢观看", 0, 2)])
+    confirmed = st.ingest([_seg("谢谢观看", 0, 2)])
+    assert confirmed == []                      # 幻觉不落库
+    assert st.last_confirmed_end == 2.0         # 但游标推进(stall 恢复)
+    assert st.partial is None
+
+
+def test_force_path_emits_real_text():
+    """FIX E:force 路径遇真实文本则正常 emit。"""
+    st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=2)
+    for _ in range(2):
+        st.ingest([_seg("真实有效的一句话", 0, 2)])
+    confirmed = st.ingest([_seg("真实有效的一句话", 0, 2)])
+    assert any("真实有效的一句话" in c.text for c in confirmed)
+    assert st.last_confirmed_end == 2.0
+
+
 def test_duplicate_confirmed_suppressed():
     st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=4)
     st.ingest([_seg("重复句", 0, 2), _seg("x", 2, 3)])
