@@ -243,18 +243,44 @@ def test_slice_start_clamped_to_base_offset():
     assert src.windowed_from[-1] == 20.0
 
 
-def test_slice_start_bounded_by_window_seconds():
-    """STEP 1:cursor 远落后于 tail(120s 未确认)→ slice 起点被 window_seconds 上界夹住,
-    只喂引擎尾部 ~window_seconds,而非整段 120s。"""
+def test_slice_bounded_window_when_caught_up():
+    """STEP 1:已扫描追上(backlog ≤ window)且确认游标远落后 tail → 切片起点被 window 上界夹住,
+    只喂引擎尾部 ~window,而非整段。(scanned_end 接近 tail = 正常滑窗 regime。)"""
     eng = _FakeEngine({"mic": []})
     cfg = AsrConfig.from_dict({"window_seconds": 10.0})
     loop = StreamLoop(eng, cfg, on_confirmed=lambda s: None, on_partial=lambda s: None)
-    # mic:base 0,available 120,cursor 0 → 未处理 120s;但窗口上界让切片只从 110s 起。
+    # mic:base 0,available 120,scanned_end 已到 115(backlog 5 ≤ window 10)→ 正常滑窗 regime。
     src = _FakeSource(base=0.0, available=120.0)
     loop.set_sources({"mic": src, "device": _FakeSource(base=0.0, available=0.0)})
+    loop._states["mic"].scanned_end = 115.0  # 已追上(距 tail 仅 5s,在 window 内)
+    # 但确认游标(last_confirmed_end)落后 → 切片仍被 tail-window 上界夹住。
     loop.tick()
-    # slice_start_abs = max(cursor=0, available-window=110, base=0) = 110
+    # slice_start_abs = max(cursor=0, tail-window=110, base=0) = 110
     assert src.windowed_from[-1] == 110.0
+
+
+def test_cold_start_catch_up_scans_backlog_in_bounded_chunks():
+    """FIX F:长模型加载后冷启动 backlog 远超 window(90s)→ 从缓冲头向前分块逐 tick 扫,
+    每块 ~window,直到追到距 tail < window。全程被扫到,无任何音频被静默跳过。"""
+    eng = _FakeEngine({"mic": []})  # 0 段也得推进(模拟静音/纯背景)
+    cfg = AsrConfig.from_dict({"window_seconds": 28.0})
+    loop = StreamLoop(eng, cfg, on_confirmed=lambda s: None, on_partial=lambda s: None)
+    # mic:base 0,available 90s backlog(模型加载期攒下),scanned_end 初始 0。
+    src = _FakeSource(base=0.0, available=90.0)
+    loop.set_sources({"mic": src, "device": _FakeSource(base=0.0, available=0.0)})
+    # 逐 tick 跑到追上(backlog ≤ window)。每 tick 至多扫一块 ~window。
+    for _ in range(20):
+        loop.tick()
+        if 90.0 - loop._states["mic"].scanned_end <= cfg.window_seconds:
+            break
+    starts = src.windowed_from
+    # 第一块必须从缓冲头 0 开始(绝不跳到 tail-window=62 把前 62s 丢掉)。
+    assert starts[0] == 0.0
+    # 各块起点单调递增、步长 ~window,直到 scanned_end 追到距 tail < window。
+    assert loop._states["mic"].scanned_end >= 90.0 - cfg.window_seconds
+    # 已扫描区间无空洞:相邻块起点差不超过 window(块首尾相接,不跳段)。
+    for a, b in zip(starts, starts[1:]):
+        assert 0 < b - a <= cfg.window_seconds + 1e-6
 
 
 def test_window_seconds_never_exceeds_base_offset_clamp():

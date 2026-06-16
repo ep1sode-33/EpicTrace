@@ -62,25 +62,30 @@ class StreamLoop:
             return
         self._transcribe_channel(ch)
 
-    def _transcribe_channel(self, ch: str, slice_start_override: float | None = None) -> None:
+    def _transcribe_channel(self, ch: str) -> None:
         """转写某路自游标起的未处理切片一次,平移回绝对时间,喂 StreamState 并 emit。
 
-        slice_start_override:冷启动追赶(FIX F)时从已扫描游标向前分块,显式给定切片起点;
-        正常情形为 None(走有界滑窗的 tail 回看)。两种情形末尾都推进 scanned_end 到切片末端
-        (含 0 段;FIX B)使调度按未扫描量排序。"""
+        两种切片regime(按「未扫描 backlog = tail - scanned_end」自动选,FIX F):
+        - **追赶**(backlog > window_seconds,如长模型加载后冷启动 backlog / 久未被调度的源):
+          从 scanned_end/缓冲头向前切一块 ~window_seconds,逐 tick 推进,直到追到距 tail 不足
+          window_seconds——绝不直接跳到 tail-window 把开局攒下的 backlog 静默丢掉。每 tick 至多
+          一块,不阻塞。
+        - **正常滑窗**(backlog ≤ window_seconds):切片起点 = max(确认游标, tail-window, 缓冲头),
+          切到 tail。游标推进 + tail-window 上界把回看夹在 ~window 内(长 session 不重转整段)。
+
+        两种情形末尾都推进 scanned_end 到切片末端(含 0 段;FIX B)使调度按未扫描量排序。"""
         src = self._sources[ch]
         st = self._states[ch]
         tail = src.available_seconds()
         window = self._cfg.window_seconds
-        if slice_start_override is not None:
-            # 冷启动追赶:从 scanned 游标向前 ~window 一块(夹在缓冲头内);切片末端是块尾而非 tail。
-            slice_start_abs = max(slice_start_override, src.base_offset())
+        base = src.base_offset()
+        if tail - st.scanned_end > window:
+            # 追赶:从已扫描游标(夹在缓冲头内)向前切一块 ~window;切片末端是块尾而非 tail。
+            slice_start_abs = max(st.scanned_end, base)
             slice_end_abs = min(tail, slice_start_abs + window)
         else:
-            # 切片起点(STEP 1 有界滑窗):游标 / tail 回看 window_seconds / 缓冲头 三者取大——
-            # 游标负责正常推进,tail-window 上界把回看夹在 ~window_seconds 内(长 session 不重转
-            # 整段),base_offset 下界保证不越缓冲头。
-            slice_start_abs = max(st.last_confirmed_end, tail - window, src.base_offset())
+            # 正常有界滑窗(STEP 1):游标 / tail 回看 window / 缓冲头 三者取大,切到 tail。
+            slice_start_abs = max(st.last_confirmed_end, tail - window, base)
             slice_end_abs = tail
         pcm = src.window_from(slice_start_abs)
         prefix = st.partial.text if st.partial else ""
