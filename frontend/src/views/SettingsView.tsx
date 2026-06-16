@@ -276,7 +276,6 @@ const ASR_STATE_LABEL: Record<AsrStatus["state"], string> = {
 
 const ASR_MODEL_LABEL: Record<AsrModel, string> = {
   "large-v3": "large-v3 —— 质量最高(默认)",
-  "distil-large-v3": "distil-large-v3 —— 更快,质量接近",
   medium: "medium —— 速度/质量折中",
   small: "small —— 最快,质量较低",
 };
@@ -387,7 +386,7 @@ function AsrSection() {
             onChange={(e) => update({ model: e.target.value as AsrModel })}
             className="h-9 rounded-md border border-input bg-background px-3 text-sm"
           >
-            {(["large-v3", "distil-large-v3", "medium", "small"] as const).map((v) => (
+            {(["large-v3", "medium", "small"] as const).map((v) => (
               <option key={v} value={v}>{ASR_MODEL_LABEL[v]}</option>
             ))}
           </select>

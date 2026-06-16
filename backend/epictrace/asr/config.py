@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 
 @dataclass(frozen=True)
 class AsrConfig:
-    model: str = "large-v3"            # large-v3 / distil-large-v3 / medium / small
+    model: str = "large-v3"            # large-v3 / medium / small(distil-large-v3 是英语专用,不入中文管线)
     language: str = "zh"
     vad: bool = True
     vad_threshold: float = 0.5
@@ -32,7 +32,8 @@ class AsrConfig:
     # 在本机 A/B 选最佳默认。
     compute_type: str = "int8_float32"
 
-    _VALID_MODELS = ("large-v3", "distil-large-v3", "medium", "small")
+    # distil-large-v3 是英语专用模型,会毁掉中文转写 → 不作为用户可选项(STEP 6)。
+    _VALID_MODELS = ("large-v3", "medium", "small")
 
     @classmethod
     def from_dict(cls, d: dict) -> "AsrConfig":

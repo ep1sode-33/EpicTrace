@@ -53,8 +53,8 @@ export interface ExtractionSettings {
   model_source: "modelscope" | "huggingface" | "local";
 }
 
-/** ASR 模型大小:large-v3 / distil-large-v3 / medium / small。 */
-export type AsrModel = "large-v3" | "distil-large-v3" | "medium" | "small";
+/** ASR 模型大小:large-v3 / medium / small(distil-large-v3 是英语专用,不入中文管线)。 */
+export type AsrModel = "large-v3" | "medium" | "small";
 /** ASR 可调配置(后端 AsrConfig 的形状)。model + 高级旋钮(VAD/阈值/确认纪律)。 */
 export interface AsrSettings {
   model: AsrModel;
@@ -74,6 +74,10 @@ export interface AsrSettings {
   halluc_filter_enabled: boolean;
   /** sounddevice 输入设备索引;null = 系统默认输入。 */
   input_device: number | null;
+  /** 每轮喂引擎的有界滑窗回看秒数(STEP 1)。 */
+  window_seconds: number;
+  /** CTranslate2 计算精度:int8_float32 / int8 / float32(STEP 3)。 */
+  compute_type: string;
 }
 /** 一个可选输入设备(麦克风)。index = sounddevice 设备索引。 */
 export interface AsrDevice {
