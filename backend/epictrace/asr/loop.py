@@ -39,6 +39,20 @@ class StreamLoop:
         """注入当前可用音源({channel: source});source 须有 base_offset/available_seconds/window_from。"""
         self._sources = sources
 
+    def skip_channel_to(self, ch: str, abs_seconds: float) -> None:
+        """把某路的确认游标 + 扫描游标都单调推进到 abs_seconds(FIX A 软静音用)。
+
+        软静音某路时,worker 调本方法把该路两游标跳到 available_seconds()——使静音期间攒下的
+        音频既不被转写(scanned_end/last_confirmed_end 已越过它),也不在 unmute 后从旧游标回追
+        backlog;unmute 后从「现在」继续。未知通道 = no-op。"""
+        st = self._states.get(ch)
+        if st is None:
+            return
+        if abs_seconds > st.last_confirmed_end:
+            st.last_confirmed_end = abs_seconds
+        if abs_seconds > st.scanned_end:
+            st.scanned_end = abs_seconds
+
     def _unprocessed(self, channel: str) -> float:
         """该路未扫描秒数 = 绝对末端 - 已扫描游标(FIX B:按「未扫描量」排序,不用确认游标)。
 

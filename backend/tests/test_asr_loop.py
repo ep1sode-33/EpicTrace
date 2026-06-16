@@ -231,6 +231,24 @@ def test_flush_all_still_flushes_every_channel():
     assert any(c.source == "device" for c in confirmed)
 
 
+def test_skip_channel_to_advances_both_cursors():
+    """FIX A:软静音时把某路两个游标都跳到「现在」,使静音区间既不被重转、也不卡调度。
+    单调:不回退已更靠前的游标。"""
+    eng = _FakeEngine({"mic": []})
+    loop = StreamLoop(eng, AsrConfig(),
+                      on_confirmed=lambda s: None, on_partial=lambda s: None)
+    loop.set_sources({"mic": _FakeSource(base=0.0, available=30.0)})
+    loop.skip_channel_to("mic", 30.0)
+    assert loop._states["mic"].last_confirmed_end == 30.0
+    assert loop._states["mic"].scanned_end == 30.0
+    # 不回退:跳到更早的值无效。
+    loop.skip_channel_to("mic", 10.0)
+    assert loop._states["mic"].last_confirmed_end == 30.0
+    assert loop._states["mic"].scanned_end == 30.0
+    # 未知通道:no-op,不抛。
+    loop.skip_channel_to("device", 5.0)
+
+
 def test_slice_start_clamped_to_base_offset():
     """cursor 落后于 base_offset(那段已滚出缓冲)→ slice_start_abs 取 base_offset。"""
     eng = _FakeEngine({"mic": []})

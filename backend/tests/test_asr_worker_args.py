@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from epictrace.asr.config import AsrConfig
 from epictrace.asr.worker import WorkerArgs, parse_args
 
@@ -78,6 +80,63 @@ def test_worker_main_fails_fast_when_model_absent(tmp_path, monkeypatch):
     assert rc == 1
 
 
+def test_worker_main_shuts_down_sources_when_engine_build_fails(tmp_path, monkeypatch):
+    """FIX E:模型在缓存里(过 fail-fast),但 _build_engine 抛错 → 已起的源被停、已开的 wav
+    被关(统一 try/finally 收尾),绝不泄漏句柄。"""
+    import sys
+    import types
+
+    import epictrace.asr.provisioner as prov
+    import epictrace.asr.worker as worker
+
+    # 过 fail-fast:假装模型存在(main 内部从 provisioner 局部 import,故 patch 源模块)。
+    monkeypatch.setattr(prov, "detect_asr_model", lambda *a, **k: True)
+    monkeypatch.setattr(worker, "_post", lambda *a, **k: None)
+
+    closed = {"stopped": 0, "wav_closed": 0}
+
+    class _FakeSource:
+        def __init__(self, *a, **k):
+            pass
+        def start(self):
+            pass
+        def stop(self):
+            closed["stopped"] += 1
+
+    class _FakeWav:
+        def __init__(self, *a, **k):
+            pass
+        def write(self, *a, **k):
+            pass
+        def close(self):
+            closed["wav_closed"] += 1
+
+    # 桩掉运行时 import 的音频依赖:soundfile + audio_sources(避免真 PortAudio/真文件)。
+    fake_audio = types.ModuleType("epictrace.asr.audio_sources")
+    fake_audio.SAMPLE_RATE = 16000
+    fake_audio.MicSource = _FakeSource
+    fake_audio.SystemAudioSource = _FakeSource
+    monkeypatch.setitem(sys.modules, "epictrace.asr.audio_sources", fake_audio)
+    fake_sf = types.ModuleType("soundfile")
+    fake_sf.SoundFile = lambda *a, **k: _FakeWav()
+    monkeypatch.setitem(sys.modules, "soundfile", fake_sf)
+
+    # _build_engine 抛错(模型加载失败模拟)。
+    def _boom(*a, **k):
+        raise RuntimeError("model load boom")
+
+    monkeypatch.setattr(worker, "_build_engine", _boom)
+
+    with pytest.raises(RuntimeError, match="model load boom"):
+        worker.main([
+            "--session", "1", "--staging", str(tmp_path),
+            "--cache-dir", str(tmp_path / "cache"), "--sources", "mic",
+        ])
+    # 关键:即便引擎构建抛错,源被停、wav 被关(统一收尾,无泄漏)。
+    assert closed["stopped"] == 1
+    assert closed["wav_closed"] == 1
+
+
 def test_active_channels_from_muted():
     """Feature B:由「已起的 worker 通道集」+「前端静音源 id 列表」算出仍活跃的通道。
 
@@ -96,6 +155,82 @@ def test_active_channels_from_muted():
     assert active_channels(started, ["mic", "system_audio"]) == set()
     # 静音了一个根本没起的源 → 不影响已起的。
     assert active_channels({"mic"}, ["system_audio"]) == {"mic"}
+
+
+def test_fetch_muted_returns_none_on_failure(monkeypatch):
+    """FIX A:GET asr-mute 失败回 None(非 []),供调用方保留上次已知静音集、不误恢复全部。"""
+    import urllib.error
+
+    from epictrace.asr import worker
+
+    def _boom(*a, **k):
+        raise urllib.error.URLError("network down")
+
+    monkeypatch.setattr(worker.urllib.request, "urlopen", _boom)
+    assert worker._fetch_muted(7) is None
+
+
+def test_apply_mute_transition_advances_offsets_and_cursors():
+    """FIX A:某路 active→muted 时,推进其 wav 写游标到当前样本数 + ASR 游标到 available_seconds,
+    使静音区间既不落 wav 也不被转写;unmute 后从「现在」继续。仅对「转静音」的通道动作。"""
+    import numpy as np
+
+    from epictrace.asr.worker import apply_mute_transition
+
+    class _Src:
+        def __init__(self, samples, avail):
+            self._samples = samples
+            self._avail = avail
+        def read(self):
+            return np.zeros(self._samples, dtype="float32")
+        def available_seconds(self):
+            return self._avail
+
+    class _Loop:
+        def __init__(self):
+            self.skipped = []
+        def skip_channel_to(self, ch, secs):
+            self.skipped.append((ch, secs))
+
+    sources = {"mic": _Src(48000, 30.0), "device": _Src(16000, 20.0)}
+    written = {"mic": 0, "device": 16000}  # device 已写齐,mic 落后
+    loop = _Loop()
+    # mic active→muted(从 {mic,device} 变成 {device});device 仍活跃。
+    apply_mute_transition({"mic", "device"}, {"device"}, sources, written, loop)
+    # mic 的 wav 写游标推进到当前样本数(跳过将静音的 backlog,unmute 不回填)。
+    assert written["mic"] == 48000
+    # mic 的 ASR 游标跳到 available_seconds(静音区间不被转写)。
+    assert loop.skipped == [("mic", 30.0)]
+    # device 未转静音 → 不动它的写游标。
+    assert written["device"] == 16000
+
+
+def test_apply_mute_transition_noop_on_unmute():
+    """FIX A:某路 muted→active(取消静音)不该触发跳游标/改写偏移——只在「转静音」时动作。"""
+    import numpy as np
+
+    from epictrace.asr.worker import apply_mute_transition
+
+    class _Src:
+        def read(self):
+            return np.zeros(1000, dtype="float32")
+        def available_seconds(self):
+            return 5.0
+
+    class _Loop:
+        def __init__(self):
+            self.skipped = []
+        def skip_channel_to(self, ch, secs):
+            self.skipped.append((ch, secs))
+
+    sources = {"mic": _Src()}
+    written = {"mic": 0}
+    loop = _Loop()
+    # mic muted→active:不在「转静音」集合 → 无副作用。
+    apply_mute_transition({"mic"}, {"mic"}, sources, written, loop)
+    apply_mute_transition(set(), {"mic"}, sources, written, loop)
+    assert loop.skipped == []
+    assert written["mic"] == 0
 
 
 def test_shutdown_stops_sources_and_closes_wavs():

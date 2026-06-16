@@ -44,8 +44,9 @@ def active_channels(started: set[str], muted_sources: list[str]) -> set[str]:
     return {ch for ch in started if ch not in muted_channels}
 
 
-def _fetch_muted(session_id: int) -> list[str]:
-    """GET 后端某 session 的软静音集;失败回空(网络抖动不应误静音/误恢复)。"""
+def _fetch_muted(session_id: int) -> list[str] | None:
+    """GET 后端某 session 的软静音集;失败回 None(FIX A:网络抖动不应被误读成「空集 = 全恢复」,
+    调用方据 None 保留上次已知静音集)。"""
     url = f"{_BACKEND}/api/capture/sessions/{session_id}/asr-mute"
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
@@ -54,7 +55,28 @@ def _fetch_muted(session_id: int) -> list[str]:
         return list(muted) if isinstance(muted, list) else []
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
         _log.warning("ASR worker GET asr-mute failed: %s", e)
-        return []
+        return None
+
+
+def apply_mute_transition(prev_active: set[str], next_active: set[str],
+                          sources: dict, written: dict, loop) -> None:
+    """处理活跃集变化里「转静音」的通道(FIX A)。纯函数(可单测,loop/source 用鸭子类型)。
+
+    某路 active→muted 时,光把它从 loop 源集剔除不够:源仍在攒 PCM,而 written[ch] 不前进、
+    ASR 游标也不前进 → unmute 时静音区间会被回填进 wav 并从旧游标重转。故对每个「转静音」通道:
+    - written[ch] ← 当前样本数(read() 长度):跳过将静音的 backlog,unmute 后只写「现在起」的尾巴;
+    - loop.skip_channel_to(ch, available_seconds()):两个 ASR 游标跳到现在,静音区间不被转写。
+    仅对「转静音」(prev_active 有、next_active 无)的通道动作;转活跃(unmute)无副作用。"""
+    newly_muted = prev_active - next_active
+    for ch in newly_muted:
+        src = sources.get(ch)
+        if src is None:
+            continue
+        try:
+            written[ch] = src.read().shape[0]
+        except Exception as e:  # noqa: BLE001 — 读失败不应拖垮静音切换
+            _log.warning("ASR mute: advance wav offset for %s failed: %s", ch, e)
+        loop.skip_channel_to(ch, src.available_seconds())
 
 
 @dataclass(frozen=True)
@@ -200,73 +222,89 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, _on_sigterm)
 
-    # 冷启动(STEP 2):先起音源 + 开 wav,让 RingBuffer 从 session 打开那一刻就开始攒 PCM、
-    # wav 立刻开录;模型加载(可能数秒)期间的说话不再丢失。RingBuffer/base_offset 保住绝对
-    # 时间,配合 STEP 1 的有界滑窗,首批 tick 会在窗口内追上开局攒下的 backlog。
-    # 起选中音源。worker 内部用 mic/device 二元通道命名(system_audio → device)。
+    # FIX E:源启动、wav 打开、模型加载、主循环全部包进同一个 try/finally,任何一步抛错都走
+    # 统一收尾 _shutdown(sources, wavs)——绝不因 wav 打开或模型加载失败而泄漏已起的源/wav 句柄。
+    # loop 在模型加载后才建,此前为 None;收尾里用到 loop 处先判空。
     sources: dict[str, object] = {}
     wavs: dict[str, object] = {}
-    for src in args.sources:
-        channel = _SOURCE_TO_CHANNEL.get(src)
-        if channel is None:
-            continue
-        if src == "mic":
-            # 用户在设置里选的输入设备索引(None = 系统默认);Feature A 让弱/错默认麦克风可换。
-            s = MicSource(device=cfg.input_device, rms_normalize_enabled=cfg.rms_normalize)
-        else:
-            # 系统内录 helper 二进制路径(随 app 构建到 data_dir/bin;Task 12)。
-            helper = str(app_config.data_dir / "bin" / "epictrace-sysaudio")
-            s = SystemAudioSource(helper, rms_normalize_enabled=cfg.rms_normalize)
-        try:
-            s.start()
-        except Exception as e:  # noqa: BLE001 — 某路起不来不拖垮其余源
-            _log.error("ASR source %s failed to start: %s", src, e)
-            continue
-        sources[channel] = s
-        # 原始音频边录边追加落唯一文件名 wav(16k mono),供回放/重转写(pause 不覆盖,FIX F)。
-        wavs[channel] = sf.SoundFile(_wav_path(args.staging_dir, channel), mode="w",
-                                     samplerate=SAMPLE_RATE, channels=1, subtype="FLOAT")
-
-    if not sources:
-        _log.error("ASR worker: no audio source started, exiting")
-        return 1
-
-    # 启动诊断:采集已起、PCM 正在攒 —— 在(可能耗时的)模型加载之前就让真机终端确认。
-    print(f"[EpicTrace ASR] worker 启动(采集已起,加载模型中): session={args.session_id} "
-          f"sources={list(sources.keys())} model={cfg.model}", flush=True)
-
-    # 采集已 live,RingBuffer 开始攒 PCM;现在才加载模型 + 建 StreamLoop(STEP 2)。
-    engine = _build_engine(cfg, str(cache_dir))
-    loop = StreamLoop(
-        engine, cfg,
-        on_confirmed=lambda seg: _post_confirmed(args.session_id, seg),
-        on_partial=lambda seg: _post_partial(args.session_id, seg),
-    )
-    # 当前活跃通道集(软静音逻辑维护):初始全部已起的通道。源对象始终存活,
-    # 静音只是把对应通道从「被读取/转写/落 wav」中剔除(loop.set_sources 仅喂活跃源)。
-    active: set[str] = set(sources.keys())
-    loop.set_sources(dict(sources))
-
-    written = {ch: 0 for ch in sources}
-    last_diag = time.time()
-    last_mute_poll = time.time()
-    # 短尾排空(FIX 3):某路 available_seconds 停止增长 ~1.5s = 说话停顿/IDLE;此时若仍有
-    # 未被正常 tick(≥1s 门)处理的短尾/partial,调一次 loop.flush() 把它确认掉。
-    # 每路记上次 available + 该值上次变化的时刻;只在「转 IDLE」那一刻 flush 一次(下方
-    # flushed_idle 防同一段静默里反复 flush)。
-    last_available = {ch: 0.0 for ch in sources}
-    last_growth_at = {ch: time.time() for ch in sources}
-    flushed_idle = {ch: False for ch in sources}
+    loop = None
+    # active:当前活跃(应被读取/转写/落 wav)的通道集;muted:上次已知静音源 id(FIX A:
+    # poll 失败回 None 时保留它,不误恢复)。两者在 finally 收尾(跳过静音通道)前就需可见,故前置。
+    active: set[str] = set()
+    muted: list[str] = []
+    written: dict[str, int] = {}
     try:
+        # 冷启动(STEP 2):先起音源 + 开 wav,让 RingBuffer 从 session 打开那一刻就开始攒 PCM、
+        # wav 立刻开录;模型加载(可能数秒)期间的说话不再丢失。RingBuffer/base_offset 保住绝对
+        # 时间,配合 STEP 1 的有界滑窗,首批 tick 会在窗口内追上开局攒下的 backlog。
+        # 起选中音源。worker 内部用 mic/device 二元通道命名(system_audio → device)。
+        for src in args.sources:
+            channel = _SOURCE_TO_CHANNEL.get(src)
+            if channel is None:
+                continue
+            if src == "mic":
+                # 用户在设置里选的输入设备索引(None = 系统默认);Feature A 让弱/错默认麦克风可换。
+                s = MicSource(device=cfg.input_device, rms_normalize_enabled=cfg.rms_normalize)
+            else:
+                # 系统内录 helper 二进制路径(随 app 构建到 data_dir/bin;Task 12)。
+                helper = str(app_config.data_dir / "bin" / "epictrace-sysaudio")
+                s = SystemAudioSource(helper, rms_normalize_enabled=cfg.rms_normalize)
+            try:
+                s.start()
+            except Exception as e:  # noqa: BLE001 — 某路起不来不拖垮其余源
+                _log.error("ASR source %s failed to start: %s", src, e)
+                continue
+            sources[channel] = s
+            # 原始音频边录边追加落唯一文件名 wav(16k mono),供回放/重转写(pause 不覆盖,FIX F)。
+            wavs[channel] = sf.SoundFile(_wav_path(args.staging_dir, channel), mode="w",
+                                         samplerate=SAMPLE_RATE, channels=1, subtype="FLOAT")
+
+        if not sources:
+            _log.error("ASR worker: no audio source started, exiting")
+            return 1
+
+        # 启动诊断:采集已起、PCM 正在攒 —— 在(可能耗时的)模型加载之前就让真机终端确认。
+        print(f"[EpicTrace ASR] worker 启动(采集已起,加载模型中): session={args.session_id} "
+              f"sources={list(sources.keys())} model={cfg.model}", flush=True)
+
+        # 采集已 live,RingBuffer 开始攒 PCM;现在才加载模型 + 建 StreamLoop(STEP 2)。
+        # 若 _build_engine 在此抛错,外层 finally 仍会停源 + 关 wav(FIX E)。
+        engine = _build_engine(cfg, str(cache_dir))
+        loop = StreamLoop(
+            engine, cfg,
+            on_confirmed=lambda seg: _post_confirmed(args.session_id, seg),
+            on_partial=lambda seg: _post_partial(args.session_id, seg),
+        )
+        # 当前活跃通道集(软静音逻辑维护):初始全部已起的通道。源对象始终存活,
+        # 静音只是把对应通道从「被读取/转写/落 wav」中剔除(loop.set_sources 仅喂活跃源)。
+        active = set(sources.keys())
+        loop.set_sources(dict(sources))
+
+        written = {ch: 0 for ch in sources}
+        last_diag = time.time()
+        last_mute_poll = time.time()
+        # 短尾排空(FIX 3):某路 available_seconds 停止增长 ~1.5s = 说话停顿/IDLE;此时若仍有
+        # 未被正常 tick(≥1s 门)处理的短尾/partial,调一次 flush_channel 把它确认掉。
+        # 每路记上次 available + 该值上次变化的时刻;只在「转 IDLE」那一刻 flush 一次(下方
+        # flushed_idle 防同一段静默里反复 flush)。
+        last_available = {ch: 0.0 for ch in sources}
+        last_growth_at = {ch: time.time() for ch in sources}
+        flushed_idle = {ch: False for ch in sources}
         while not stop_flag["stop"]:
             # 周期性轮询软静音集(比 0.5s tick 慢):重算活跃通道,变化才更新 loop 的源集。
             # 软静音的通道不被读取/落 wav(下方按 active 过滤),且不喂 loop(不被转写)。
             now = time.time()
             if now - last_mute_poll >= _MUTE_POLL_INTERVAL:
                 last_mute_poll = now
-                next_active = active_channels(set(sources.keys()),
-                                              _fetch_muted(args.session_id))
+                # FIX A:poll 失败回 None → 保留上次已知静音集(网络抖动不应误恢复全部)。
+                fetched = _fetch_muted(args.session_id)
+                if fetched is not None:
+                    muted = fetched
+                next_active = active_channels(set(sources.keys()), muted)
                 if next_active != active:
+                    # FIX A:对「转静音」的通道推进 wav 写游标 + ASR 游标,使静音区间既不回填进
+                    # wav 也不在 unmute 后被重转(光从 loop 源集剔除不够,源仍在攒)。
+                    apply_mute_transition(active, next_active, sources, written, loop)
                     active = next_active
                     loop.set_sources({ch: sources[ch] for ch in active})
             for channel, s in sources.items():
@@ -319,16 +357,22 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         # 收尾排空短尾(FIX 3):停止前最后一句若 <1s 未处理,正常 tick 永不会转 → 这里
         # loop.flush() 把每路残留短尾/partial 强制确认一次(on_confirmed 会 POST 回后端)。
-        try:
-            loop.flush()
-        except Exception as e:  # noqa: BLE001 — 收尾 flush 失败不应拦截停源/关 wav
-            _log.warning("ASR final loop flush failed: %s", e)
+        # loop 可能为 None(模型加载前就抛错,FIX E)→ 跳过 flush。
+        if loop is not None:
+            try:
+                loop.flush()
+            except Exception as e:  # noqa: BLE001 — 收尾 flush 失败不应拦截停源/关 wav
+                _log.warning("ASR final loop flush failed: %s", e)
         # 退出前再 flush 一次每路未写尾巴,然后停源 + 关 wav(确保 wav 收尾完整)。
+        # FIX A:跳过当前静音的通道——静音期间攒的音频不应在收尾时被回填进 wav。
         for channel, s in sources.items():
+            if channel not in active:
+                continue
             try:
                 pcm = s.read()
-                if pcm.shape[0] > written[channel]:
-                    wavs[channel].write(pcm[written[channel]:])
+                last = written.get(channel, 0)
+                if pcm.shape[0] > last:
+                    wavs[channel].write(pcm[last:])
                     written[channel] = pcm.shape[0]
             except Exception as e:  # noqa: BLE001
                 _log.warning("ASR final wav flush failed: %s", e)
