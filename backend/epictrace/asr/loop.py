@@ -9,6 +9,7 @@ from epictrace.asr.stream_state import StreamState
 from epictrace.asr.types import TranscriptSegment
 
 _MIN_PENDING = 1.0  # 秒:某路未处理音频超过它才值得转一轮
+_MIN_FLUSH_TAIL = 0.2  # 秒:flush 时未处理音频超过它才值得转(低于正常 1s 门,专收短尾,FIX 3)
 
 
 class StreamLoop:
@@ -56,6 +57,10 @@ class StreamLoop:
         ch = self._pick_source()
         if ch is None:
             return
+        self._transcribe_channel(ch)
+
+    def _transcribe_channel(self, ch: str) -> None:
+        """转写某路自游标起的未处理切片一次,平移回绝对时间,喂 StreamState 并 emit。"""
         src = self._sources[ch]
         st = self._states[ch]
         # 切片起点:游标与缓冲实际起点取大(游标落后于截断点时从缓冲头切)。
@@ -69,6 +74,18 @@ class StreamLoop:
             self._on_confirmed(c)
         if st.partial is not None:
             self._on_partial(st.partial)
+
+    def flush(self) -> None:
+        """排空短尾(FIX 3):正常 tick 只处理 ≥1s 未处理音频,短促一句话+停顿(尾段 <1s)永不被转。
+
+        收尾(stop)或某路转 IDLE 时调用:逐路若有 ANY 未处理音频(> _MIN_FLUSH_TAIL≈0.2s,
+        低于正常 1s 门)就转一次、平移、ingest;再对每路 StreamState.flush() 强制确认残留 partial
+        并 emit。无未处理音频且无 partial 的源是 no-op(故可幂等重复调用)。"""
+        for ch in self._sources:
+            if self._unprocessed(ch) > _MIN_FLUSH_TAIL:
+                self._transcribe_channel(ch)
+            for c in self._states[ch].flush():
+                self._on_confirmed(c)
 
     @staticmethod
     def _shift(seg: TranscriptSegment, offset: float) -> TranscriptSegment:

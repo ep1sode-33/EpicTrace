@@ -114,11 +114,23 @@ class _SourceBase:
         self._rb = RingBuffer()
         self._rms = rms_normalize_enabled
         self._stop = threading.Event()
+        # 最近 emit 帧的 RAW(归一化前)RMS:供诊断暴露弱麦——读 ring buffer 拿的是归一化后
+        # (恒 ~0.1)的电平,看不出输入是否弱;这里在归一化前记原始电平(FIX 1)。
+        # 单写(采集回调)单读(诊断)的标量,GIL 下原子赋值即足够。
+        self._last_input_rms = 0.0
 
     def _emit(self, frames: np.ndarray) -> None:
+        # 先算 RAW(归一化前)RMS 供诊断,再做弱音归一化喂模型。
+        if frames.size:
+            self._last_input_rms = float(
+                np.sqrt(np.mean(np.square(frames.astype(np.float64)))))
         if self._rms:
             frames = rms_normalize(frames)
         self._rb.push(frames)
+
+    def recent_input_rms(self) -> float:
+        """最近 emit 帧的 RAW(归一化前)输入 RMS,供诊断判断麦克风电平强弱(FIX 1)。"""
+        return self._last_input_rms
 
     def read(self) -> np.ndarray:
         return self._rb.read()

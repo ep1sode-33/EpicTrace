@@ -31,6 +31,7 @@ _BACKEND = "http://127.0.0.1:8765"
 _SOURCE_TO_CHANNEL = {"mic": "mic", "system_audio": "device"}
 _TICK_INTERVAL = 0.5  # 秒:两路交替循环每轮间隔
 _MUTE_POLL_INTERVAL = 1.0  # 秒:轮询后端软静音集的间隔(比 0.5s tick 慢,避免每轮打网络)
+_IDLE_FLUSH_SECS = 1.5  # 秒:某路 available_seconds 停止增长这么久 = 停顿/IDLE → flush 一次短尾(FIX 3)
 
 
 def active_channels(started: set[str], muted_sources: list[str]) -> set[str]:
@@ -177,7 +178,6 @@ def main(argv: list[str] | None = None) -> int:
               {"kind": "note", "payload": "语音模型未就绪,本次未启动转录", "meta": {"asr_error": True}})
         return 1
 
-    import numpy as np
     import soundfile as sf
 
     from epictrace.asr.audio_sources import (
@@ -243,6 +243,13 @@ def main(argv: list[str] | None = None) -> int:
     written = {ch: 0 for ch in sources}
     last_diag = time.time()
     last_mute_poll = time.time()
+    # 短尾排空(FIX 3):某路 available_seconds 停止增长 ~1.5s = 说话停顿/IDLE;此时若仍有
+    # 未被正常 tick(≥1s 门)处理的短尾/partial,调一次 loop.flush() 把它确认掉。
+    # 每路记上次 available + 该值上次变化的时刻;只在「转 IDLE」那一刻 flush 一次(下方
+    # flushed_idle 防同一段静默里反复 flush)。
+    last_available = {ch: 0.0 for ch in sources}
+    last_growth_at = {ch: time.time() for ch in sources}
+    flushed_idle = {ch: False for ch in sources}
     try:
         while not stop_flag["stop"]:
             # 周期性轮询软静音集(比 0.5s tick 慢):重算活跃通道,变化才更新 loop 的源集。
@@ -264,6 +271,20 @@ def main(argv: list[str] | None = None) -> int:
                     wavs[channel].write(pcm[written[channel]:])
                     written[channel] = pcm.shape[0]
             loop.tick()
+            # 短尾排空:逐活跃路看 available_seconds 是否还在长。长 → 复位 IDLE 标志;
+            # 停长 ≥_IDLE_FLUSH_SECS 且本段静默尚未 flush → flush 一次(收掉短句+停顿的尾段)。
+            now = time.time()
+            for channel, s in sources.items():
+                if channel not in active:
+                    continue
+                avail = s.available_seconds()
+                if avail > last_available[channel] + 1e-6:
+                    last_available[channel] = avail
+                    last_growth_at[channel] = now
+                    flushed_idle[channel] = False
+                elif not flushed_idle[channel] and now - last_growth_at[channel] >= _IDLE_FLUSH_SECS:
+                    flushed_idle[channel] = True
+                    loop.flush()
             # 每 5s 打印每路采集时长 + 近段 RMS 能量:近零能量 = 没收到声音(权限/设备),
             # 而非转写问题——让「mic 寄」在终端一眼可诊断。
             now = time.time()
@@ -275,19 +296,25 @@ def main(argv: list[str] | None = None) -> int:
                         continue
                     buf = s.read()
                     if buf.size:
-                        recent = buf[-SAMPLE_RATE * 2:]  # 最近 ~2s
-                        rms = float(np.sqrt(np.mean(np.square(recent.astype(np.float64)))))
+                        # 用 RAW(归一化前)输入电平诊断:读 ring buffer 拿的是归一化后值
+                        # (恒 ~0.1),无法暴露弱麦;recent_input_rms() 反映真实输入电平(FIX 1)。
+                        rms = s.recent_input_rms()
                         hint = " (近零能量 → 检查麦克风/录音权限或输入设备)" if rms < 1e-3 else ""
                         print(f"[EpicTrace ASR] {channel}: 已采 {buf.size / SAMPLE_RATE:.1f}s, "
-                              f"近段 RMS={rms:.5f}{hint}", flush=True)
+                              f"近段输入 RMS={rms:.5f}{hint}", flush=True)
                     else:
                         print(f"[EpicTrace ASR] {channel}: 尚无音频(检查权限/设备)", flush=True)
             time.sleep(_TICK_INTERVAL)
     except KeyboardInterrupt:
         pass
     finally:
-        # 退出前再 flush 一次每路未写尾巴,然后停源 + 关 wav(flush 最后 confirmed 段由
-        # 退出前最后一轮 loop.tick + 上面的增量写共同保证;此处确保 wav 收尾完整)。
+        # 收尾排空短尾(FIX 3):停止前最后一句若 <1s 未处理,正常 tick 永不会转 → 这里
+        # loop.flush() 把每路残留短尾/partial 强制确认一次(on_confirmed 会 POST 回后端)。
+        try:
+            loop.flush()
+        except Exception as e:  # noqa: BLE001 — 收尾 flush 失败不应拦截停源/关 wav
+            _log.warning("ASR final loop flush failed: %s", e)
+        # 退出前再 flush 一次每路未写尾巴,然后停源 + 关 wav(确保 wav 收尾完整)。
         for channel, s in sources.items():
             try:
                 pcm = s.read()

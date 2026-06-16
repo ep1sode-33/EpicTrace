@@ -60,3 +60,15 @@ class StreamState:
         if out:
             self._rounds_no_progress = 0
         return out
+
+    def flush(self) -> list[TranscriptSegment]:
+        """收尾/IDLE 时强制确认当前 partial(FIX 3:防短尾被丢)。
+
+        若有 partial:走 _confirm(同 force 路径——幻觉/重复只推游标不 emit,真实文本才落库),
+        然后清 partial、复位无进展计数;返回本次 emit 的段。无 partial → 空列表(幂等)。"""
+        out: list[TranscriptSegment] = []
+        if self.partial is not None:
+            self._confirm(self.partial, out)
+            self.partial = None
+            self._rounds_no_progress = 0
+        return out

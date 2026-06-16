@@ -96,6 +96,63 @@ def test_segments_shifted_to_absolute_time():
     assert partials and abs(partials[-1].start - 12.0) < 1e-6
 
 
+def test_flush_drains_short_tail_below_min_pending():
+    """FIX 3:某路只 0.5s 未处理(< _MIN_PENDING=1.0)→ tick() 不动,但 flush() 转写+确认它。"""
+    eng = _FakeEngine({"mic": [_seg("短促一句", 0, 0.5, "mic")]})
+    confirmed = []
+    loop = StreamLoop(eng, AsrConfig(),
+                      on_confirmed=confirmed.append, on_partial=lambda s: None)
+    # mic 仅 0.5s 未处理(base 0,available 0.5,cursor 0)。
+    loop.set_sources({
+        "mic": _FakeSource(base=0.0, available=0.5),
+        "device": _FakeSource(base=0.0, available=0.0),
+    })
+    # 普通 tick:0.5s < 1.0s 门 → 不选任何源、不转写。
+    loop.tick()
+    assert eng.seen == []
+    assert confirmed == []
+    # flush:短尾被转写,单段 partial 经 flush 强制确认 → emit。
+    loop.flush()
+    assert eng.seen and eng.seen[0][0] == "mic"
+    assert any("短促一句" in c.text and c.confirmed for c in confirmed)
+
+
+def test_flush_ignores_negligible_tail():
+    """FIX 3:未处理音频极少(< ~0.2s)→ flush 不转写该路(避免空转/噪声段)。"""
+    eng = _FakeEngine({"mic": [_seg("不该出现", 0, 0.1, "mic")]})
+    confirmed = []
+    loop = StreamLoop(eng, AsrConfig(),
+                      on_confirmed=confirmed.append, on_partial=lambda s: None)
+    loop.set_sources({
+        "mic": _FakeSource(base=0.0, available=0.1),  # 仅 0.1s
+        "device": _FakeSource(base=0.0, available=0.0),
+    })
+    loop.flush()
+    assert eng.seen == []      # 太短,未转写
+    assert confirmed == []
+
+
+def test_flush_shifts_to_absolute_and_is_idempotent():
+    """FIX 3:flush 转写结果平移回绝对时间;无新音频时二次 flush 不重复 emit(幂等)。"""
+    eng = _FakeEngine({"mic": [_seg("尾段内容", 0.0, 0.5, "mic")]})
+    confirmed = []
+    loop = StreamLoop(eng, AsrConfig(),
+                      on_confirmed=confirmed.append, on_partial=lambda s: None)
+    src = _FakeSource(base=10.0, available=10.5)  # cursor 0 → slice_start_abs = max(0,10)=10
+    loop.set_sources({"mic": src, "device": _FakeSource(base=10.0, available=10.0)})
+    # device 游标已追平其末端 → 无未处理音频,flush 不碰它(只 mic 有 0.5s 短尾)。
+    loop._states["device"].last_confirmed_end = 10.0
+    loop.flush()
+    assert src.windowed_from[-1] == 10.0
+    assert confirmed and abs(confirmed[0].start - 10.0) < 1e-6  # 0.0 平移到 10.0
+    n = len(confirmed)
+    # 二次 flush:游标已追平 available,无未处理音频 + partial 已清 → 不再 emit。
+    eng.seen.clear()
+    loop.flush()
+    assert eng.seen == []
+    assert len(confirmed) == n
+
+
 def test_slice_start_clamped_to_base_offset():
     """cursor 落后于 base_offset(那段已滚出缓冲)→ slice_start_abs 取 base_offset。"""
     eng = _FakeEngine({"mic": []})

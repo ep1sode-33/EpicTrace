@@ -78,6 +78,37 @@ def test_ring_buffer_base_offset_increments_after_truncation():
     assert abs(rb.available_seconds() - 1.0) < 1e-6
 
 
+def test_recent_input_rms_reports_raw_level_not_normalized():
+    """FIX 1:诊断 RMS 应反映归一化前的 RAW 输入电平(暴露弱麦),而非归一化后缓冲(恒 ~0.1)。
+
+    喂已知幅度的 RAW 帧(RMS≈0.02),即便开了 rms_normalize(把缓冲抬到 ~0.1),
+    recent_input_rms() 仍应≈0.02(原始电平),而非 0.1。"""
+    import numpy as np
+
+    from epictrace.asr.audio_sources import _SourceBase
+
+    src = _SourceBase(rms_normalize_enabled=True)
+    # 恒定幅度 0.02 的正弦/方波等价信号:|x|=0.02 → RMS=0.02。
+    raw = np.full(1600, 0.02, dtype=np.float32)
+    expected = float(np.sqrt(np.mean(np.square(raw.astype(np.float64)))))
+    src._emit(raw)
+    # 原始输入电平≈0.02,绝不是归一化后的 0.1。
+    assert abs(src.recent_input_rms() - expected) < 1e-4
+    assert src.recent_input_rms() < 0.05
+    # 但缓冲本身已被归一化抬高(read 反映归一化后)。
+    buf = src.read()
+    buf_rms = float(np.sqrt(np.mean(np.square(buf.astype(np.float64)))))
+    assert buf_rms > 0.05  # 归一化目标 -20dBFS=0.1
+
+
+def test_recent_input_rms_zero_before_any_emit():
+    """从未 emit 过 → 原始电平 0.0(诊断显示尚无音频)。"""
+    from epictrace.asr.audio_sources import _SourceBase
+
+    src = _SourceBase(rms_normalize_enabled=True)
+    assert src.recent_input_rms() == 0.0
+
+
 def test_system_audio_permission_line_parsing():
     from epictrace.asr.audio_sources import _is_permission_denied_line
 
