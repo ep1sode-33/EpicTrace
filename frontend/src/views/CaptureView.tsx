@@ -14,13 +14,13 @@ import { Button } from "@/components/ui/button";
 import { api, type CaptureSessionDetail } from "@/lib/api";
 import { native } from "@/lib/native";
 
-/** 来源选项;笔记/剪贴板/截图 可勾;外录/内录 disabled 待后续 Plan */
+/** 来源选项;笔记/剪贴板/截图 + 外录(麦克风)/内录(系统声音)均可勾选 */
 const SOURCE_OPTIONS = [
   { id: "note", icon: StickyNote, label: "笔记", disabled: false, coming: false },
   { id: "clipboard", icon: Clipboard, label: "剪贴板", disabled: false, coming: false },
   { id: "screenshot", icon: Camera, label: "截图", disabled: false, coming: false },
-  { id: "mic", icon: Mic, label: "🎤 外录", disabled: true, coming: true },
-  { id: "system_audio", icon: Volume2, label: "🔊 内录", disabled: true, coming: true },
+  { id: "mic", icon: Mic, label: "🎤 外录(麦克风)", disabled: false, coming: false },
+  { id: "system_audio", icon: Volume2, label: "🔊 内录(系统声音)", disabled: false, coming: false },
 ];
 
 /** 将秒数格式化为 MM:SS */
@@ -28,6 +28,14 @@ function formatTime(secs: number): string {
   const m = Math.floor(secs / 60).toString().padStart(2, "0");
   const s = Math.floor(secs % 60).toString().padStart(2, "0");
   return `${m}:${s}`;
+}
+
+/** transcription 事件的来源:meta.source 为 "mic"(外录)或 "device"(内录)。 */
+function sourceLabel(meta: Record<string, unknown>): string {
+  return meta?.source === "device" ? "内录" : "外录";
+}
+function sourceEmoji(meta: Record<string, unknown>): string {
+  return meta?.source === "device" ? "🔊" : "🎤";
 }
 
 export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => void } = {}) {
@@ -296,7 +304,7 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
 
   // —— 有活动 session —— 显示计时 + live feed + 控件
   const textEvents = session.events.filter((e) =>
-    ["note", "clipboard", "screenshot"].includes(e.kind),
+    ["note", "clipboard", "screenshot", "transcription"].includes(e.kind),
   );
 
   return (
@@ -403,10 +411,17 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
               {[...textEvents].reverse().map((ev) => (
                 <li key={ev.id} className="flex items-start gap-3 px-4 py-3">
                   <span className="mt-0.5 text-base leading-none">
-                    {ev.kind === "note" ? "✏️" : ev.kind === "clipboard" ? "📋" : ev.kind === "screenshot" ? "📷" : "•"}
+                    {ev.kind === "note" ? "✏️" : ev.kind === "clipboard" ? "📋" : ev.kind === "screenshot" ? "📷" : ev.kind === "transcription" ? sourceEmoji(ev.meta) : "•"}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm text-foreground">{ev.payload || "(无内容)"}</p>
+                    <div className="flex items-center gap-1.5">
+                      <p className="truncate text-sm text-foreground">{ev.payload || "(无内容)"}</p>
+                      {ev.kind === "transcription" && (
+                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                          {sourceLabel(ev.meta)}
+                        </span>
+                      )}
+                    </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">
                       {new Date(ev.ts).toLocaleTimeString()}
                     </p>

@@ -10,7 +10,7 @@ import {
   Square,
   Volume2,
 } from "lucide-react";
-import { api, type CaptureEvent } from "@/lib/api";
+import { api, type CaptureEvent, type CapturePartial } from "@/lib/api";
 import { native } from "@/lib/native";
 
 // HUD 窗口尺寸(配合 shell 的 resize_recording_hud)。
@@ -37,6 +37,8 @@ function dotColor(kind: string): string {
       return "bg-zinc-400";
     case "screenshot":
       return "bg-violet-500";
+    case "transcription":
+      return "bg-teal-500";
     case "pause":
       return "bg-amber-500";
     case "resume":
@@ -44,6 +46,11 @@ function dotColor(kind: string): string {
     default:
       return "bg-muted-foreground";
   }
+}
+
+/** transcription 事件来源标签:meta.source 为 "device"(内录)否则视作 "mic"(外录)。 */
+function sourceTag(meta: Record<string, unknown>): string {
+  return meta?.source === "device" ? "内录" : "mic";
 }
 
 /** 紧凑图标按钮(HUD 专用) */
@@ -87,6 +94,8 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
   const [sources, setSources] = useState<string[]>([]);
   const [stagingDir, setStagingDir] = useState("");
   const [events, setEvents] = useState<CaptureEvent[]>([]);
+  // 实时暂定段(ASR partial):与 events 分开存,不混进持久事件列表;末尾淡显「暂定」行。
+  const [partials, setPartials] = useState<CapturePartial>({});
 
   const elapsedRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -151,6 +160,11 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
             void native.hideHud();
           }
         })
+        .catch(() => {});
+      // 与会话事件同频拉一份 partial 快照(内存态;失败/无 ASR 时静默,partial 留空)。
+      api
+        .getSessionPartial(sessionId)
+        .then((p) => setPartials(p))
         .catch(() => {});
     }, 1500);
   }
@@ -245,8 +259,10 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
   }
 
   const timeline = events.filter((e) =>
-    ["note", "clipboard", "screenshot", "pause", "resume"].includes(e.kind),
+    ["note", "clipboard", "screenshot", "transcription", "pause", "resume"].includes(e.kind),
   );
+  // partial 行(每源一条暂定文本);空文本不显示。
+  const partialEntries = Object.entries(partials).filter(([, text]) => text.trim());
 
   function renderContent(ev: CaptureEvent): ReactNode {
     if (ev.kind === "screenshot") return <span className="text-foreground">截图</span>;
@@ -254,6 +270,15 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       return <span className="text-amber-600 dark:text-amber-400">暂停</span>;
     if (ev.kind === "resume")
       return <span className="text-emerald-600 dark:text-emerald-400">继续</span>;
+    if (ev.kind === "transcription")
+      return (
+        <span className="text-foreground">
+          <span className="mr-1 rounded bg-teal-500/15 px-1 py-px text-[9px] font-medium text-teal-700 dark:text-teal-300">
+            {sourceTag(ev.meta)}
+          </span>
+          {ev.payload || "(无内容)"}
+        </span>
+      );
     return <span className="text-foreground">{ev.payload || "(无内容)"}</span>;
   }
 
@@ -296,12 +321,23 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       >
         <Crop className="size-3.5" />
       </IconBtn>
-      <IconBtn disabled title="外录 · 即将到来">
+      {/* 外录/内录:本 session 是否启用了该音源(只读指示,采集中不可改);启用则点亮。 */}
+      <span
+        title={sources.includes("mic") ? "外录(麦克风)采集中" : "本 session 未启用外录"}
+        className={`flex size-7 shrink-0 items-center justify-center rounded-md ${
+          sources.includes("mic") ? "text-teal-500" : "text-muted-foreground/30"
+        }`}
+      >
         <Mic className="size-3.5" />
-      </IconBtn>
-      <IconBtn disabled title="内录 · 即将到来">
+      </span>
+      <span
+        title={sources.includes("system_audio") ? "内录(系统声音)采集中" : "本 session 未启用内录"}
+        className={`flex size-7 shrink-0 items-center justify-center rounded-md ${
+          sources.includes("system_audio") ? "text-teal-500" : "text-muted-foreground/30"
+        }`}
+      >
         <Volume2 className="size-3.5" />
-      </IconBtn>
+      </span>
       <IconBtn onClick={handlePauseResume} title={paused ? "继续" : "暂停"}>
         {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
       </IconBtn>
@@ -328,7 +364,7 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       {expanded && (
         <>
           <div className="min-h-0 flex-1 overflow-y-auto border-t border-border/60 px-3 py-2">
-            {timeline.length === 0 ? (
+            {timeline.length === 0 && partialEntries.length === 0 ? (
               <p className="py-8 text-center text-xs text-muted-foreground">暂无采集内容</p>
             ) : (
               <div className="relative pl-1">
@@ -349,6 +385,24 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
                             second: "2-digit",
                           })}
                         </div>
+                      </div>
+                    </li>
+                  ))}
+                  {/* 实时暂定段(partial):淡显、空心点,不落库——只是当前正在转写的尾段。 */}
+                  {partialEntries.map(([source, text]) => (
+                    <li key={`partial-${source}`} className="relative flex gap-2 pl-4">
+                      <span
+                        className="absolute left-[1px] top-1 size-2 animate-pulse rounded-full border border-teal-500/60 ring-2 ring-background"
+                        aria-hidden
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="break-words text-xs leading-snug text-muted-foreground/80">
+                          <span className="mr-1 rounded bg-teal-500/10 px-1 py-px text-[9px] font-medium text-teal-700/80 dark:text-teal-300/80">
+                            {source === "device" ? "内录" : "mic"}
+                          </span>
+                          {text}
+                        </div>
+                        <div className="mt-0.5 text-[10px] text-muted-foreground/70">暂定</div>
                       </div>
                     </li>
                   ))}

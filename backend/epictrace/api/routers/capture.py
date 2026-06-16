@@ -179,6 +179,13 @@ def post_partial(sid: int, payload: PartialIn, request: Request) -> None:
     partials.setdefault(sid, {})[payload.source] = payload.text
 
 
+@router.get("/sessions/{sid}/partial")
+def get_partial(sid: int, request: Request) -> dict:
+    """读该 session 的实时暂定段快照({source: text})。供 HUD 现有 1.5s 轮询(不另起 SSE)
+    与 getSession 一起拉取;内存态、无则空 dict。"""
+    return dict(request.app.state.asr_partials.get(sid, {}))
+
+
 @router.patch("/sessions/{sid}", response_model=CaptureSessionOut)
 def rename_session(sid: int, payload: RenameIn, db: Database = Depends(get_db)) -> CaptureSessionOut:
     title = payload.title.strip()

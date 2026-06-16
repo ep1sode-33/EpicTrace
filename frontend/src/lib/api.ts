@@ -83,6 +83,8 @@ export interface AsrStatus {
 }
 
 export type CaptureEvent = { id: number; kind: string; ts: string; payload: string; meta: Record<string, unknown> };
+/** 实时暂定段(ASR partial)快照:source("mic"|"device") -> 暂定文本。不落库。 */
+export type CapturePartial = Record<string, string>;
 export type CaptureSession = { id: number; title: string; status: string; started_at: string; ended_at: string | null; sources: string[]; staging_dir: string };
 export type CaptureSessionDetail = CaptureSession & { events: CaptureEvent[]; elapsed_seconds: number };
 
@@ -233,6 +235,8 @@ export const api = {
   listSessions: () => fetch(`${BASE}/api/capture/sessions`).then(j<CaptureSession[]>),
   activeSession: () => fetch(`${BASE}/api/capture/sessions/active`).then(j<CaptureSession | null>),
   getSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}`).then(j<CaptureSessionDetail>),
+  // 实时暂定段快照(内存态,不落库)。HUD 在现有轮询里与 getSession 一起拉,渲染为「暂定」行。
+  getSessionPartial: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}/partial`).then(j<CapturePartial>),
   appendEvent: (sid: number, kind: string, payload = "") =>
     fetch(`${BASE}/api/capture/sessions/${sid}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, payload }) }).then(j<CaptureEvent>),
   pauseSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}/pause`, { method: "POST" }).then(() => {}),
