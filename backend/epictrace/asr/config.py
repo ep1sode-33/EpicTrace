@@ -25,6 +25,10 @@ class AsrConfig:
     # max(游标, tail-window_seconds, 缓冲头)。游标落后 tail 超过 window_seconds 时软强制
     # 确认最早 pending 段推进游标,避免长 session 把整段未确认音频反复重转(成本爆炸 + 漂移)。
     window_seconds: float = 28.0
+    # CTranslate2 计算精度(STEP 3):int8_float32 在 CPU 上比纯 int8 精度更好(权重 int8、
+    # 激活 float32),开销可控;可选 "int8"(最省)/"float32"(最准最慢)。Verify 阶段会
+    # 在本机 A/B 选最佳默认。
+    compute_type: str = "int8_float32"
 
     _VALID_MODELS = ("large-v3", "distil-large-v3", "medium", "small")
 

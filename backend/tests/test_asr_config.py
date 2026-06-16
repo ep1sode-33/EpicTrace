@@ -30,3 +30,11 @@ def test_window_seconds_default_and_roundtrips():
     c = AsrConfig.from_dict({"window_seconds": 12.0})
     assert c.window_seconds == 12.0
     assert c.to_dict()["window_seconds"] == 12.0
+
+
+def test_compute_type_default_and_roundtrips():
+    # STEP 3:CPU 上 int8_float32 比纯 int8 精度更好,作默认;from_dict 可切换。
+    assert AsrConfig().compute_type == "int8_float32"
+    c = AsrConfig.from_dict({"compute_type": "float32"})
+    assert c.compute_type == "float32"
+    assert c.to_dict()["compute_type"] == "float32"

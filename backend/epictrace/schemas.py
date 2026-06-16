@@ -182,6 +182,7 @@ class AsrSettingsIn(BaseModel):
     halluc_filter_enabled: bool | None = None
     input_device: int | None = None
     window_seconds: float | None = None
+    compute_type: str | None = None
 
 
 class AsrSettingsOut(BaseModel):
@@ -203,6 +204,7 @@ class AsrSettingsOut(BaseModel):
     halluc_filter_enabled: bool
     input_device: int | None = None
     window_seconds: float
+    compute_type: str
 
 
 class AsrDeviceOut(BaseModel):

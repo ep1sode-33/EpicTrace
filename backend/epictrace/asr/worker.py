@@ -126,12 +126,15 @@ def _post_partial(session_id: int, seg) -> None:
 
 
 def _build_engine(cfg: AsrConfig, cache_dir: str):
-    """用解析好的完整 AsrConfig 构建 faster-whisper 引擎(Apple Silicon int8)。子进程内执行,真模型。"""
+    """用解析好的完整 AsrConfig 构建 faster-whisper 引擎。子进程内执行,真模型。
+
+    compute_type 由 cfg 决定(STEP 3):默认 int8_float32(CPU 精度优于纯 int8),可切 int8/float32。
+    """
     from faster_whisper import WhisperModel
 
     from epictrace.asr.engine import FasterWhisperEngine
 
-    whisper = WhisperModel(cfg.model, download_root=cache_dir, compute_type="int8")
+    whisper = WhisperModel(cfg.model, download_root=cache_dir, compute_type=cfg.compute_type)
     return FasterWhisperEngine(whisper, cfg)
 
 
