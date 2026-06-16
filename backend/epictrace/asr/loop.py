@@ -40,11 +40,14 @@ class StreamLoop:
         self._sources = sources
 
     def _unprocessed(self, channel: str) -> float:
-        """该路未处理秒数 = 绝对末端 - 已确认游标(FIX C:按未处理量排序,不用原始缓冲长度)。"""
+        """该路未扫描秒数 = 绝对末端 - 已扫描游标(FIX B:按「未扫描量」排序,不用确认游标)。
+
+        用 scanned_end 而非 last_confirmed_end:静音/VAD 空的源被扫过后未扫描量归零,不再霸占
+        调度器(否则确认游标停滞 → 该源永远「未处理量最大」→ 另一源被饿死、同段无限重解码)。"""
         src = self._sources.get(channel)
         if src is None:
             return 0.0
-        return max(0.0, src.available_seconds() - self._states[channel].last_confirmed_end)
+        return max(0.0, src.available_seconds() - self._states[channel].scanned_end)
 
     def _pick_source(self) -> str | None:
         cand = [(self._unprocessed(ch), ch) for ch in self._sources]
@@ -59,16 +62,26 @@ class StreamLoop:
             return
         self._transcribe_channel(ch)
 
-    def _transcribe_channel(self, ch: str) -> None:
-        """转写某路自游标起的未处理切片一次,平移回绝对时间,喂 StreamState 并 emit。"""
+    def _transcribe_channel(self, ch: str, slice_start_override: float | None = None) -> None:
+        """转写某路自游标起的未处理切片一次,平移回绝对时间,喂 StreamState 并 emit。
+
+        slice_start_override:冷启动追赶(FIX F)时从已扫描游标向前分块,显式给定切片起点;
+        正常情形为 None(走有界滑窗的 tail 回看)。两种情形末尾都推进 scanned_end 到切片末端
+        (含 0 段;FIX B)使调度按未扫描量排序。"""
         src = self._sources[ch]
         st = self._states[ch]
         tail = src.available_seconds()
         window = self._cfg.window_seconds
-        # 切片起点(STEP 1 有界滑窗):游标 / tail 回看 window_seconds / 缓冲头 三者取大——
-        # 游标负责正常推进,tail-window 上界把回看夹在 ~window_seconds 内(长 session 不重转
-        # 整段),base_offset 下界保证不越缓冲头。
-        slice_start_abs = max(st.last_confirmed_end, tail - window, src.base_offset())
+        if slice_start_override is not None:
+            # 冷启动追赶:从 scanned 游标向前 ~window 一块(夹在缓冲头内);切片末端是块尾而非 tail。
+            slice_start_abs = max(slice_start_override, src.base_offset())
+            slice_end_abs = min(tail, slice_start_abs + window)
+        else:
+            # 切片起点(STEP 1 有界滑窗):游标 / tail 回看 window_seconds / 缓冲头 三者取大——
+            # 游标负责正常推进,tail-window 上界把回看夹在 ~window_seconds 内(长 session 不重转
+            # 整段),base_offset 下界保证不越缓冲头。
+            slice_start_abs = max(st.last_confirmed_end, tail - window, src.base_offset())
+            slice_end_abs = tail
         pcm = src.window_from(slice_start_abs)
         prefix = st.partial.text if st.partial else ""
         segs = self._engine.transcribe_window(pcm, prefix=prefix, source=ch)
@@ -81,6 +94,8 @@ class StreamLoop:
             self._on_confirmed(c)
         if st.partial is not None:
             self._on_partial(st.partial)
+        # 本轮已扫描到切片末端 → 推进 scanned_end(含 0 段;FIX B),使静音源不再霸占调度。
+        st.mark_scanned(slice_end_abs)
 
     def flush(self) -> None:
         """排空短尾(FIX 3):正常 tick 只处理 ≥1s 未处理音频,短促一句话+停顿(尾段 <1s)永不被转。

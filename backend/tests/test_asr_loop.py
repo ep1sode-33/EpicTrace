@@ -55,21 +55,56 @@ def test_alternates_to_source_with_more_unprocessed_audio():
 
 
 def test_scheduler_ranks_by_unprocessed_not_raw_length():
-    """history 多但 cursor 已追平的源不被选;另一路有未处理音频才被选(FIX C)。"""
+    """history 多但已扫描追平的源不被选;另一路有未扫描音频才被选(FIX B 用 scanned_end)。"""
     eng = _FakeEngine({"mic": [_seg("新内容", 0, 2, "mic"), _seg("x", 2, 3, "mic")]})
     confirmed = []
     loop = StreamLoop(eng, AsrConfig(),
                       on_confirmed=confirmed.append, on_partial=lambda s: None)
-    # device:available 100s 历史很长,但 last_confirmed_end 已推到 100 → 未处理 0s,不该选。
-    # mic:available 5s,cursor 在 2s → 未处理 3s,应被选。
+    # device:available 100s 历史很长,但 scanned_end 已推到 100 → 未扫描 0s,不该选。
+    # mic:available 5s,scanned 在 2s → 未扫描 3s,应被选。
     loop.set_sources({
         "mic": _FakeSource(base=0.0, available=5.0),
         "device": _FakeSource(base=0.0, available=100.0),
     })
-    loop._states["device"].last_confirmed_end = 100.0
-    loop._states["mic"].last_confirmed_end = 2.0
+    loop._states["device"].scanned_end = 100.0
+    loop._states["mic"].scanned_end = 2.0
     loop.tick()
     assert eng.seen and eng.seen[0][0] == "mic"
+
+
+def test_silent_source_scanned_then_other_source_not_starved():
+    """FIX B:某路反复返回 0 段(静音/VAD 空)→ scanned_end 推进 → 其未扫描量降到 0 →
+    调度不再霸占它,另一路(有未处理音频)被选,不被饿死;且同段不无限重解码。"""
+    # mic 永远返回 0 段(静音);device 有真实内容。
+    eng = _FakeEngine({"mic": [], "device": [_seg("讲座", 0, 2, "device"), _seg("x", 2, 3, "device")]})
+    confirmed = []
+    loop = StreamLoop(eng, AsrConfig(),
+                      on_confirmed=confirmed.append, on_partial=lambda s: None)
+    mic = _FakeSource(base=0.0, available=10.0)    # 未扫描 10s(初始)
+    device = _FakeSource(base=0.0, available=5.0)  # 未扫描 5s
+    loop.set_sources({"mic": mic, "device": device})
+    # 第一轮:mic 未处理更多(10 > 5)→ 被选,但 0 段。scanned_end 应推进到 mic 末端。
+    loop.tick()
+    assert eng.seen[0][0] == "mic"
+    assert loop._states["mic"].scanned_end == 10.0      # 0 段也推进扫描游标
+    assert loop._unprocessed("mic") == 0.0              # 未扫描量归零
+    # 第二轮:mic 未扫描 0(< _MIN_PENDING)→ device(5s)被选,不被饿死。
+    loop.tick()
+    assert eng.seen[1][0] == "device"
+    assert any(c.source == "device" for c in confirmed)
+
+
+def test_unprocessed_uses_scanned_not_confirmed_cursor():
+    """FIX B:_unprocessed(调度)按 scanned_end 算,不按 last_confirmed_end。
+    某路确认游标停在 0(去重拒/未确认)但已扫描到末端 → 调度视为无未处理量。"""
+    eng = _FakeEngine({"mic": []})
+    loop = StreamLoop(eng, AsrConfig(),
+                      on_confirmed=lambda s: None, on_partial=lambda s: None)
+    src = _FakeSource(base=0.0, available=8.0)
+    loop.set_sources({"mic": src})
+    loop._states["mic"].last_confirmed_end = 0.0
+    loop._states["mic"].scanned_end = 8.0   # 已扫描到末端
+    assert loop._unprocessed("mic") == 0.0  # 按 scanned_end 算 → 0
 
 
 def test_segments_shifted_to_absolute_time():
