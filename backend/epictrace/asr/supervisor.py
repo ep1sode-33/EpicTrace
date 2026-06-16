@@ -44,7 +44,9 @@ class AsrSupervisor:
     """
 
     def __init__(self, *, spawn: Spawn | None = None) -> None:
-        self._spawn = spawn or _default_spawn
+        # None → start() 时回退到模块级 _default_spawn(在调用点解析,便于测试统一 monkeypatch
+        # _default_spawn:即使 supervisor 在 patch 之前就构造好了,也不会 spawn 真子进程)。
+        self._spawn = spawn
         self._procs: dict[int, _Entry] = {}
         # pause/resume 暂存:session_id -> (sources, staging_dir, model, config)
         self._paused: dict[int, tuple[list[str], str, str, dict]] = {}
@@ -82,7 +84,8 @@ class AsrSupervisor:
         if session_id in self._procs:
             self.stop(session_id)
         argv = self._build_argv(session_id, audio, staging_dir, model, cfg)
-        proc = self._spawn(argv)
+        spawn = self._spawn or _default_spawn  # 调用点解析,便于测试 patch 模块级默认
+        proc = spawn(argv)
         self._procs[session_id] = _Entry(proc=proc, sources=audio,
                                          staging_dir=staging_dir, model=model, config=cfg)
 
