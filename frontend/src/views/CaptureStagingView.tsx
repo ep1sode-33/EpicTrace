@@ -61,7 +61,7 @@ function kindLabel(kind: string, meta?: Record<string, unknown>): string {
     case "note": return "笔记";
     case "clipboard": return "剪贴板";
     case "screenshot": return "截图";
-    case "transcription": return meta?.source === "device" ? "转写 · 内录" : "转写 · 外录";
+    case "transcription": return meta?.source === "device" ? "系统声音采集" : "麦克风";
     case "pause": return "暂停";
     case "resume": return "继续";
     default: return kind;

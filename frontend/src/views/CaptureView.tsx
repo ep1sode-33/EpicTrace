@@ -14,13 +14,13 @@ import { Button } from "@/components/ui/button";
 import { api, type CaptureSessionDetail } from "@/lib/api";
 import { native } from "@/lib/native";
 
-/** 来源选项;笔记/剪贴板/截图 + 外录(麦克风)/内录(系统声音)均已可勾选 */
+/** 来源选项;笔记/剪贴板/截图 + 麦克风/系统声音采集 均可勾选 */
 const SOURCE_OPTIONS = [
   { id: "note", icon: StickyNote, label: "笔记" },
   { id: "clipboard", icon: Clipboard, label: "剪贴板" },
   { id: "screenshot", icon: Camera, label: "截图" },
-  { id: "mic", icon: Mic, label: "🎤 外录(麦克风)" },
-  { id: "system_audio", icon: Volume2, label: "🔊 内录(系统声音)" },
+  { id: "mic", icon: Mic, label: "麦克风" },
+  { id: "system_audio", icon: Volume2, label: "系统声音采集" },
 ];
 
 /** 将秒数格式化为 MM:SS */
@@ -30,12 +30,25 @@ function formatTime(secs: number): string {
   return `${m}:${s}`;
 }
 
-/** transcription 事件的来源:meta.source 为 "mic"(外录)或 "device"(内录)。 */
+/** transcription 事件来源:meta.source 为 "device"(系统声音采集)否则视作麦克风。 */
 function sourceLabel(meta: Record<string, unknown>): string {
-  return meta?.source === "device" ? "内录" : "外录";
+  return meta?.source === "device" ? "系统声音采集" : "麦克风";
 }
-function sourceEmoji(meta: Record<string, unknown>): string {
-  return meta?.source === "device" ? "🔊" : "🎤";
+
+/** 事件类型的圆点颜色(不用 emoji)。 */
+function eventDotColor(kind: string): string {
+  switch (kind) {
+    case "note":
+      return "bg-sky-500";
+    case "clipboard":
+      return "bg-zinc-400";
+    case "screenshot":
+      return "bg-violet-500";
+    case "transcription":
+      return "bg-teal-500";
+    default:
+      return "bg-muted-foreground";
+  }
 }
 
 export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => void } = {}) {
@@ -459,9 +472,10 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
             <ul className="divide-y divide-border/50 overflow-hidden rounded-xl border border-border/70 bg-card">
               {[...textEvents].reverse().map((ev) => (
                 <li key={ev.id} className="flex items-start gap-3 px-4 py-3">
-                  <span className="mt-0.5 text-base leading-none">
-                    {ev.kind === "note" ? "✏️" : ev.kind === "clipboard" ? "📋" : ev.kind === "screenshot" ? "📷" : ev.kind === "transcription" ? sourceEmoji(ev.meta) : "•"}
-                  </span>
+                  <span
+                    className={`mt-1.5 size-2 shrink-0 rounded-full ${eventDotColor(ev.kind)}`}
+                    aria-hidden
+                  />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
                       <p className="truncate text-sm text-foreground">{ev.payload || "(无内容)"}</p>

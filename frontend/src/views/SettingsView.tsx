@@ -367,7 +367,7 @@ function AsrSection() {
       <div className="flex flex-col gap-1">
         <h2 className="text-sm font-semibold text-foreground">语音转写(ASR)</h2>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          采集 session 里 🎤 外录 / 🔊 内录的实时转写引擎(faster-whisper,本地运行)。
+          采集 session 里麦克风 / 系统声音采集的实时转写引擎(faster-whisper,本地运行)。
         </p>
       </div>
 

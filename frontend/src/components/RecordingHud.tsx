@@ -48,9 +48,9 @@ function dotColor(kind: string): string {
   }
 }
 
-/** transcription 事件来源标签:meta.source 为 "device"(内录)否则视作 "mic"(外录)。 */
+/** transcription 事件来源标签:meta.source 为 "device"(系统声音采集)否则视作麦克风。 */
 function sourceTag(meta: Record<string, unknown>): string {
-  return meta?.source === "device" ? "内录" : "mic";
+  return meta?.source === "device" ? "系统声音采集" : "麦克风";
 }
 
 /** 紧凑图标按钮(HUD 专用) */
@@ -321,9 +321,9 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       >
         <Crop className="size-3.5" />
       </IconBtn>
-      {/* 外录/内录:本 session 是否启用了该音源(只读指示,采集中不可改);启用则点亮。 */}
+      {/* 麦克风/系统声音:本 session 是否启用了该音源(只读指示,采集中不可改);启用则点亮。 */}
       <span
-        title={sources.includes("mic") ? "外录(麦克风)采集中" : "本 session 未启用外录"}
+        title={sources.includes("mic") ? "麦克风采集中" : "本 session 未启用麦克风"}
         className={`flex size-7 shrink-0 items-center justify-center rounded-md ${
           sources.includes("mic") ? "text-teal-500" : "text-muted-foreground/30"
         }`}
@@ -331,7 +331,7 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
         <Mic className="size-3.5" />
       </span>
       <span
-        title={sources.includes("system_audio") ? "内录(系统声音)采集中" : "本 session 未启用内录"}
+        title={sources.includes("system_audio") ? "系统声音采集中" : "本 session 未启用系统声音采集"}
         className={`flex size-7 shrink-0 items-center justify-center rounded-md ${
           sources.includes("system_audio") ? "text-teal-500" : "text-muted-foreground/30"
         }`}
@@ -398,7 +398,7 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
                       <div className="min-w-0 flex-1">
                         <div className="break-words text-xs leading-snug text-muted-foreground/80">
                           <span className="mr-1 rounded bg-teal-500/10 px-1 py-px text-[9px] font-medium text-teal-700/80 dark:text-teal-300/80">
-                            {source === "device" ? "内录" : "mic"}
+                            {source === "device" ? "系统声音采集" : "麦克风"}
                           </span>
                           {text}
                         </div>
