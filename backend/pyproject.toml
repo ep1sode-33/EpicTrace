@@ -22,6 +22,12 @@ dependencies = [
   "langgraph",
   "langchain-openai",
   "sse-starlette",
+  # ASR(Plan 9):faster-whisper(带 CTranslate2)在隔离子进程里流式转写;sounddevice
+  # 采 mic(需系统 PortAudio);soundfile 把原始 PCM 落 wav。这些只在 ASR 子进程运行期用,
+  # 测试套件用 fake / importorskip 不硬依赖它们。
+  "faster-whisper",
+  "sounddevice",
+  "soundfile",
   # 注:MinerU 不进核心环境(几 GB)。它由 MinerUProvisioner 用 uv 装进
   # <data_dir>/.MinerU-venv,运行期子进程调用(见 epictrace/media/mineru*.py)。
 ]

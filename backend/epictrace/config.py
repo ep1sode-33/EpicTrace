@@ -53,5 +53,12 @@ class AppConfig:
         return self.data_dir / ".MinerU-venv"
 
     @property
+    def asr_model_dir(self) -> Path:
+        # faster-whisper 权重缓存(WhisperModel download_root):放 data_dir 下的固定子目录,
+        # 与 HF 全局缓存解耦,便于随 app 数据目录迁移/清理。AsrProvisioner 默认用 HF hub 缓存,
+        # 子进程显式传此目录给 WhisperModel(download_root=...)统一落盘。
+        return self.data_dir / ".asr-models"
+
+    @property
     def provenance_dir(self) -> Path:
         return self.data_dir / "provenance"
