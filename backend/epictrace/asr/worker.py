@@ -15,10 +15,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import signal
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+
+from epictrace.asr.config import AsrConfig
 
 _log = logging.getLogger("epictrace.asr.worker")
 
@@ -35,18 +38,28 @@ class WorkerArgs:
     sources: list[str]
     staging_dir: str
     model: str
+    config: AsrConfig
 
 
 def parse_args(argv: list[str]) -> WorkerArgs:
-    """解析 worker 命令行(纯函数,可单测)。argv 不含程序名(同 argparse 习惯)。"""
+    """解析 worker 命令行(纯函数,可单测)。argv 不含程序名(同 argparse 习惯)。
+
+    --config 是路由经 SettingsService 解析好的完整 ASR 设置 JSON,回程成 AsrConfig(vad/阈值/
+    force_confirm_after 等非默认值都生效,FIX D);无 --config 时落 model 单字段(其余默认)。
+    """
     p = argparse.ArgumentParser(prog="epictrace.asr.worker")
     p.add_argument("--session", dest="session", type=int, required=True)
     p.add_argument("--staging", dest="staging", required=True)
     p.add_argument("--model", dest="model", default="large-v3")
+    p.add_argument("--config", dest="config", default=None)
     p.add_argument("--sources", dest="sources", nargs="+", required=True)
     ns = p.parse_args(argv)
+    if ns.config:
+        cfg = AsrConfig.from_dict(json.loads(ns.config))
+    else:
+        cfg = AsrConfig(model=ns.model)
     return WorkerArgs(session_id=ns.session, sources=list(ns.sources),
-                      staging_dir=ns.staging, model=ns.model)
+                      staging_dir=ns.staging, model=ns.model, config=cfg)
 
 
 def _post(path: str, body: dict) -> None:
@@ -64,8 +77,11 @@ def _post(path: str, body: dict) -> None:
 
 def _post_confirmed(session_id: int, seg) -> None:
     # confirmed 段 → 持久事件 capture_events(kind=transcription,meta 带 source + 词级时间戳)。
+    # audio_offset = 该段绝对起始秒(与落盘 wav 同一时间轴),供引用回跳定位音频位置(FIX A);
+    # start/end 与词级时间戳均为会话绝对时间(StreamLoop 已把 slice-相对时间平移回绝对)。
     meta = {
         "source": seg.source,
+        "audio_offset": seg.start,
         "start": seg.start,
         "end": seg.end,
         "words": [{"w": w.word, "s": w.start, "e": w.end} for w in seg.words],
@@ -80,16 +96,34 @@ def _post_partial(session_id: int, seg) -> None:
           {"source": seg.source, "text": seg.text})
 
 
-def _build_engine(model: str, cache_dir: str):
-    """构建 provision 好的 faster-whisper 引擎(Apple Silicon int8)。子进程内执行,真模型。"""
+def _build_engine(cfg: AsrConfig, cache_dir: str):
+    """用解析好的完整 AsrConfig 构建 faster-whisper 引擎(Apple Silicon int8)。子进程内执行,真模型。"""
     from faster_whisper import WhisperModel
 
-    from epictrace.asr.config import AsrConfig
     from epictrace.asr.engine import FasterWhisperEngine
 
-    cfg = AsrConfig(model=model)
-    whisper = WhisperModel(model, download_root=cache_dir, compute_type="int8")
-    return FasterWhisperEngine(whisper, cfg), cfg
+    whisper = WhisperModel(cfg.model, download_root=cache_dir, compute_type="int8")
+    return FasterWhisperEngine(whisper, cfg)
+
+
+def _wav_path(staging_dir: str, channel: str) -> str:
+    """每次拉起用唯一文件名 audio-{channel}-{秒级时间戳}.wav,避免 pause(=停+重启)覆盖
+    暂停前的音频(FIX F)。OrganizeService 按 audio-*.wav glob,所有分段文件都会入库。"""
+    return f"{staging_dir}/audio-{channel}-{int(time.time())}.wav"
+
+
+def _shutdown(sources: dict, wavs: dict) -> None:
+    """优雅收尾(可单测):停所有源、关所有 wav 文件句柄。各步独立兜底,一处失败不漏其余。"""
+    for s in sources.values():
+        try:
+            s.stop()
+        except Exception as e:  # noqa: BLE001
+            _log.warning("ASR source stop failed: %s", e)
+    for w in wavs.values():
+        try:
+            w.close()
+        except Exception as e:  # noqa: BLE001
+            _log.warning("ASR wav close failed: %s", e)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -106,9 +140,18 @@ def main(argv: list[str] | None = None) -> int:
     from epictrace.config import AppConfig
 
     args = parse_args(argv if argv is not None else sys.argv[1:])
-    config = AppConfig()
-    config.asr_model_dir.mkdir(parents=True, exist_ok=True)
-    engine, cfg = _build_engine(args.model, str(config.asr_model_dir))
+    cfg = args.config
+    app_config = AppConfig()
+    app_config.asr_model_dir.mkdir(parents=True, exist_ok=True)
+    engine = _build_engine(cfg, str(app_config.asr_model_dir))
+
+    # SIGTERM(supervisor stop 发出)→ 置停止标志,主循环检测后退出,finally 兜底 flush + 关 wav。
+    stop_flag = {"stop": False}
+
+    def _on_sigterm(_signum, _frame):  # noqa: ANN001
+        stop_flag["stop"] = True
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     # 起选中音源。worker 内部用 mic/device 二元通道命名(system_audio → device)。
     sources: dict[str, object] = {}
@@ -121,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             s = MicSource(rms_normalize_enabled=cfg.rms_normalize)
         else:
             # 系统内录 helper 二进制路径(随 app 构建到 data_dir/bin;Task 12)。
-            helper = str(config.data_dir / "bin" / "epictrace-sysaudio")
+            helper = str(app_config.data_dir / "bin" / "epictrace-sysaudio")
             s = SystemAudioSource(helper, rms_normalize_enabled=cfg.rms_normalize)
         try:
             s.start()
@@ -129,10 +172,9 @@ def main(argv: list[str] | None = None) -> int:
             _log.error("ASR source %s failed to start: %s", src, e)
             continue
         sources[channel] = s
-        # 原始音频边录边追加落 staging/audio-{channel}.wav(16k mono),供回放/重转写。
-        wav_path = f"{args.staging_dir}/audio-{channel}.wav"
-        wavs[channel] = sf.SoundFile(wav_path, mode="w", samplerate=SAMPLE_RATE,
-                                     channels=1, subtype="FLOAT")
+        # 原始音频边录边追加落唯一文件名 wav(16k mono),供回放/重转写(pause 不覆盖,FIX F)。
+        wavs[channel] = sf.SoundFile(_wav_path(args.staging_dir, channel), mode="w",
+                                     samplerate=SAMPLE_RATE, channels=1, subtype="FLOAT")
 
     if not sources:
         _log.error("ASR worker: no audio source started, exiting")
@@ -143,30 +185,33 @@ def main(argv: list[str] | None = None) -> int:
         on_confirmed=lambda seg: _post_confirmed(args.session_id, seg),
         on_partial=lambda seg: _post_partial(args.session_id, seg),
     )
+    loop.set_sources(sources)
 
     written = {ch: 0 for ch in sources}
     try:
-        while True:
-            audio = {"mic": b"", "device": b""}
-            pending = {"mic": 0.0, "device": 0.0}
+        while not stop_flag["stop"]:
             for channel, s in sources.items():
                 pcm = s.read()
-                audio[channel] = pcm
-                pending[channel] = s.pending_seconds()
                 # 增量把新样本写入 wav(read 返回全量,只写未写过的尾巴)。
                 if pcm.shape[0] > written[channel]:
                     wavs[channel].write(pcm[written[channel]:])
                     written[channel] = pcm.shape[0]
-            loop.set_pending(mic=pending["mic"], device=pending["device"])
-            loop.tick(audio=audio)
+            loop.tick()
             time.sleep(_TICK_INTERVAL)
     except KeyboardInterrupt:
         pass
     finally:
-        for s in sources.values():
-            s.stop()
-        for w in wavs.values():
-            w.close()
+        # 退出前再 flush 一次每路未写尾巴,然后停源 + 关 wav(flush 最后 confirmed 段由
+        # 退出前最后一轮 loop.tick + 上面的增量写共同保证;此处确保 wav 收尾完整)。
+        for channel, s in sources.items():
+            try:
+                pcm = s.read()
+                if pcm.shape[0] > written[channel]:
+                    wavs[channel].write(pcm[written[channel]:])
+                    written[channel] = pcm.shape[0]
+            except Exception as e:  # noqa: BLE001
+                _log.warning("ASR final wav flush failed: %s", e)
+        _shutdown(sources, wavs)
     return 0
 
 

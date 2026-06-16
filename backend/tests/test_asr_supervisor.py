@@ -41,6 +41,92 @@ def test_argv_carries_sources_staging_model():
     assert "/tmp/7" in argv and "medium" in argv
 
 
+def test_argv_carries_full_config_json_roundtrips():
+    """FIX D:supervisor 把完整 ASR 设置以 --config <json> 透传;worker.parse_args 回程出
+    带非默认值的 AsrConfig(不只 model)。"""
+    import json
+
+    from epictrace.asr.worker import parse_args
+
+    spawned = []
+    sup = AsrSupervisor(spawn=lambda argv: spawned.append(argv) or object())
+    settings = {"model": "medium", "vad": False, "vad_threshold": 0.25,
+                "force_confirm_after": 7, "language": "en"}
+    sup.start(session_id=11, sources=["mic"], staging_dir="/tmp/11",
+              model="medium", config=settings)
+    argv = spawned[0]
+    assert "--config" in argv
+    cfg_json = argv[argv.index("--config") + 1]
+    assert json.loads(cfg_json)["vad_threshold"] == 0.25
+    # worker.parse_args 把它回程成带非默认值的 AsrConfig。
+    args = parse_args(argv[3:])  # 去掉 python -m epictrace.asr.worker
+    assert args.config.model == "medium"
+    assert args.config.vad is False
+    assert args.config.vad_threshold == 0.25
+    assert args.config.force_confirm_after == 7
+    assert args.config.language == "en"
+
+
+def test_stop_kills_after_wait_timeout():
+    """FIX B:terminate → wait 超时 → kill。假件 wait 首次抛 TimeoutExpired,记录调用序。"""
+    import subprocess
+
+    events = []
+
+    class _P:
+        def __init__(self):
+            self._waits = 0
+
+        def terminate(self):
+            events.append("terminate")
+
+        def kill(self):
+            events.append("kill")
+
+        def wait(self, timeout=None):
+            self._waits += 1
+            events.append(f"wait{self._waits}")
+            if self._waits == 1:
+                raise subprocess.TimeoutExpired(cmd="worker", timeout=timeout)
+            return 0
+
+        def poll(self):
+            return None
+
+    procs = []
+    sup = AsrSupervisor(spawn=lambda argv: procs.append(_P()) or procs[-1])
+    sup.start(session_id=5, sources=["mic"], staging_dir="/tmp/5")
+    sup.stop(5)
+    # terminate → wait(超时) → kill → wait
+    assert events == ["terminate", "wait1", "kill", "wait2"]
+
+
+def test_stop_graceful_no_kill():
+    """worker 在超时前优雅退出 → 不强杀。"""
+    events = []
+
+    class _P:
+        def terminate(self):
+            events.append("terminate")
+
+        def kill(self):
+            events.append("kill")
+
+        def wait(self, timeout=None):
+            events.append("wait")
+            return 0
+
+        def poll(self):
+            return None
+
+    procs = []
+    sup = AsrSupervisor(spawn=lambda argv: procs.append(_P()) or procs[-1])
+    sup.start(session_id=6, sources=["mic"], staging_dir="/tmp/6")
+    sup.stop(6)
+    assert events == ["terminate", "wait"]
+    assert "kill" not in events
+
+
 def test_pause_resume_restarts_worker():
     events = []
 

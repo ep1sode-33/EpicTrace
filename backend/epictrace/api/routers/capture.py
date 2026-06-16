@@ -64,13 +64,18 @@ def start_session(payload: StartSessionIn, request: Request,
     return CaptureSessionOut.model_validate(sess)
 
 
-def _asr_model(request: Request) -> str:
-    """从持久化 ASR 设置取模型大小;读取失败则回落默认。"""
+def _asr_settings(request: Request) -> dict:
+    """从持久化 ASR 设置取完整配置(model/vad/阈值/force_confirm_after…);读取失败回落默认。
+
+    返回完整 dict(经 SettingsService.get_asr_settings → AsrConfig 规范化),透传给 supervisor,
+    worker 据此建完整 AsrConfig —— 非默认调参全部生效(FIX D)。
+    """
     try:
         from epictrace.services.settings import SettingsService
-        return SettingsService(request.app.state.config).get_asr_settings()["model"]
+        return SettingsService(request.app.state.config).get_asr_settings()
     except Exception:  # noqa: BLE001 — 设置读不到不应挡 session
-        return "large-v3"
+        from epictrace.asr.config import AsrConfig
+        return AsrConfig().to_dict()
 
 
 def _start_asr(request: Request, sess) -> None:
@@ -78,8 +83,10 @@ def _start_asr(request: Request, sess) -> None:
     if sup is None:
         return
     try:
+        cfg = _asr_settings(request)
         sup.start(session_id=sess.id, sources=list(sess.sources),
-                  staging_dir=sess.staging_dir, model=_asr_model(request))
+                  staging_dir=sess.staging_dir, model=cfg.get("model", "large-v3"),
+                  config=cfg)
     except Exception as e:  # noqa: BLE001 — 子进程拉起失败降级,不挡 session
         _log.warning("ASR supervisor.start failed for session %s: %s", sess.id, e)
 
@@ -162,12 +169,16 @@ def _asr_pause_resume(request: Request, sid: int, which: str) -> None:
 
 @router.post("/sessions/{sid}/stop", response_model=CaptureSessionOut)
 def stop_session(sid: int, request: Request, db: Database = Depends(get_db)) -> CaptureSessionOut:
+    svc = CaptureService(db)
+    # 先确认 session 存在(404),再停 ASR worker —— 必须在翻 staged 之前停(FIX B):否则
+    # worker 收尾时的最后几个 confirmed POST 撞到 SessionNotRecording 409 被丢。worker 收
+    # SIGTERM 后会 flush 最后 confirmed 段 + finalize wav,这些 POST 需 session 仍 recording。
     try:
-        sess = CaptureService(db).stop(sid)
+        svc.get_session(sid)
     except CaptureSessionNotFound:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
-    # 停 session → 停 ASR worker(flush 最后 confirmed 段 + finalize wav 由 worker 退出时收尾)。
     _stop_asr(request, sid)
+    sess = svc.stop(sid)  # 此刻才翻 staged
     request.app.state.asr_partials.pop(sid, None)  # 清掉该 session 的内存态 partial
     return CaptureSessionOut.model_validate(sess)
 

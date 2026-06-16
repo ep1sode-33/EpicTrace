@@ -76,6 +76,71 @@ def test_stop_and_delete_call_supervisor_stop(tmp_path):
     assert sup.stopped.count(sid) >= 1
 
 
+def test_stop_calls_asr_stop_before_status_flip(tmp_path):
+    """FIX B:stop_session 必须先停 ASR(此时 session 仍 recording)再翻 staged,
+    否则 worker 最后几个 POST 撞 SessionNotRecording 409。假 supervisor 在 stop 时回查 session 状态。"""
+    from epictrace.config import AppConfig
+    from epictrace.db import Database
+    from epictrace.services.capture import CaptureService
+
+    db = Database(AppConfig(data_dir=tmp_path))
+    db.create_all()
+    from epictrace.api.app import create_app
+    from fastapi.testclient import TestClient
+
+    class _OrderSup:
+        def __init__(self):
+            self.status_at_stop = []
+
+        def start(self, **kw):
+            pass
+
+        def stop(self, sid):
+            # 停 ASR 时回查 session 当前状态;若已是 staged 说明顺序错了。
+            self.status_at_stop.append(CaptureService(db).get_session(sid).status)
+
+        def pause(self, sid):
+            pass
+
+        def resume(self, sid):
+            pass
+
+    sup = _OrderSup()
+    app = create_app(db=db)
+    app.state.asr_supervisor = sup
+    c = TestClient(app)
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
+    c.post(f"/api/capture/sessions/{sid}/stop")
+    # ASR 停的那一刻,session 还应是 recording(状态翻转在 ASR 停之后)。
+    assert sup.status_at_stop == ["recording"]
+
+
+def test_start_passes_resolved_config_to_supervisor(tmp_path):
+    """FIX D:路由经 SettingsService 解析完整 ASR 设置并传给 supervisor.start(config=...)。"""
+    from epictrace.config import AppConfig
+    from epictrace.services.settings import SettingsService
+
+    cfg_app = AppConfig(data_dir=tmp_path)
+    SettingsService(cfg_app).set_asr_settings({"model": "medium", "vad_threshold": 0.33})
+
+    from epictrace.db import Database
+    db = Database(cfg_app)
+    db.create_all()
+    from epictrace.api.app import create_app
+    from fastapi.testclient import TestClient
+
+    sup = _Sup()
+    app = create_app(db=db)
+    app.state.asr_supervisor = sup
+    c = TestClient(app)
+    c.post("/api/capture/sessions", json={"sources": ["mic"]})
+    assert sup.started
+    kw = sup.started[0]
+    assert kw["model"] == "medium"
+    assert kw["config"]["vad_threshold"] == 0.33
+    assert kw["config"]["model"] == "medium"
+
+
 def test_pause_resume_call_supervisor(tmp_path):
     sup = _Sup()
     c = _client(tmp_path, sup)
