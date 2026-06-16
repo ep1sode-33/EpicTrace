@@ -153,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
               {"kind": "note", "payload": "语音模型未就绪,本次未启动转录", "meta": {"asr_error": True}})
         return 1
 
+    import numpy as np
     import soundfile as sf
 
     from epictrace.asr.audio_sources import (
@@ -207,7 +208,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     loop.set_sources(sources)
 
+    # 启动诊断:让真机终端能确认 worker 跑起来了 + 起了哪些源。
+    print(f"[EpicTrace ASR] worker 启动: session={args.session_id} "
+          f"sources={list(sources.keys())} model={cfg.model}", flush=True)
+
     written = {ch: 0 for ch in sources}
+    last_diag = time.time()
     try:
         while not stop_flag["stop"]:
             for channel, s in sources.items():
@@ -217,6 +223,21 @@ def main(argv: list[str] | None = None) -> int:
                     wavs[channel].write(pcm[written[channel]:])
                     written[channel] = pcm.shape[0]
             loop.tick()
+            # 每 5s 打印每路采集时长 + 近段 RMS 能量:近零能量 = 没收到声音(权限/设备),
+            # 而非转写问题——让「mic 寄」在终端一眼可诊断。
+            now = time.time()
+            if now - last_diag >= 5.0:
+                last_diag = now
+                for channel, s in sources.items():
+                    buf = s.read()
+                    if buf.size:
+                        recent = buf[-SAMPLE_RATE * 2:]  # 最近 ~2s
+                        rms = float(np.sqrt(np.mean(np.square(recent.astype(np.float64)))))
+                        hint = " (近零能量 → 检查麦克风/录音权限或输入设备)" if rms < 1e-3 else ""
+                        print(f"[EpicTrace ASR] {channel}: 已采 {buf.size / SAMPLE_RATE:.1f}s, "
+                              f"近段 RMS={rms:.5f}{hint}", flush=True)
+                    else:
+                        print(f"[EpicTrace ASR] {channel}: 尚无音频(检查权限/设备)", flush=True)
             time.sleep(_TICK_INTERVAL)
     except KeyboardInterrupt:
         pass
