@@ -476,6 +476,15 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
           </Button>
         </div>
 
+        {/* 音频转写状态:有音频源时提示「在听 + 说话才出字幕」,避免「放歌没字幕」被误当成坏了
+            (音乐/无人声会被 VAD 正确判为非语音 → 不识别,属正常)。 */}
+        {(session.sources.includes("mic") || session.sources.includes("system_audio")) && (
+          <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-teal-500" aria-hidden />
+            语音转写聆听中 —— 说话即出字幕;音乐 / 无人声不会识别(属正常)。
+          </div>
+        )}
+
         {/* Live feed */}
         <div className="space-y-1">
           <p className="text-xs font-medium text-muted-foreground">
