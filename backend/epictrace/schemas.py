@@ -180,6 +180,7 @@ class AsrSettingsIn(BaseModel):
     stall_seek_seconds: float | None = None
     rms_normalize: bool | None = None
     halluc_filter_enabled: bool | None = None
+    input_device: int | None = None
 
 
 class AsrSettingsOut(BaseModel):
@@ -199,6 +200,13 @@ class AsrSettingsOut(BaseModel):
     stall_seek_seconds: float
     rms_normalize: bool
     halluc_filter_enabled: bool
+    input_device: int | None = None
+
+
+class AsrDeviceOut(BaseModel):
+    """一个输入设备(麦克风)。index = sounddevice 设备索引,持久化进 input_device。"""
+    index: int
+    name: str
 
 
 class AsrStatusOut(BaseModel):

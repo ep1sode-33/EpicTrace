@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from epictrace.api.deps import get_asr_provisioner, get_provisioner
 from epictrace.llm.openai_compat import OpenAICompatLLM
 from epictrace.schemas import (
+    AsrDeviceOut,
     AsrSettingsIn,
     AsrSettingsOut,
     AsrStatusOut,
@@ -188,11 +189,40 @@ def get_asr_settings(request: Request):
 @router.put("/asr/settings", response_model=AsrSettingsOut)
 def put_asr_settings(payload: AsrSettingsIn, request: Request):
     # 部分更新:只把显式给出(非 None)的键传给服务层合并,其余保留现状。
-    patch = {k: v for k, v in payload.model_dump().items() if v is not None}
+    sent = payload.model_dump(exclude_unset=True)
+    patch = {k: v for k, v in sent.items() if v is not None}
+    # input_device 例外:它的「系统默认」就是 None,用户显式选系统默认须能落库,
+    # 故只要请求显式带了 input_device(即便为 null)就纳入 patch(不被上面的非 None 过滤丢掉)。
+    if "input_device" in sent:
+        patch["input_device"] = sent["input_device"]
     try:
         return _svc(request).set_asr_settings(patch)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/asr/devices", response_model=list[AsrDeviceOut])
+def asr_devices():
+    """枚举可用的输入设备(麦克风),供用户挑选采集输入(Feature A)。
+
+    sounddevice 懒导入(测试/无 PortAudio 环境不应硬依赖它);任何错误(ImportError /
+    PortAudio 未装 / 查询失败)都回空列表而非 500——拿不到设备表不该让设置页崩。
+    只回 max_input_channels>0 的设备(输出设备不能当输入)。
+    """
+    try:
+        import sounddevice as sd
+
+        devices = sd.query_devices()
+    except Exception:  # noqa: BLE001 — 缺 sounddevice/PortAudio 或查询失败都回空表
+        return []
+    out: list[dict] = []
+    for i, d in enumerate(devices):
+        try:
+            if d.get("max_input_channels", 0) > 0:
+                out.append({"index": i, "name": d.get("name", "")})
+        except Exception:  # noqa: BLE001 — 单个设备项异常不拖垮整张表
+            continue
+    return out
 
 
 @router.get("/asr/status", response_model=AsrStatusOut)

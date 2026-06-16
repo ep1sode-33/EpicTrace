@@ -14,3 +14,11 @@ def test_defaults_are_weak_audio_friendly():
 def test_from_dict_overrides():
     c = AsrConfig.from_dict({"model": "medium", "vad": False})
     assert c.model == "medium" and c.vad is False and c.language == "zh"
+
+
+def test_input_device_defaults_none_and_roundtrips():
+    # 默认 None(系统默认输入设备);from_dict/to_dict 往返保住显式索引。
+    assert AsrConfig().input_device is None
+    c = AsrConfig.from_dict({"input_device": 2})
+    assert c.input_device == 2
+    assert c.to_dict()["input_device"] == 2

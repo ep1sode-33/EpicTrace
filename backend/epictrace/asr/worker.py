@@ -182,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
         if channel is None:
             continue
         if src == "mic":
-            s = MicSource(rms_normalize_enabled=cfg.rms_normalize)
+            # 用户在设置里选的输入设备索引(None = 系统默认);Feature A 让弱/错默认麦克风可换。
+            s = MicSource(device=cfg.input_device, rms_normalize_enabled=cfg.rms_normalize)
         else:
             # 系统内录 helper 二进制路径(随 app 构建到 data_dir/bin;Task 12)。
             helper = str(app_config.data_dir / "bin" / "epictrace-sysaudio")

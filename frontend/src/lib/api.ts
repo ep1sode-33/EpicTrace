@@ -72,6 +72,13 @@ export interface AsrSettings {
   stall_seek_seconds: number;
   rms_normalize: boolean;
   halluc_filter_enabled: boolean;
+  /** sounddevice 输入设备索引;null = 系统默认输入。 */
+  input_device: number | null;
+}
+/** 一个可选输入设备(麦克风)。index = sounddevice 设备索引。 */
+export interface AsrDevice {
+  index: number;
+  name: string;
 }
 export interface AsrStatus {
   /** not_downloaded | downloading | ready | failed */
@@ -225,6 +232,9 @@ export const api = {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     }).then(j<AsrSettings>),
+  // 可选输入设备(麦克风)列表。无 sounddevice/PortAudio 时后端回 []。
+  getAsrDevices: () =>
+    fetch(`${BASE}/api/asr/devices`).then(j<AsrDevice[]>),
   getAsrStatus: () =>
     fetch(`${BASE}/api/asr/status`).then(j<AsrStatus>),
   downloadAsrModel: () =>

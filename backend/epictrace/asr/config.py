@@ -20,6 +20,7 @@ class AsrConfig:
     stall_seek_seconds: float = 0.8
     rms_normalize: bool = True
     halluc_filter_enabled: bool = True
+    input_device: int | None = None   # sounddevice 输入设备索引;None = 系统默认输入
 
     _VALID_MODELS = ("large-v3", "distil-large-v3", "medium", "small")
 

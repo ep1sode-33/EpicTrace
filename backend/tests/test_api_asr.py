@@ -101,6 +101,30 @@ def test_put_asr_settings_rejects_bad_model(app_client):
     assert r.status_code == 400
 
 
+def test_put_get_input_device_roundtrip(app_client):
+    """Feature A:选输入设备索引 → PUT 持久化 → GET 取回。默认 None。"""
+    assert app_client.get("/api/asr/settings").json()["input_device"] is None
+    r = app_client.put("/api/asr/settings", json={"input_device": 3})
+    assert r.status_code == 200
+    assert r.json()["input_device"] == 3
+    assert app_client.get("/api/asr/settings").json()["input_device"] == 3
+
+
+# ---- GET /api/asr/devices:输入设备列表(sounddevice 缺/出错回 [],绝不 500)----
+
+
+def test_get_asr_devices_returns_list(app_client):
+    """Feature A:列输入设备。测试机多半无 PortAudio/sounddevice → 回空列表,但必须 200 + list。"""
+    r = app_client.get("/api/asr/devices")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    # 若环境真有输入设备,每项须有 index/name 形状。
+    for d in body:
+        assert set(d) == {"index", "name"}
+        assert isinstance(d["index"], int) and isinstance(d["name"], str)
+
+
 def test_put_asr_settings_preserves_extraction(app_client):
     """改 ASR 设置不应吞掉 extraction 顶层键(各自独立持久化)。"""
     app_client.put("/api/extraction/settings",

@@ -14,6 +14,7 @@ import {
 
 import {
   api,
+  type AsrDevice,
   type AsrModel,
   type AsrSettings,
   type AsrStatus,
@@ -288,11 +289,12 @@ const ASR_MODEL_LABEL: Record<AsrModel, string> = {
 function AsrSection() {
   const [settings, setSettings] = useState<AsrSettings | null>(null);
   const [status, setStatus] = useState<AsrStatus | null>(null);
+  const [devices, setDevices] = useState<AsrDevice[]>([]); // 可选输入设备(麦克风)
   const [busy, setBusy] = useState(false); // 下载进行中
   const [saving, setSaving] = useState(false); // 任一字段持久化中
   const [err, setErr] = useState<string | null>(null);
 
-  // 进入页面:并行拉设置 + 状态。
+  // 进入页面:并行拉设置 + 状态 + 输入设备列表(设备列表失败/为空不致命)。
   useEffect(() => {
     let cancelled = false;
     Promise.all([api.getAsrSettings(), api.getAsrStatus()])
@@ -302,6 +304,10 @@ function AsrSection() {
         setStatus(s);
       })
       .catch((e) => !cancelled && setErr(String(e)));
+    api
+      .getAsrDevices()
+      .then((d) => !cancelled && setDevices(d))
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -383,6 +389,29 @@ function AsrSection() {
           >
             {(["large-v3", "distil-large-v3", "medium", "small"] as const).map((v) => (
               <option key={v} value={v}>{ASR_MODEL_LABEL[v]}</option>
+            ))}
+          </select>
+        </Field>
+      )}
+
+      {/* 输入设备(麦克风):默认麦克风过弱/选错时,让用户改采集输入(Feature A)。
+          值为空串 → 系统默认(input_device=null);否则为 sounddevice 设备索引。 */}
+      {settings && (
+        <Field id="asr-input-device" label="输入设备(麦克风)">
+          <select
+            id="asr-input-device"
+            value={settings.input_device === null ? "" : String(settings.input_device)}
+            disabled={saving || downloading}
+            onChange={(e) =>
+              update({ input_device: e.target.value === "" ? null : Number(e.target.value) })
+            }
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+          >
+            <option value="">系统默认</option>
+            {devices.map((d) => (
+              <option key={d.index} value={String(d.index)}>
+                {d.name}
+              </option>
             ))}
           </select>
         </Field>
