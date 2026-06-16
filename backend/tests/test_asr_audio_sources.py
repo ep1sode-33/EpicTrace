@@ -56,5 +56,45 @@ def test_ring_buffer_pending_seconds():
     assert abs(rb.pending_seconds() - 0.5) < 1e-6
     out = rb.read()
     assert out.shape[0] == 8000
-    # read 不清空(滚动窗口靠 clip_timestamps seek);pending 反映「自上次确认推进后未处理」
+    # read 不清空(累积窗口);pending 反映已累积总秒数
     assert rb.pending_seconds() >= 0.0
+
+
+def test_ring_buffer_base_offset_increments_after_truncation():
+    import numpy as np
+
+    from epictrace.asr.audio_sources import RingBuffer
+
+    # 极小窗口(0.5s @ 16k = 8000 样本)便于逼出截断。
+    rb = RingBuffer(sample_rate=16000, max_seconds=0.5)
+    assert rb.base_offset() == 0.0
+    rb.push(np.zeros(8000, dtype=np.float32))  # 恰好填满,未超 → 不截断
+    assert rb.base_offset() == 0.0
+    assert abs(rb.available_seconds() - 0.5) < 1e-6
+    # 再 push 0.5s → 总 1.0s 超过窗口,丢弃最旧 0.5s,base_offset 前移 0.5s。
+    rb.push(np.zeros(8000, dtype=np.float32))
+    assert abs(rb.base_offset() - 0.5) < 1e-6
+    # available_seconds = base_offset + len(buffer)/sr = 0.5 + 0.5 = 1.0(绝对末端不丢)
+    assert abs(rb.available_seconds() - 1.0) < 1e-6
+
+
+def test_system_audio_permission_line_parsing():
+    from epictrace.asr.audio_sources import _is_permission_denied_line
+
+    assert _is_permission_denied_line("PERMISSION_DENIED: tap failed") is True
+    assert _is_permission_denied_line("warn: permission_denied (cached)") is True
+    assert _is_permission_denied_line("started tap, 2 channels") is False
+
+
+def test_ring_buffer_window_from_abs():
+    import numpy as np
+
+    from epictrace.asr.audio_sources import RingBuffer
+
+    rb = RingBuffer(sample_rate=16000, max_seconds=10.0)
+    sig = np.arange(16000, dtype=np.float32)  # 1s,值=样本下标便于核对切片
+    rb.push(sig)
+    # 从绝对 0.5s(=8000 样本)起切到末尾
+    win = rb.window_from(0.5)
+    assert win.shape[0] == 8000
+    assert win[0] == 8000.0

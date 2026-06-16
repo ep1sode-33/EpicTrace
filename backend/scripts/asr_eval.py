@@ -5,7 +5,7 @@
 用途:为**弱音 / 讲座 / 长停顿**音频调参留口(vad/阈值/force_confirm_after/RMS 归一化…),
 便于改 AsrConfig 后跑同一段音频对比 confirmed 文本 + 幻觉丢弃情况(后续接 Langfuse 评测计划)。
 
-它复刻 worker 的流式喂入节奏(`StreamLoop` 的逐轮 tick + clip_timestamps seek),但只跑
+它复刻 worker 的流式喂入节奏(`StreamLoop` 的逐轮 tick + 手动切片 + 偏移平移),但只跑
 **单源**(默认 "mic"),并在 HallucinationFilter 上挂钩记录哪些段因「精确串 / 子串 / 最近 N 去重」
 被丢弃——真实管线里这些段静默消失,这里把它们打印出来供调参。
 
@@ -17,7 +17,7 @@
     ./.venv/bin/python scripts/asr_eval.py <path/to/sample.wav> [--source mic|device]
         [--model large-v3] [--window 0.5] [--no-vad] [--no-rms]
 
-输出:每轮 tick 选源 + clip_start;确认段(source/start-end/text);末尾 partial;
+输出:每轮 tick 选源 + 已确认游标 cursor;确认段(source/start-end/text);末尾 partial;
 最后汇总 confirmed 全文 + 被丢弃的幻觉段(text + 原因)。
 """
 from __future__ import annotations
@@ -143,25 +143,50 @@ def main(argv: list[str] | None = None) -> int:
     for st in loop._states.values():  # noqa: SLF001 — 评测脚本,刻意复用内部以观测丢弃
         st._filter = rec_filter  # noqa: SLF001
 
-    # 模拟流式:逐轮把「到目前为止」的全量 PCM 当作滚动 buffer 喂入(同 worker:read() 返回全量,
-    # clip_timestamps 在全量内 seek);pending = 未确认秒数。每 window 秒推进一轮。
+    # 模拟流式:逐轮把「到目前为止」的全量 PCM 当作滚动 buffer(同 worker:RingBuffer 累积,
+    # StreamLoop 按绝对时间手动切片 + VAD-on + 偏移平移)。每 window 秒推进一轮。
+    from epictrace.asr.audio_sources import RingBuffer
+
     channel = ns.source
+    other = "device" if channel == "mic" else "mic"
+
+    class _RbSource:
+        """评测用音源适配:把已喂入的 PCM 累进 RingBuffer,供 StreamLoop 切窗口。"""
+
+        def __init__(self) -> None:
+            self._rb = RingBuffer()
+            self._fed = 0
+
+        def feed_to(self, n: int) -> None:
+            if n > self._fed:
+                self._rb.push(pcm[self._fed:n])
+                self._fed = n
+
+        def base_offset(self) -> float:
+            return self._rb.base_offset()
+
+        def available_seconds(self) -> float:
+            return self._rb.available_seconds()
+
+        def window_from(self, abs_start: float):
+            return self._rb.window_from(abs_start)
+
+    active = _RbSource()
+    empty = _RbSource()  # 另一路恒空
+    loop.set_sources({channel: active, other: empty})
+
     step = max(1, int(ns.window * SAMPLE_RATE))
     cursor = step
     tick_no = 0
     while True:
         cursor = min(cursor, pcm.shape[0])
-        rolling = pcm[:cursor]
+        active.feed_to(cursor)
         st = loop._states[channel]  # noqa: SLF001
-        pending = (rolling.shape[0] / SAMPLE_RATE) - st.last_confirmed_end
-        loop.set_pending(**{channel: max(pending, 0.0),
-                            "device" if channel == "mic" else "mic": 0.0})
         before = len(confirmed)
-        loop.tick(audio={channel: rolling,
-                         "device" if channel == "mic" else "mic": np.empty(0, dtype=np.float32)})
+        loop.tick()
         tick_no += 1
         for seg in confirmed[before:]:
-            print(f"  tick#{tick_no:>3} clip_start={st.last_confirmed_end:6.2f} "
+            print(f"  tick#{tick_no:>3} cursor={st.last_confirmed_end:6.2f} "
                   f"[{seg.source}] {seg.start:6.2f}-{seg.end:6.2f}  {seg.text}")
         if cursor >= pcm.shape[0]:
             break

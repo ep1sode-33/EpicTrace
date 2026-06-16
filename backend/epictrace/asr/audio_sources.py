@@ -41,29 +41,61 @@ def rms_normalize(pcm: np.ndarray, *, target_dbfs: float = _DEFAULT_TARGET_DBFS,
 
 
 class RingBuffer:
-    """线程安全的滚动 PCM 累积:采集回调 push,转写循环 read 全量 + 查 pending。
+    """线程安全的滚动 PCM 累积:采集回调 push,转写循环按绝对时间切窗口。
 
-    流式靠 faster-whisper 的 clip_timestamps 在全量 buffer 内 seek(绝不手动切 buffer),
-    所以 read() 非破坏性返回累积的全部样本;pending_seconds() = 已累积总时长(调用方据
-    last_confirmed_end 计算「未确认」秒数)。为防无限增长,超 max_seconds 丢弃最旧的尾巴
-    (调用方确认进度推过后那段已不再需要)。
+    流式做法是**手动切片 + VAD-on + 偏移平移**(见 engine.py 对 §4 WhisperKit 经验的分歧说明:
+    faster-whisper 可安全切片,且只有 clip_timestamps=="0" 才跑 VAD)。为防无限增长,超
+    max_seconds 丢弃最旧的尾巴;每次丢弃把丢掉的样本数累加进 base_offset,使「会话绝对时间」
+    始终可由 `base_offset + 缓冲内下标/sr` 还原(长 session 截断后绝对时间不漂)。
+
+    - base_offset():已被丢弃(不在缓冲内)的最早样本对应的绝对秒数。
+    - available_seconds():缓冲覆盖到的绝对末端 = base_offset + len(buffer)/sr。
+    - window_from(abs_start):返回从绝对 abs_start 起到末端的切片(abs_start 早于 base_offset
+      则从缓冲头开始;晚于末端则空)。
     """
 
     def __init__(self, *, sample_rate: int = SAMPLE_RATE, max_seconds: float = 600.0) -> None:
         self._sr = sample_rate
         self._max_samples = int(max_seconds * sample_rate)
         self._buf = np.empty(0, dtype=_PCM_DTYPE)
+        self._dropped = 0  # 累计已丢弃(滚出窗口)的样本数 → base_offset 的样本计
         self._lock = threading.Lock()
 
     def push(self, frames: np.ndarray) -> None:
         with self._lock:
             self._buf = np.concatenate([self._buf, frames.astype(_PCM_DTYPE, copy=False)])
             if self._buf.size > self._max_samples:
-                self._buf = self._buf[-self._max_samples:]
+                drop = self._buf.size - self._max_samples
+                self._buf = self._buf[drop:]
+                self._dropped += drop
 
     def read(self) -> np.ndarray:
         with self._lock:
             return self._buf.copy()
+
+    def base_offset(self) -> float:
+        """缓冲内第一个样本对应的会话绝对秒数(= 已丢弃样本数 / sr)。"""
+        with self._lock:
+            return self._dropped / float(self._sr)
+
+    def available_seconds(self) -> float:
+        """缓冲覆盖到的会话绝对末端秒数(base_offset + 缓冲时长)。"""
+        with self._lock:
+            return (self._dropped + self._buf.size) / float(self._sr)
+
+    def window_from(self, abs_start: float) -> np.ndarray:
+        """切出从绝对 abs_start 起到缓冲末端的 PCM(供单窗口转写)。
+
+        abs_start 早于 base_offset(那段已滚出窗口)→ 从缓冲头开始;
+        abs_start 晚于末端 → 空数组。
+        """
+        with self._lock:
+            idx = int(round(abs_start * self._sr)) - self._dropped
+            if idx < 0:
+                idx = 0
+            if idx >= self._buf.size:
+                return np.empty(0, dtype=_PCM_DTYPE)
+            return self._buf[idx:].copy()
 
     def pending_seconds(self) -> float:
         with self._lock:
@@ -90,6 +122,15 @@ class _SourceBase:
 
     def read(self) -> np.ndarray:
         return self._rb.read()
+
+    def base_offset(self) -> float:
+        return self._rb.base_offset()
+
+    def available_seconds(self) -> float:
+        return self._rb.available_seconds()
+
+    def window_from(self, abs_start: float) -> np.ndarray:
+        return self._rb.window_from(abs_start)
 
     def pending_seconds(self) -> float:
         return self._rb.pending_seconds()
@@ -154,11 +195,17 @@ class MicSource(_SourceBase):
             self._stream = None
 
 
+def _is_permission_denied_line(line: str) -> bool:
+    """helper stderr 行是否表示权限被拒(纯函数,可单测)。大小写不敏感。"""
+    return "PERMISSION_DENIED" in line.upper()
+
+
 class SystemAudioSource(_SourceBase):
     """macOS 系统内录:Popen 原生 helper 二进制,从其 stdout 读裸 PCM(16k mono float32 le)。
 
     helper 自己用 Core Audio process tap → 重采样到 16k mono(见 shell/native helper,Task 12)。
-    读 stdout 的线程在 start() 起;真采集 + 权限 = 真机手测。
+    读 stdout 的线程在 start() 起;另起一守护线程逐行抽干 stderr(防管道填满阻塞 helper),
+    遇 PERMISSION_DENIED 行置 permission_denied 标志供 worker 读取。真采集 + 权限 = 真机手测。
     """
 
     def __init__(self, helper_bin: str, *, rms_normalize_enabled: bool = True) -> None:
@@ -166,6 +213,8 @@ class SystemAudioSource(_SourceBase):
         self._bin = helper_bin
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self.permission_denied = False  # stderr 出现 PERMISSION_DENIED 行即置位
 
     def start(self) -> None:
         self._proc = subprocess.Popen(
@@ -173,6 +222,23 @@ class SystemAudioSource(_SourceBase):
         )
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _drain_stderr(self) -> None:
+        """逐行抽干 helper stderr:记日志 + 设权限标志。防 stderr 管道填满阻塞 helper。"""
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        for raw in iter(proc.stderr.readline, b""):
+            line = raw.decode("utf-8", "replace").rstrip()
+            if not line:
+                continue
+            if _is_permission_denied_line(line):
+                self.permission_denied = True
+                _log.error("system-audio helper: %s", line)
+            else:
+                _log.debug("system-audio helper: %s", line)
 
     def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None

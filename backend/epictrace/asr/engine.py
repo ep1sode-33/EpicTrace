@@ -11,14 +11,19 @@ class FasterWhisperEngine:
         self._model = model
         self._cfg = config
 
-    def transcribe_window(self, pcm, *, clip_start: float, prefix: str,
+    def transcribe_window(self, pcm, *, prefix: str,
                           source: str, language: str | None = None) -> list[TranscriptSegment]:
         cfg = self._cfg
+        # 与 asr-streaming-tuning-notes §4「绝不手动切 buffer」的分歧:那条经验来自 WhisperKit
+        # (用 clipTimestamps 让引擎内部 seek)。faster-whisper 1.2.1 可安全手动切片 —— 而且它
+        # **仅在 clip_timestamps=="0" 时跑 VAD**(transcribe.py:`if vad_filter and clip_timestamps=="0"`),
+        # 传任何绝对 clip 都会静默关掉 VAD。故本引擎只接收**已切好的 slice**(调用方 StreamLoop
+        # 负责切片 + 把返回的 slice-相对时间戳平移回绝对时间),clip_timestamps 恒为 "0" 让 VAD 生效。
         segments, _info = self._model.transcribe(
             pcm,
             language=language or cfg.language,
             task="transcribe",
-            clip_timestamps=f"{clip_start}",
+            clip_timestamps="0",
             initial_prompt=prefix or None,
             word_timestamps=True,
             suppress_blank=True,

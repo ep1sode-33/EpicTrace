@@ -11,12 +11,12 @@ class Transcriber(Protocol):
     流式循环(StreamState/交替/确认)在 asr.worker,不在这里。"""
 
     def transcribe_window(
-        self, pcm, *, clip_start: float, prefix: str, source: str, language: str = "zh"
+        self, pcm, *, prefix: str, source: str, language: str = "zh"
     ) -> list[TranscriptSegment]: ...
 
 
 class NoopTranscriber:
     """占位:不转写(Plan 8 留的默认,保留给无引擎场景)。"""
 
-    def transcribe_window(self, pcm, *, clip_start, prefix, source, language="zh"):
+    def transcribe_window(self, pcm, *, prefix, source, language="zh"):
         return []
