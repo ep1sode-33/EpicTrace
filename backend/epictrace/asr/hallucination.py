@@ -47,11 +47,26 @@ class HallucinationFilter:
         return re.sub(r"\s+", "", self.clean(text)).lower()
 
     def is_duplicate(self, text: str, recent: list[str]) -> bool:
+        """近重复判定(STEP 5 收紧)。两类命中:
+
+        1. **近乎完全相等**:与最近任一段签名相等 → 同一 hypothesis 被再吐一遍,判重。
+           短段绝不再因「子串包含」误判——「测试测试」与「测试测试测试」是不同真实话语。
+        2. **退化循环**:仅当 recent 末尾连续 >=2 段与本段成子串关系(加本段共 >=3 次)时,
+           才用子串/loop 抑制(文档记的「连续 >=3 次相同 hypothesis」退化生长循环)。
+        """
         sig = self.signature(text)
         if not sig:
             return True
+        # 1. 近乎完全相等(任一最近段)。
         for r in recent:
-            rsig = self.signature(r)
-            if sig == rsig or (len(sig) >= 4 and (sig in rsig or rsig in sig)):
+            if sig == self.signature(r):
                 return True
-        return False
+        # 2. 退化循环:从 recent 末尾起数连续「与本段成子串关系」的段;>=2 段(共 >=3)才抑制。
+        run = 0
+        for r in reversed(recent):
+            rsig = self.signature(r)
+            if rsig and (sig in rsig or rsig in sig):
+                run += 1
+            else:
+                break
+        return run >= 2

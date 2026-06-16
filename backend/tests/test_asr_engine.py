@@ -30,7 +30,17 @@ def test_engine_maps_segments_and_passes_options():
     # (faster-whisper 1.2.1,见 engine.py 注释),故绝不再传会话绝对 clip。
     assert opts["clip_timestamps"] == "0"
     assert opts["vad_filter"] is True
-    assert opts["initial_prompt"] == "上一句"
+    # STEP 5:上下文策略二选一去重叠——condition_prev=False + 不再用 partial seed initial_prompt
+    # (有界滑窗已自带声学上下文)。prefix 参数被忽略,initial_prompt 恒为 None。
+    assert opts["initial_prompt"] is None
     assert opts["word_timestamps"] is True
     assert opts["language"] == "zh"
     assert opts["condition_on_previous_text"] is False
+
+
+def test_prefix_no_longer_seeds_initial_prompt():
+    """STEP 5:即便传了非空 prefix,initial_prompt 仍为 None(不把上轮文本注回下轮)。"""
+    model = _FakeModel()
+    eng = FasterWhisperEngine(model, AsrConfig())
+    eng.transcribe_window(b"pcm", prefix="任何前文都不再注入", source="mic")
+    assert model.calls[0]["initial_prompt"] is None

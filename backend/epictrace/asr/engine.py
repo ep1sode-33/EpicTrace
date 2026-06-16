@@ -19,12 +19,19 @@ class FasterWhisperEngine:
         # **仅在 clip_timestamps=="0" 时跑 VAD**(transcribe.py:`if vad_filter and clip_timestamps=="0"`),
         # 传任何绝对 clip 都会静默关掉 VAD。故本引擎只接收**已切好的 slice**(调用方 StreamLoop
         # 负责切片 + 把返回的 slice-相对时间戳平移回绝对时间),clip_timestamps 恒为 "0" 让 VAD 生效。
+        #
+        # 上下文策略(STEP 5,二选一,去重叠):此前同时 condition_on_previous_text=False 且用
+        # 上一轮 partial 文本 seed initial_prompt —— 两者都是「带前文上下文」的手段,叠加既矛盾
+        # 又把上轮可能的错/幻觉文本注回下轮,放大重复/漂移。**选定:condition_prev=False +
+        # 不再 seed initial_prompt**(prefix 参数仅向后兼容,忽略其值),因为 STEP 1 有界滑窗
+        # 已让每个切片自带足够声学上下文,无需再注文本前缀。
+        _ = prefix  # 兼容旧签名;不再用作 initial_prompt(见上)
         segments, _info = self._model.transcribe(
             pcm,
             language=language or cfg.language,
             task="transcribe",
             clip_timestamps="0",
-            initial_prompt=prefix or None,
+            initial_prompt=None,
             word_timestamps=True,
             suppress_blank=True,
             temperature=[0.0, 0.2],

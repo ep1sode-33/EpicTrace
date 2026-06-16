@@ -22,22 +22,35 @@ class StreamState:
         self._recent: deque[str] = deque(maxlen=recent_max)
         self._rounds_no_progress = 0
 
-    def _accept(self, seg: TranscriptSegment) -> bool:
+    def _gate(self, seg: TranscriptSegment) -> str:
+        """过滤门判定(STEP 5):返回 "accept" / "halluc" / "dedup",供 _confirm 区分游标策略。
+        幻觉先判(空文本/近静音串也归幻觉),再判去重。"""
         if self._filter.is_hallucination(seg.text):
-            return False
+            return "halluc"
         if self._filter.is_duplicate(seg.text, list(self._recent)):
-            return False
-        return True
+            return "dedup"
+        return "accept"
 
-    def _confirm(self, seg: TranscriptSegment, out: list[TranscriptSegment]) -> None:
-        # 只在通过幻觉/去重门时才 emit(confirmed 落库);不通过仅推游标(不丢音、不写垃圾)。
-        # stall 恢复的强制确认也走这里 —— 故幻觉永不会作为 confirmed 进存储(FIX E)。
-        if self._accept(seg):
+    def _confirm(self, seg: TranscriptSegment, out: list[TranscriptSegment],
+                 *, force_advance: bool = False) -> None:
+        # 通过门 → emit(confirmed 落库)并推游标;不通过仅按类型决定是否推游标(不写垃圾)。
+        # stall 恢复 / 软强制确认也走这里 —— 故幻觉/重复永不会作为 confirmed 进存储(FIX E)。
+        gate = self._gate(seg)
+        if gate == "accept":
             self._recent.append(seg.text)
             out.append(TranscriptSegment(
                 text=self._filter.clean(seg.text), start=seg.start, end=seg.end,
                 source=self._source, words=seg.words, confirmed=True))
-        self.last_confirmed_end = max(self.last_confirmed_end, seg.end)
+            self.last_confirmed_end = max(self.last_confirmed_end, seg.end)
+        elif gate == "halluc":
+            # 真幻觉/近静音:推游标,避免对同一段反复重转(re-loop)。
+            self.last_confirmed_end = max(self.last_confirmed_end, seg.end)
+        elif force_advance:
+            # gate == "dedup" 且本轮是软强制确认(窗口已落后 tail 超 window_seconds):
+            # 必须推游标,否则有界滑窗下未确认窗口会无限增长(STEP 1 兜底压倒 STEP 5 的保留)。
+            self.last_confirmed_end = max(self.last_confirmed_end, seg.end)
+        # gate == "dedup" 且非强制:真实语音被去重门压住——**不推游标**,以便该段音频可被
+        # 重新解码,不因一次误压而永久丢失(有界滑窗 + 软强制确认兜底,不会无限循环;STEP 5)。
 
     def ingest(self, segments: list[TranscriptSegment], *,
                force_confirm_earliest: bool = False) -> list[TranscriptSegment]:
@@ -45,8 +58,11 @@ class StreamState:
         if not segments:
             return out
         if len(segments) > 1:
-            for seg in segments[:-1]:
-                self._confirm(seg, out)
+            # 首段 force_advance:仅当本轮软强制确认(窗口落后超 window_seconds)时——确保即便
+            # 首段被去重压住,游标也推进,避免未确认窗口无限增长(STEP 1 兜底);正常情形下
+            # 去重拒不推游标(STEP 5,可重转)。其余非末段照常确认。
+            for i, seg in enumerate(segments[:-1]):
+                self._confirm(seg, out, force_advance=(force_confirm_earliest and i == 0))
             self.partial = segments[-1]
             self._rounds_no_progress = 0
         else:
@@ -54,9 +70,9 @@ class StreamState:
             # 强制确认仍跑过滤门:幻觉/重复只推游标不 emit,真实文本才落库(FIX E)。
             # 软强制(STEP 1):游标落后 tail 超过 window_seconds 时,即便未到 N 轮也立刻强制
             # 确认它推进游标——否则有界滑窗会让切片头被 tail-window 夹住而游标原地不动,未确认
-            # 窗口无限增长。同样跑过滤门(幻觉/重复只推游标不 emit)。
+            # 窗口无限增长。同样跑过滤门;去重拒在软强制下也推游标(force_advance)。
             if force_confirm_earliest or self._rounds_no_progress + 1 > self._force_after:
-                self._confirm(segments[0], out)
+                self._confirm(segments[0], out, force_advance=force_confirm_earliest)
                 self.partial = None
                 self._rounds_no_progress = 0
             else:

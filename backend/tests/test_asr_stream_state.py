@@ -93,3 +93,35 @@ def test_duplicate_confirmed_suppressed():
     st.ingest([_seg("重复句", 0, 2), _seg("x", 2, 3)])
     again = st.ingest([_seg("重复句", 0, 2), _seg("y", 2, 3)])
     assert all("重复句" not in c.text for c in again)  # 最近 N 去重
+
+
+def test_repeated_speech_emitted_once_not_dropped_or_duplicated():
+    """STEP 5:用户连说「测试测试测试」(真实重复语音)应被 emit 一次,不丢、不重复。"""
+    st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=4)
+    # 一窗:重复短语作首段(确认),后接尾段(partial)。
+    confirmed = st.ingest([_seg("测试测试测试", 0, 2), _seg("尾", 2, 3)])
+    assert [c.text for c in confirmed] == ["测试测试测试"]  # emit 一次
+    # 下一窗:更长的真实重复「测试测试测试测试」是不同话语,子串不应误判重而被丢。
+    again = st.ingest([_seg("测试测试测试测试", 3, 5), _seg("尾2", 5, 6)])
+    assert any("测试测试测试测试" in c.text for c in again)
+
+
+def test_dedup_rejection_does_not_advance_cursor():
+    """STEP 5:真实语音被去重门拒(非幻觉)→ 不推进游标,以便该段音频可被重转(不永久丢)。"""
+    st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=4)
+    # 先确认一段,使其进 recent;游标推到 2。
+    st.ingest([_seg("重复句", 0, 2), _seg("x", 2, 3)])
+    assert st.last_confirmed_end == 2.0
+    cursor_before = st.last_confirmed_end
+    # 同一签名再来(去重拒)作为多段窗的首段:不 emit,且游标不因这段推进。
+    out = st.ingest([_seg("重复句", 10, 12), _seg("尾", 12, 13)])
+    assert all("重复句" not in c.text for c in out)       # 去重不落库
+    assert st.last_confirmed_end == cursor_before          # 去重拒:游标不推进(可重转)
+
+
+def test_hallucination_rejection_still_advances_cursor():
+    """STEP 5:近静音幻觉段被拒 → 仍推进游标(防 re-loop),区别于去重拒。"""
+    st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=4)
+    out = st.ingest([_seg("谢谢观看", 0, 2), _seg("尾", 2, 3)])
+    assert all("谢谢观看" not in c.text for c in out)   # 幻觉不落库
+    assert st.last_confirmed_end == 2.0                  # 幻觉拒:游标仍推进(不 re-loop)
