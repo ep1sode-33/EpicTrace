@@ -206,3 +206,15 @@ def test_ingest_succeeds_even_if_provenance_write_fails(tmp_path: Path, monkeypa
     assert Path(rec.stored_path).exists()
     sidecar = Path(tmp_path) / "provenance" / f"ingest-{rec.id}.json"
     assert not sidecar.exists()  # provenance 写失败 → 没落盘,但不影响入库
+
+
+def test_ingest_records_source_session_id(tmp_path: Path):
+    db, proj = _setup(tmp_path)
+    src = tmp_path / "note.md"
+    src.write_text("hello", encoding="utf-8")
+    rec = IngestService(db).ingest_file(
+        project_id=proj.id, source_path=str(src),
+        ingest_method="session", description="", source_session_id=42,
+    )
+    assert rec.ingest_method == "session"
+    assert rec.source_session_id == 42

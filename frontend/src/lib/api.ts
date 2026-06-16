@@ -53,6 +53,10 @@ export interface ExtractionSettings {
   model_source: "modelscope" | "huggingface" | "local";
 }
 
+export type CaptureEvent = { id: number; kind: string; ts: string; payload: string; meta: Record<string, unknown> };
+export type CaptureSession = { id: number; title: string; status: string; started_at: string; ended_at: string | null; sources: string[]; staging_dir: string };
+export type CaptureSessionDetail = CaptureSession & { events: CaptureEvent[]; elapsed_seconds: number };
+
 /** sendMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
 export interface StreamHandlers {
   onStatus?: (status: string) => void;
@@ -181,6 +185,22 @@ export const api = {
     }).then(j<ExtractionSettings>),
   downloadModels: () =>
     fetch(`${BASE}/api/extraction/download-models`, { method: "POST" }).then(j<ExtractionStatus>),
+
+  startSession: (sources: string[]) =>
+    fetch(`${BASE}/api/capture/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sources }) }).then(j<CaptureSession>),
+  listSessions: () => fetch(`${BASE}/api/capture/sessions`).then(j<CaptureSession[]>),
+  activeSession: () => fetch(`${BASE}/api/capture/sessions/active`).then(j<CaptureSession | null>),
+  getSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}`).then(j<CaptureSessionDetail>),
+  appendEvent: (sid: number, kind: string, payload = "") =>
+    fetch(`${BASE}/api/capture/sessions/${sid}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, payload }) }).then(j<CaptureEvent>),
+  pauseSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}/pause`, { method: "POST" }).then(() => {}),
+  resumeSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}/resume`, { method: "POST" }).then(() => {}),
+  stopSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}/stop`, { method: "POST" }).then(j<CaptureSession>),
+  renameSession: (sid: number, title: string) =>
+    fetch(`${BASE}/api/capture/sessions/${sid}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) }).then(j<CaptureSession>),
+  deleteSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}`, { method: "DELETE" }).then(() => {}),
+  organizeSession: (sid: number, projectId: number) =>
+    fetch(`${BASE}/api/capture/sessions/${sid}/organize`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId }) }).then(j<IndexStatus>),
 
   /**
    * 发消息并流式接收回答。后端是 SSE(events: status/token/citations/done);

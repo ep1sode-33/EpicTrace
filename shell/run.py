@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
 import uvicorn
 import webview
@@ -80,6 +81,202 @@ class Api:
         except Exception as e:  # noqa: BLE001 — 读剪贴板任何异常都退化为空
             print(f"[EpicTrace] read_clipboard_files failed: {e}", flush=True)
             return []
+
+    def capture_screenshot(self) -> str | None:
+        """用系统 screencapture 抓全屏存 PNG 进当前 session 的 staging_dir,POST 截图事件,返回文件名;
+        失败→None。需「屏幕录制」权限;无活动监听(_cap 未设)或未选 screenshot 源 → None。
+        用 screencapture CLI 而非 Quartz CGWindowListCreateImage:后者在新版 macOS 已废/受限,
+        常返回空图(=用户看到的「截图失效」),CLI 走系统标准路径、权限提示也正常。"""
+        cap = getattr(self, "_cap", None)
+        if not cap:
+            return None
+        # 仅当本次 session 选了 screenshot 源才允许抓屏(与 clipboard 同样按源 gate)。
+        if "screenshot" not in (cap.get("sources") or []):
+            return None
+        try:
+            import subprocess
+            import time
+
+            name = f"shot-{int(time.time() * 1000)}.png"
+            out = Path(cap["dir"]) / name
+            out.parent.mkdir(parents=True, exist_ok=True)
+            # -x 静默(无快门声),-t png 指定格式;抓整屏。
+            result = subprocess.run(
+                ["/usr/sbin/screencapture", "-x", "-t", "png", str(out)],
+                capture_output=True, timeout=10,
+            )
+            if result.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
+                print(f"[EpicTrace] screencapture failed rc={result.returncode} "
+                      f"(需「屏幕录制」权限?)", flush=True)
+                return None
+            self._post_event(cap["sid"], "screenshot", name)
+            return name
+        except Exception as e:  # noqa: BLE001 — 抓屏任何异常降级
+            print(f"[EpicTrace] capture_screenshot failed: {e}", flush=True)
+            return None
+
+    def _post_event(self, session_id: int, kind: str, payload: str) -> None:
+        """shell 把采到的事件直接 POST 给后端(截图/剪贴板共用);失败重试一次后记日志。"""
+        import urllib.request
+
+        body = json.dumps({"kind": kind, "payload": payload}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:8765/api/capture/sessions/{session_id}/events",
+            data=body, headers={"Content-Type": "application/json"}, method="POST")
+        for attempt in (1, 2):
+            try:
+                urllib.request.urlopen(req, timeout=3)
+                return
+            except Exception as e:  # noqa: BLE001
+                if attempt == 2:
+                    print(f"[EpicTrace] post event failed ({kind}): {e}", flush=True)
+
+    def start_capture_monitors(self, session_id: int, staging_dir: str, sources: list) -> dict:
+        """按所选源起原生监听(剪贴板轮询 + 全局热键触发截图)。重复调用先停旧的(并 join 旧线程)。"""
+        self.stop_capture_monitors()
+        sources = list(sources or [])
+        cap = {"sid": session_id, "dir": staging_dir, "sources": sources,
+               "last_clip": None, "stop": False}
+        self._cap = cap
+        try:
+            from AppKit import NSPasteboard
+            import threading
+
+            pb = NSPasteboard.generalPasteboard()
+            cap["clip_count"] = pb.changeCount()
+
+            # 线程内只读自己的局部快照 cap,绝不读 self._cap:pause→resume(stop 后再 start)
+            # 会把 self._cap 换成新 dict;旧线程若读 self._cap 可能崩或往旧 session 投事件。
+            def _poll(cap=cap):
+                while not cap.get("stop"):
+                    try:
+                        cnt = pb.changeCount()
+                        if "clipboard" in cap["sources"] and cnt != cap["clip_count"]:
+                            cap["clip_count"] = cnt
+                            txt = pb.stringForType_("public.utf8-plain-text")
+                            if txt and txt != cap["last_clip"]:
+                                cap["last_clip"] = txt
+                                self._post_event(cap["sid"], "clipboard", str(txt))
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[EpicTrace] clipboard poll: {e}", flush=True)
+                    import time
+                    time.sleep(1.0)
+
+            t = threading.Thread(target=_poll, daemon=True)
+            t.start()
+            cap["thread"] = t
+            # 全局热键:仅当本次选了 screenshot 源才注册(否则不应有截图热键)。
+            # 若 PyObjC 全局监听在当前 pywebview 主循环不便挂载,降级为「仅 HUD/应用内按钮触发」。
+            if "screenshot" in sources:
+                try:
+                    from AppKit import NSEvent, NSKeyDownMask
+                    # ⌘⇧2 = keyCode 19,modifierFlags 含 NSCommandKeyMask|NSShiftKeyMask
+                    NSCommandKeyMask = 1 << 20
+                    NSShiftKeyMask = 1 << 17
+
+                    def _hotkey_handler(event):
+                        try:
+                            flags = event.modifierFlags()
+                            if (event.keyCode() == 19
+                                    and (flags & NSCommandKeyMask)
+                                    and (flags & NSShiftKeyMask)):
+                                self.capture_screenshot()
+                        except Exception as he:  # noqa: BLE001
+                            print(f"[EpicTrace] hotkey handler: {he}", flush=True)
+
+                    monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                        NSKeyDownMask, _hotkey_handler)
+                    cap["hotkey_monitor"] = monitor
+                except Exception as hke:  # noqa: BLE001 — 辅助功能权限不足或 API 不可用
+                    print(
+                        f"[EpicTrace] global hotkey unavailable, use HUD/in-app button for screenshot: {hke}",
+                        flush=True,
+                    )
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001 — 原生不可用降级
+            print(f"[EpicTrace] start_capture_monitors failed: {e}", flush=True)
+            return {"ok": False, "reason": str(e)}
+
+    def stop_capture_monitors(self) -> None:
+        cap = getattr(self, "_cap", None)
+        if cap:
+            cap["stop"] = True
+            # 先 join 旧 poll 线程(置停止位后等它退出),再清理 —— 避免旧线程还在跑、
+            # 与新一轮 start 竞态(往旧 session 投事件 / 读到被替换的状态)。
+            thread = cap.get("thread")
+            if thread is not None:
+                try:
+                    thread.join(timeout=2)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[EpicTrace] join clipboard thread: {e}", flush=True)
+            # 清理全局热键监听器(若已注册)
+            monitor = cap.get("hotkey_monitor")
+            if monitor is not None:
+                try:
+                    from AppKit import NSEvent
+                    NSEvent.removeMonitor_(monitor)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[EpicTrace] remove hotkey monitor: {e}", flush=True)
+        self._cap = None
+
+    def show_recording_hud(self, session_id: int) -> dict:
+        """开第二个无边框、置顶、可拖动的**紧凑**小窗口渲染 HUD(指向前端 ?view=hud 路由)。
+        **必须传 js_api=self**:否则 HUD 窗口里 window.pywebview.api 为 undefined,
+        导致 HUD 的停止/截图/收起全是空操作(停止点了不停、窗口销毁不掉卡在「已停止」)。"""
+        try:
+            self._hud = webview.create_window(
+                "EpicTrace 录制",
+                f"http://127.0.0.1:8765/?view=hud&session={session_id}",
+                js_api=self,
+                frameless=True, on_top=True, easy_drag=True, resizable=False,
+                width=300, height=40, x=60, y=60,
+            )
+            # on_top 默认把窗口级别设得过高,会盖住输入法候选窗。窗口显示后降到
+            # NSFloatingWindowLevel(=3,浮动面板级:在普通窗口之上、在输入法/菜单之下)。
+            def _set_hud_level() -> None:
+                # AppKit 改窗口级别**只能在主线程**,否则 SIGTRAP(Must only be used
+                # from the main thread)。本函数经 AppHelper.callAfter 在主线程执行。
+                try:
+                    from AppKit import NSApp
+
+                    for w in NSApp.windows():
+                        if w.title() == "EpicTrace 录制":
+                            w.setLevel_(3)  # NSFloatingWindowLevel
+                except Exception as e:  # noqa: BLE001 — 调级别失败不影响录制
+                    print(f"[EpicTrace] set hud level: {e}", flush=True)
+
+            def _tune_level() -> None:
+                # events.shown 回调在 pywebview 工作线程触发;转主线程再调 AppKit。
+                try:
+                    from PyObjCTools import AppHelper
+
+                    AppHelper.callAfter(_set_hud_level)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[EpicTrace] schedule hud level: {e}", flush=True)
+
+            self._hud.events.shown += _tune_level
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            print(f"[EpicTrace] show_recording_hud failed: {e}", flush=True)
+            return {"ok": False, "reason": str(e)}
+
+    def resize_recording_hud(self, width: int, height: int) -> None:
+        """调整 HUD 窗口尺寸(箭头向下展开时间线预览 / 收起时用)。"""
+        hud = getattr(self, "_hud", None)
+        if hud is not None:
+            try:
+                hud.resize(int(width), int(height))
+            except Exception as e:  # noqa: BLE001
+                print(f"[EpicTrace] resize_recording_hud failed: {e}", flush=True)
+
+    def hide_recording_hud(self) -> None:
+        hud = getattr(self, "_hud", None)
+        if hud is not None:
+            try:
+                hud.destroy()
+            except Exception as e:  # noqa: BLE001
+                print(f"[EpicTrace] hide_recording_hud failed: {e}", flush=True)
+        self._hud = None
 
 
 def _serve() -> None:
