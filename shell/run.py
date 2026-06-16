@@ -233,7 +233,9 @@ class Api:
             )
             # on_top 默认把窗口级别设得过高,会盖住输入法候选窗。窗口显示后降到
             # NSFloatingWindowLevel(=3,浮动面板级:在普通窗口之上、在输入法/菜单之下)。
-            def _tune_level() -> None:
+            def _set_hud_level() -> None:
+                # AppKit 改窗口级别**只能在主线程**,否则 SIGTRAP(Must only be used
+                # from the main thread)。本函数经 AppHelper.callAfter 在主线程执行。
                 try:
                     from AppKit import NSApp
 
@@ -241,7 +243,16 @@ class Api:
                         if w.title() == "EpicTrace 录制":
                             w.setLevel_(3)  # NSFloatingWindowLevel
                 except Exception as e:  # noqa: BLE001 — 调级别失败不影响录制
-                    print(f"[EpicTrace] tune hud level: {e}", flush=True)
+                    print(f"[EpicTrace] set hud level: {e}", flush=True)
+
+            def _tune_level() -> None:
+                # events.shown 回调在 pywebview 工作线程触发;转主线程再调 AppKit。
+                try:
+                    from PyObjCTools import AppHelper
+
+                    AppHelper.callAfter(_set_hud_level)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[EpicTrace] schedule hud level: {e}", flush=True)
 
             self._hud.events.shown += _tune_level
             return {"ok": True}
