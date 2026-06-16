@@ -1,26 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-
-@dataclass(frozen=True)
-class TranscriptSegment:
-    text: str
-    start: float  # 秒
-    end: float
+from epictrace.asr.types import TranscriptSegment
 
 
 @runtime_checkable
 class Transcriber(Protocol):
-    """ASR 接口缝(延后实现)。mic ASR plan 落 faster-whisper 实现
-    (调参/幻觉过滤见 docs/reference/asr-streaming-tuning-notes.md)。"""
+    """流式 ASR 引擎封装:对一个滚动窗口的 PCM 做一次转写。
+    流式循环(StreamState/交替/确认)在 asr.worker,不在这里。"""
 
-    def transcribe(self, audio_path: str) -> list[TranscriptSegment]: ...
+    def transcribe_window(
+        self, pcm, *, clip_start: float, prefix: str, source: str, language: str = "zh"
+    ) -> list[TranscriptSegment]: ...
 
 
 class NoopTranscriber:
-    """本期默认:不转写,返回空。"""
+    """占位:不转写(Plan 8 留的默认,保留给无引擎场景)。"""
 
-    def transcribe(self, audio_path: str) -> list[TranscriptSegment]:
+    def transcribe_window(self, pcm, *, clip_start, prefix, source, language="zh"):
         return []
