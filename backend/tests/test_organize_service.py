@@ -50,6 +50,25 @@ def test_organize_materializes_ingests_and_marks_organized(tmp_path: Path):
         assert s.query(IngestRecord).count() == 2
 
 
+def test_organize_ingests_audio_wav_from_staging(tmp_path: Path):
+    """Plan 9:staging 里的 audio-*.wav(ASR 子进程落的原始音频)也作为文件入库进 Project,
+    ingest_method=session(同截图,日后可重转写)。"""
+    db, proj = _setup(tmp_path)
+    # 在 staging 放一段假音频 wav(内容无所谓,本期无音频处理器 → extracted_text 空)
+    staging = tmp_path / "sessions" / "1"
+    (staging / "audio-mic.wav").write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+    (staging / "audio-device.wav").write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+
+    recs = OrganizeService(db).organize(session_id=1, project_id=proj.id)
+    by_name = {Path(r.stored_path).name: r for r in recs}
+    assert "audio-mic.wav" in by_name
+    assert "audio-device.wav" in by_name
+    mic_rec = by_name["audio-mic.wav"]
+    assert mic_rec.ingest_method == "session"
+    assert mic_rec.source_session_id == 1
+    assert Path(mic_rec.stored_path).parent == Path(proj.folder_path)
+
+
 def test_organize_twice_raises(tmp_path: Path):
     db, proj = _setup(tmp_path)
     OrganizeService(db).organize(session_id=1, project_id=proj.id)

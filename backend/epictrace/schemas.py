@@ -219,3 +219,8 @@ class AppendEventIn(BaseModel):
 
 class OrganizeIn(BaseModel):
     project_id: int
+
+
+class PartialIn(BaseModel):
+    source: str  # "mic" | "device"
+    text: str

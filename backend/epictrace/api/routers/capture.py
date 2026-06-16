@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sse_starlette.sse import EventSourceResponse
@@ -15,6 +16,7 @@ from epictrace.schemas import (
     CaptureSessionOut,
     IndexStatusOut,
     OrganizeIn,
+    PartialIn,
     RenameIn,
     StartSessionIn,
 )
@@ -36,6 +38,8 @@ from epictrace.services.organize import OrganizeService
 
 router = APIRouter(prefix="/capture", tags=["capture"])  # /api 由 app 工厂挂载
 
+_log = logging.getLogger("epictrace")
+
 
 def _detail(svc: CaptureService, sess) -> CaptureSessionDetailOut:
     return CaptureSessionDetailOut(
@@ -48,12 +52,46 @@ def _detail(svc: CaptureService, sess) -> CaptureSessionDetailOut:
 
 
 @router.post("/sessions", response_model=CaptureSessionOut, status_code=status.HTTP_201_CREATED)
-def start_session(payload: StartSessionIn, db: Database = Depends(get_db)) -> CaptureSessionOut:
+def start_session(payload: StartSessionIn, request: Request,
+                  db: Database = Depends(get_db)) -> CaptureSessionOut:
     try:
         sess = CaptureService(db).start(sources=payload.sources)
     except ActiveSessionExists:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="a session is already recording")
+    # 选了音频源 → 拉起 ASR worker 子进程(supervisor 内部判定 mic/system_audio 才真起)。
+    # 任何失败只记日志、不挡 session(降级:其余源/事件照常,见 spec §12)。
+    _start_asr(request, sess)
     return CaptureSessionOut.model_validate(sess)
+
+
+def _asr_model(request: Request) -> str:
+    """从持久化 ASR 设置取模型大小;读取失败则回落默认。"""
+    try:
+        from epictrace.services.settings import SettingsService
+        return SettingsService(request.app.state.config).get_asr_settings()["model"]
+    except Exception:  # noqa: BLE001 — 设置读不到不应挡 session
+        return "large-v3"
+
+
+def _start_asr(request: Request, sess) -> None:
+    sup = getattr(request.app.state, "asr_supervisor", None)
+    if sup is None:
+        return
+    try:
+        sup.start(session_id=sess.id, sources=list(sess.sources),
+                  staging_dir=sess.staging_dir, model=_asr_model(request))
+    except Exception as e:  # noqa: BLE001 — 子进程拉起失败降级,不挡 session
+        _log.warning("ASR supervisor.start failed for session %s: %s", sess.id, e)
+
+
+def _stop_asr(request: Request, sid: int) -> None:
+    sup = getattr(request.app.state, "asr_supervisor", None)
+    if sup is None:
+        return
+    try:
+        sup.stop(sid)
+    except Exception as e:  # noqa: BLE001 — 停止尽力而为
+        _log.warning("ASR supervisor.stop failed for session %s: %s", sid, e)
 
 
 @router.get("/sessions", response_model=list[CaptureSessionOut])
@@ -90,13 +128,15 @@ def append_event(sid: int, payload: AppendEventIn, db: Database = Depends(get_db
 
 
 @router.post("/sessions/{sid}/pause", status_code=status.HTTP_204_NO_CONTENT)
-def pause(sid: int, db: Database = Depends(get_db)) -> None:
+def pause(sid: int, request: Request, db: Database = Depends(get_db)) -> None:
     _pause_resume(db, sid, "pause")
+    _asr_pause_resume(request, sid, "pause")
 
 
 @router.post("/sessions/{sid}/resume", status_code=status.HTTP_204_NO_CONTENT)
-def resume(sid: int, db: Database = Depends(get_db)) -> None:
+def resume(sid: int, request: Request, db: Database = Depends(get_db)) -> None:
     _pause_resume(db, sid, "resume")
+    _asr_pause_resume(request, sid, "resume")
 
 
 def _pause_resume(db: Database, sid: int, which: str) -> None:
@@ -109,12 +149,34 @@ def _pause_resume(db: Database, sid: int, which: str) -> None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="session not recording")
 
 
-@router.post("/sessions/{sid}/stop", response_model=CaptureSessionOut)
-def stop_session(sid: int, db: Database = Depends(get_db)) -> CaptureSessionOut:
+def _asr_pause_resume(request: Request, sid: int, which: str) -> None:
+    """暂停/恢复联动 ASR worker(暂停停喂入,恢复重起;失败只记日志,不挡事件流)。"""
+    sup = getattr(request.app.state, "asr_supervisor", None)
+    if sup is None:
+        return
     try:
-        return CaptureSessionOut.model_validate(CaptureService(db).stop(sid))
+        sup.pause(sid) if which == "pause" else sup.resume(sid)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("ASR supervisor.%s failed for session %s: %s", which, sid, e)
+
+
+@router.post("/sessions/{sid}/stop", response_model=CaptureSessionOut)
+def stop_session(sid: int, request: Request, db: Database = Depends(get_db)) -> CaptureSessionOut:
+    try:
+        sess = CaptureService(db).stop(sid)
     except CaptureSessionNotFound:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    # 停 session → 停 ASR worker(flush 最后 confirmed 段 + finalize wav 由 worker 退出时收尾)。
+    _stop_asr(request, sid)
+    request.app.state.asr_partials.pop(sid, None)  # 清掉该 session 的内存态 partial
+    return CaptureSessionOut.model_validate(sess)
+
+
+@router.post("/sessions/{sid}/partial", status_code=status.HTTP_204_NO_CONTENT)
+def post_partial(sid: int, payload: PartialIn, request: Request) -> None:
+    """ASR worker 回推实时暂定段(不落库),存内存态 asr_partials[sid][source],经 SSE 推 HUD。"""
+    partials = request.app.state.asr_partials
+    partials.setdefault(sid, {})[payload.source] = payload.text
 
 
 @router.patch("/sessions/{sid}", response_model=CaptureSessionOut)
@@ -129,7 +191,10 @@ def rename_session(sid: int, payload: RenameIn, db: Database = Depends(get_db)) 
 
 
 @router.delete("/sessions/{sid}", status_code=status.HTTP_200_OK)
-def delete_session(sid: int, db: Database = Depends(get_db)) -> dict:
+def delete_session(sid: int, request: Request, db: Database = Depends(get_db)) -> dict:
+    # 先停 ASR worker(若仍在跑),再删 session + staging(避免 worker 还往已删目录写 wav)。
+    _stop_asr(request, sid)
+    request.app.state.asr_partials.pop(sid, None)
     try:
         CaptureService(db).delete(sid)
     except CaptureSessionNotFound:
@@ -196,6 +261,10 @@ async def stream_events(sid: int, request: Request, db: Database = Depends(get_d
                 yield {"event": "event", "data": json.dumps(
                     {"id": e.id, "kind": e.kind, "payload": e.payload,
                      "ts": e.ts.isoformat(), "meta": e.meta})}
+            # 每轮额外推一份 partial 快照(实时暂定段,内存态;前端单独渲染、不混进 events)。
+            partial = request.app.state.asr_partials.get(sid, {})
+            if partial:
+                yield {"event": "partial", "data": json.dumps(partial)}
             if sess.status != "recording":
                 yield {"event": "done", "data": "{}"}
                 break

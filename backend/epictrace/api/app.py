@@ -27,6 +27,7 @@ def create_app(
     llm=None,
     retriever=None,
     attachment_store=None,
+    asr_supervisor=None,
     config: AppConfig | None = None,
 ) -> FastAPI:
     app = FastAPI(title="EpicTrace")
@@ -58,6 +59,14 @@ def create_app(
     app.state.reranker = reranker  # 注入或延迟构造(见 deps.get_reranker)
     app.state.llm = llm  # 注入或由 SettingsService 接线(见 deps.get_llm)
     app.state.retriever = retriever  # 注入或延迟构造(见 deps.get_retriever)
+    # ASR 子进程编排:按 session 拉起/停止 worker(faster-whisper 隔离在子进程)。
+    # 默认真件(spawn=subprocess.Popen),测试可注入假 supervisor。其 supervisor.py 只
+    # 依赖 stdlib,构造它不触发 faster-whisper/sounddevice 等重依赖。
+    from epictrace.asr.supervisor import AsrSupervisor
+    app.state.asr_supervisor = asr_supervisor or AsrSupervisor()
+    # partial(实时暂定段)内存态:session_id -> {source: text}。confirmed 段走持久事件,
+    # partial 不落库,仅经 SSE 推 HUD。
+    app.state.asr_partials = {}
     app.state.index_jobs = {}  # project_id -> IndexJob(最近一次)
     # 守护 index/reindex 的「检查在跑 + 启动新 job」临界区:双击/重试/正在跑时再点
     # 不应起第二个并发的(破坏性)重建。见 routers/projects.py。
