@@ -38,3 +38,9 @@ def test_compute_type_default_and_roundtrips():
     c = AsrConfig.from_dict({"compute_type": "float32"})
     assert c.compute_type == "float32"
     assert c.to_dict()["compute_type"] == "float32"
+
+
+def test_rms_normalize_off_by_default():
+    # STEP 4:RMS 归一化默认关(放大噪声/损精度);用户仍可显式开。
+    assert AsrConfig().rms_normalize is False
+    assert AsrConfig.from_dict({"rms_normalize": True}).rms_normalize is True

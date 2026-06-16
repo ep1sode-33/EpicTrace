@@ -18,7 +18,9 @@ class AsrConfig:
     halluc_silence: float | None = 2.0
     force_confirm_after: int = 4
     stall_seek_seconds: float = 0.8
-    rms_normalize: bool = True
+    # RMS 归一化(STEP 4)默认关:常会放大底噪/损失精度。rms_normalize 函数 + RAW
+    # recent_input_rms 诊断保留,用户可显式开启,弱麦诊断仍可用。
+    rms_normalize: bool = False
     halluc_filter_enabled: bool = True
     input_device: int | None = None   # sounddevice 输入设备索引;None = 系统默认输入
     # 有界滑窗(STEP 1):每轮喂引擎的切片最多回看这么多秒——切片起点夹在
