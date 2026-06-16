@@ -35,17 +35,26 @@ def _repo_glob(model: str) -> str:
 
 
 def detect_asr_model(cache_dir: Path, model: str) -> bool:
-    """检测 HF 缓存里是否已下该 faster-whisper 模型。
+    """检测 HF 缓存里是否已下该 faster-whisper 模型(且**含真权重**)。
 
     纯文件系统探测,不起子进程;缓存根不存在 → False(不崩)。
-    按模型名解析出对应 HF repo 目录(distil 走别名映射,见 _DISTIL_REPO),命中即就绪。
+    按模型名解析出对应 HF repo 目录(distil 走别名映射,见 _DISTIL_REPO)。
+    **关键**:仅目录存在不算就绪——残缺/中断下载会留下 `models--…/snapshots/<hash>/`
+    里只有 config/tokenizer,真权重 `model.bin` 还是 blobs 里的 `*.incomplete`(symlink 未建)。
+    faster-whisper 加载的就是 `snapshots/<hash>/model.bin`,故必须命中它(跟随 symlink、非空)才算就绪。
     """
     if not cache_dir.is_dir():
         return False
     try:
-        for entry in cache_dir.glob(_repo_glob(model)):
-            if entry.is_dir():
-                return True
+        for repo_dir in cache_dir.glob(_repo_glob(model)):
+            if not repo_dir.is_dir():
+                continue
+            for weight in repo_dir.glob("snapshots/*/model.bin"):
+                try:
+                    if weight.exists() and weight.stat().st_size > 0:  # 跟随 symlink → 真 blob
+                        return True
+                except OSError:
+                    continue
     except OSError:
         return False
     return False
