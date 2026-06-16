@@ -18,16 +18,22 @@ class StreamState:
         self._filter = filter
         self._force_after = force_confirm_after
         self.last_confirmed_end: float = 0.0
+        # scanned_end:转写已 SCAN 到的会话绝对秒数(FIX B)。区别于 last_confirmed_end(确认游标):
+        # 即便某轮 0 段(静音/VAD 空)也推进 scanned_end,使调度按「未扫描量」排序——静音源被扫过
+        # 后不再霸占调度器、不重复重解码同一段;另一源不被饿死。不变式:scanned_end >= last_confirmed_end。
+        self.scanned_end: float = 0.0
         self.partial: TranscriptSegment | None = None
-        self._recent: deque[str] = deque(maxlen=recent_max)
+        # 最近确认段的 (text, start, end):供 FIX C 的时间/重叠感知去重(同段被重叠窗口重转才判重,
+        # 真实重复语音在错开时间出现不判重)。
+        self._recent: deque[tuple[str, float, float]] = deque(maxlen=recent_max)
         self._rounds_no_progress = 0
 
     def _gate(self, seg: TranscriptSegment) -> str:
         """过滤门判定(STEP 5):返回 "accept" / "halluc" / "dedup",供 _confirm 区分游标策略。
-        幻觉先判(空文本/近静音串也归幻觉),再判去重。"""
+        幻觉先判(空文本/近静音串也归幻觉),再判去重(FIX C 时间/重叠感知)。"""
         if self._filter.is_hallucination(seg.text):
             return "halluc"
-        if self._filter.is_duplicate(seg.text, list(self._recent)):
+        if self._filter.is_duplicate(seg.text, seg.start, seg.end, list(self._recent)):
             return "dedup"
         return "accept"
 
@@ -37,20 +43,33 @@ class StreamState:
         # stall 恢复 / 软强制确认也走这里 —— 故幻觉/重复永不会作为 confirmed 进存储(FIX E)。
         gate = self._gate(seg)
         if gate == "accept":
-            self._recent.append(seg.text)
+            self._recent.append((seg.text, seg.start, seg.end))
             out.append(TranscriptSegment(
                 text=self._filter.clean(seg.text), start=seg.start, end=seg.end,
                 source=self._source, words=seg.words, confirmed=True))
-            self.last_confirmed_end = max(self.last_confirmed_end, seg.end)
+            self._advance_confirmed(seg.end)
         elif gate == "halluc":
             # 真幻觉/近静音:推游标,避免对同一段反复重转(re-loop)。
-            self.last_confirmed_end = max(self.last_confirmed_end, seg.end)
+            self._advance_confirmed(seg.end)
         elif force_advance:
             # gate == "dedup" 且本轮是软强制确认(窗口已落后 tail 超 window_seconds):
             # 必须推游标,否则有界滑窗下未确认窗口会无限增长(STEP 1 兜底压倒 STEP 5 的保留)。
-            self.last_confirmed_end = max(self.last_confirmed_end, seg.end)
+            self._advance_confirmed(seg.end)
         # gate == "dedup" 且非强制:真实语音被去重门压住——**不推游标**,以便该段音频可被
         # 重新解码,不因一次误压而永久丢失(有界滑窗 + 软强制确认兜底,不会无限循环;STEP 5)。
+
+    def _advance_confirmed(self, end: float) -> None:
+        """推进确认游标,并维持不变式 scanned_end >= last_confirmed_end(FIX B)。"""
+        self.last_confirmed_end = max(self.last_confirmed_end, end)
+        if self.scanned_end < self.last_confirmed_end:
+            self.scanned_end = self.last_confirmed_end
+
+    def mark_scanned(self, tail: float) -> None:
+        """记录转写已扫描到的会话绝对秒数(FIX B)。每次 _transcribe_channel 后调用,即便 0 段:
+        把 scanned_end 单调推到本轮切片末端,使调度按「未扫描量」排序——静音/VAD 空的源被扫过后
+        不再霸占调度器,另一源不被饿死,同段也不无限重解码。绝不回退(单调)。"""
+        if tail > self.scanned_end:
+            self.scanned_end = tail
 
     def ingest(self, segments: list[TranscriptSegment], *,
                force_confirm_earliest: bool = False) -> list[TranscriptSegment]:

@@ -88,35 +88,60 @@ def test_flush_idempotent_no_partial():
     assert st.flush() == []
 
 
-def test_duplicate_confirmed_suppressed():
+def test_duplicate_confirmed_suppressed_when_time_overlaps():
+    """FIX C:同段被重叠窗口重转(同文本、时间重叠)→ 去重压住,不重复落库。"""
     st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=4)
     st.ingest([_seg("重复句", 0, 2), _seg("x", 2, 3)])
-    again = st.ingest([_seg("重复句", 0, 2), _seg("y", 2, 3)])
-    assert all("重复句" not in c.text for c in again)  # 最近 N 去重
+    # 时间重叠的同文本(0.5..2.5 与已确认 0..2 相交)= 重叠重转 → 去重。
+    again = st.ingest([_seg("重复句", 0.5, 2.5), _seg("y", 2.5, 3.5)])
+    assert all("重复句" not in c.text for c in again)  # 重叠重转被去重
+
+
+def test_repeated_speech_time_separated_all_emit():
+    """FIX C:用户把「测试」说三遍(同文本、时间明显错开)= 真实重复语音,三段全 emit,
+    都不被去重门丢弃、也不卡住游标。"""
+    st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=4)
+    texts = []
+    # 三段时间不重叠:0..2 / 5..7 / 10..12;各作多段窗首段被确认。
+    for (s, e), tail in [((0, 2), (2, 3)), ((5, 7), (7, 8)), ((10, 12), (12, 13))]:
+        out = st.ingest([_seg("测试", s, e), _seg("尾", *tail)])
+        texts += [c.text for c in out if "测试" in c.text]
+    assert texts == ["测试", "测试", "测试"]  # 三遍全 emit,无一被丢/卡
+    assert st.last_confirmed_end == 12.0      # 游标推进到第三段末(未卡住)
 
 
 def test_repeated_speech_emitted_once_not_dropped_or_duplicated():
-    """STEP 5:用户连说「测试测试测试」(真实重复语音)应被 emit 一次,不丢、不重复。"""
+    """STEP 5:更长的真实重复「测试测试测试测试」是不同话语,子串不应误判重而被丢。"""
     st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=4)
-    # 一窗:重复短语作首段(确认),后接尾段(partial)。
     confirmed = st.ingest([_seg("测试测试测试", 0, 2), _seg("尾", 2, 3)])
     assert [c.text for c in confirmed] == ["测试测试测试"]  # emit 一次
-    # 下一窗:更长的真实重复「测试测试测试测试」是不同话语,子串不应误判重而被丢。
     again = st.ingest([_seg("测试测试测试测试", 3, 5), _seg("尾2", 5, 6)])
     assert any("测试测试测试测试" in c.text for c in again)
 
 
 def test_dedup_rejection_does_not_advance_cursor():
-    """STEP 5:真实语音被去重门拒(非幻觉)→ 不推进游标,以便该段音频可被重转(不永久丢)。"""
+    """STEP 5 + FIX C:同段被重叠窗口重转(去重拒,非幻觉)→ 不推进游标,以便该段音频
+    可被重转(不永久丢)。"""
     st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=4)
     # 先确认一段,使其进 recent;游标推到 2。
     st.ingest([_seg("重复句", 0, 2), _seg("x", 2, 3)])
     assert st.last_confirmed_end == 2.0
     cursor_before = st.last_confirmed_end
-    # 同一签名再来(去重拒)作为多段窗的首段:不 emit,且游标不因这段推进。
-    out = st.ingest([_seg("重复句", 10, 12), _seg("尾", 12, 13)])
+    # 时间重叠的同签名再来(去重拒)作为多段窗的首段:不 emit,且游标不因这段推进。
+    out = st.ingest([_seg("重复句", 0.5, 2.5), _seg("尾", 2.5, 3.5)])
     assert all("重复句" not in c.text for c in out)       # 去重不落库
     assert st.last_confirmed_end == cursor_before          # 去重拒:游标不推进(可重转)
+
+
+def test_loop_hallucination_repetition_still_suppressed():
+    """FIX C:退化生长循环(连续 >=3 次同前缀 hypothesis)即便时间递增也仍被抑制(真幻觉)。"""
+    st = StreamState(source="mic", filter=HallucinationFilter(), force_confirm_after=4)
+    # 三段连续子串生长(哈哈 / 哈哈哈 / 哈哈哈哈),时间连续递增。前两段会被确认进 recent,
+    # 第三段触发 loop 抑制(末尾连续 >=2 段成子串关系)。
+    st.ingest([_seg("哈哈", 0, 2), _seg("x", 2, 3)])
+    st.ingest([_seg("哈哈哈", 3, 5), _seg("y", 5, 6)])
+    out = st.ingest([_seg("哈哈哈哈", 6, 8), _seg("z", 8, 9)])
+    assert all("哈哈哈哈" not in c.text for c in out)  # 退化循环被抑制
 
 
 def test_hallucination_rejection_still_advances_cursor():
