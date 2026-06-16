@@ -8,6 +8,7 @@ import {
   Play,
   Square,
   StickyNote,
+  TriangleAlert,
   Volume2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,9 @@ const SOURCE_OPTIONS = [
   { id: "mic", icon: Mic, label: "麦克风" },
   { id: "system_audio", icon: Volume2, label: "系统声音采集" },
 ];
+
+/** 已知来源 ID 集合;用于校验本地存储恢复的来源(过滤未知/损坏值)。 */
+const KNOWN_SOURCE_IDS = ["mic", "system_audio", "note", "clipboard", "screenshot"];
 
 /** 将秒数格式化为 MM:SS */
 function formatTime(secs: number): string {
@@ -55,7 +59,16 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
   const [selectedSources, setSelectedSources] = useState<Set<string>>(() => {
     try {
       const saved = localStorage.getItem("epictrace.capture.sources");
-      if (saved) return new Set<string>(JSON.parse(saved) as string[]);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // 校验形状:必须是数组,且只保留已知 ID。否则像 "mic" 这种字符串会被
+        // 拆成逐字符 ID(m/i/c)污染 Set(FIX 5)。
+        if (Array.isArray(parsed)) {
+          return new Set<string>(
+            parsed.filter((id): id is string => KNOWN_SOURCE_IDS.includes(id)),
+          );
+        }
+      }
     } catch {
       /* 忽略损坏的本地存储 */
     }
@@ -183,12 +196,15 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
     const audioSelected = sources.includes("mic") || sources.includes("system_audio");
     if (audioSelected) {
       // 模型没下却开音频源 → 会静默漏录转写(用户以为在转,其实没转)。硬挡。
-      let ready = asrReady;
+      // 失败必须 fail CLOSED:拉不到就绪态时绝不用可能陈旧的缓存 asrReady 放行(FIX 3),
+      // 否则陈旧的 true 会放过未就绪的模型 → 又回到静默漏录。
+      let ready: boolean;
       try {
         ready = (await api.getAsrStatus()).ready;
         setAsrReady(ready);
       } catch {
-        /* 拉取失败用已知值 */
+        setError("无法确认语音模型状态,请重试");
+        return;
       }
       if (!ready) {
         setError(
@@ -346,8 +362,9 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
 
           {asrReady === false &&
             (selectedSources.has("mic") || selectedSources.has("system_audio")) && (
-              <p className="mt-3 text-xs text-amber-700 dark:text-amber-400">
-                ⚠ 语音模型未下载,音频源不会转录 —— 请先到「设置 → ASR」下载。
+              <p className="mt-3 inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                语音模型未下载,音频源不会转录 —— 请先到「设置 → ASR」下载。
               </p>
             )}
 
