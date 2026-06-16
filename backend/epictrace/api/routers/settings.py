@@ -4,9 +4,12 @@ import threading
 
 from fastapi import APIRouter, HTTPException, Request
 
-from epictrace.api.deps import get_provisioner
+from epictrace.api.deps import get_asr_provisioner, get_provisioner
 from epictrace.llm.openai_compat import OpenAICompatLLM
 from epictrace.schemas import (
+    AsrSettingsIn,
+    AsrSettingsOut,
+    AsrStatusOut,
     ExtractionSettingsIn,
     ExtractionSettingsOut,
     ExtractionStatusOut,
@@ -163,3 +166,56 @@ def extraction_download_models(request: Request):
 
     threading.Thread(target=_run, daemon=True).start()
     return _provision_status(prov)
+
+
+# ---- ASR 设置/状态/模型下载(faster-whisper)——镜像 extraction 三件套 ----
+
+
+def _asr_status(prov, model: str) -> AsrStatusOut:
+    """ASR provisioner 当前状态 + 目标模型就绪与否。is_ready(model) 看的是配置里选中的
+    模型(而非 provisioner 上次下载的 _last_model),前端据此显示「这个 model 是否已下」。"""
+    return AsrStatusOut(
+        state=prov.state, ready=prov.is_ready(model), model=model,
+        error=getattr(prov, "last_error", None),
+    )
+
+
+@router.get("/asr/settings", response_model=AsrSettingsOut)
+def get_asr_settings(request: Request):
+    return _svc(request).get_asr_settings()
+
+
+@router.put("/asr/settings", response_model=AsrSettingsOut)
+def put_asr_settings(payload: AsrSettingsIn, request: Request):
+    # 部分更新:只把显式给出(非 None)的键传给服务层合并,其余保留现状。
+    patch = {k: v for k, v in payload.model_dump().items() if v is not None}
+    try:
+        return _svc(request).set_asr_settings(patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/asr/status", response_model=AsrStatusOut)
+def asr_status(request: Request):
+    model = _svc(request).get_asr_settings()["model"]
+    return _asr_status(get_asr_provisioner(request), model)
+
+
+@router.post("/asr/download-model", response_model=AsrStatusOut)
+def asr_download_model(request: Request):
+    """触发当前配置模型的下载(后台线程,粗粒度状态)。立即返回当前状态;前端轮询 status。
+
+    机制同 extraction_download_models:后台线程吞掉上抛异常(失败状态/last_error 由
+    provisioner 记录);下载中重复触发由 provisioner 内部并发守卫 no-op。模型取持久化
+    ASR 设置(无 → AsrConfig 默认 large-v3)。"""
+    prov = get_asr_provisioner(request)
+    model = _svc(request).get_asr_settings()["model"]
+
+    def _run():
+        try:
+            prov.download_model(model)
+        except Exception:  # noqa: BLE001 — 失败状态/last_error 已由 provisioner 记录
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return _asr_status(prov, model)

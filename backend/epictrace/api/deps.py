@@ -120,6 +120,22 @@ def get_provisioner(request: Request):
     return prov
 
 
+def get_asr_provisioner(request: Request):
+    """ASR 模型 provisioner(faster-whisper)。优先用注入的 app.state.asr_provisioner(测试假件);
+    否则按 app.state.config.asr_model_dir 懒构造并缓存。cache_dir 与 worker 的
+    WhisperModel(download_root=asr_model_dir) 一致,故就绪检测看的是真正落盘的目录。"""
+    prov = getattr(request.app.state, "asr_provisioner", None)
+    if prov is not None:
+        return prov
+    from epictrace.config import AppConfig
+    from epictrace.asr.provisioner import AsrProvisioner
+
+    config = getattr(request.app.state, "config", None) or AppConfig()
+    prov = AsrProvisioner(cache_dir=config.asr_model_dir)
+    request.app.state.asr_provisioner = prov
+    return prov
+
+
 def get_retriever(request: Request):
     """混合检索器:dense + sparse → RRF → rerank。优先用注入的 app.state.retriever;
     否则复用延迟构造的 embedder / store / reranker。"""

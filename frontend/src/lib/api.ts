@@ -53,6 +53,35 @@ export interface ExtractionSettings {
   model_source: "modelscope" | "huggingface" | "local";
 }
 
+/** ASR 模型大小:large-v3 / distil-large-v3 / medium / small。 */
+export type AsrModel = "large-v3" | "distil-large-v3" | "medium" | "small";
+/** ASR 可调配置(后端 AsrConfig 的形状)。model + 高级旋钮(VAD/阈值/确认纪律)。 */
+export interface AsrSettings {
+  model: AsrModel;
+  language: string;
+  vad: boolean;
+  vad_threshold: number;
+  no_speech: number;
+  log_prob: number;
+  compression_ratio: number;
+  repetition_penalty: number;
+  no_repeat_ngram: number;
+  condition_prev: boolean;
+  halluc_silence: number | null;
+  force_confirm_after: number;
+  stall_seek_seconds: number;
+  rms_normalize: boolean;
+  halluc_filter_enabled: boolean;
+}
+export interface AsrStatus {
+  /** not_downloaded | downloading | ready | failed */
+  state: "not_downloaded" | "downloading" | "ready" | "failed";
+  ready: boolean;
+  /** 状态针对的模型(== 当前配置选中的 model)。 */
+  model: string;
+  error?: string | null;
+}
+
 export type CaptureEvent = { id: number; kind: string; ts: string; payload: string; meta: Record<string, unknown> };
 export type CaptureSession = { id: number; title: string; status: string; started_at: string; ended_at: string | null; sources: string[]; staging_dir: string };
 export type CaptureSessionDetail = CaptureSession & { events: CaptureEvent[]; elapsed_seconds: number };
@@ -185,6 +214,19 @@ export const api = {
     }).then(j<ExtractionSettings>),
   downloadModels: () =>
     fetch(`${BASE}/api/extraction/download-models`, { method: "POST" }).then(j<ExtractionStatus>),
+
+  getAsrSettings: () =>
+    fetch(`${BASE}/api/asr/settings`).then(j<AsrSettings>),
+  // 部分更新:只传改动的键(如 {model}),后端合并进现有设置(其余旋钮保留)。
+  putAsrSettings: (patch: Partial<AsrSettings>) =>
+    fetch(`${BASE}/api/asr/settings`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }).then(j<AsrSettings>),
+  getAsrStatus: () =>
+    fetch(`${BASE}/api/asr/status`).then(j<AsrStatus>),
+  downloadAsrModel: () =>
+    fetch(`${BASE}/api/asr/download-model`, { method: "POST" }).then(j<AsrStatus>),
 
   startSession: (sources: string[]) =>
     fetch(`${BASE}/api/capture/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sources }) }).then(j<CaptureSession>),

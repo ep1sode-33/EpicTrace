@@ -162,6 +162,53 @@ class ExtractionStatusOut(BaseModel):
     failed_stage: str | None = None
 
 
+class AsrSettingsIn(BaseModel):
+    """ASR 可调配置的部分更新:仅给出的键被覆盖,其余保留现状(服务层合并 + 校验)。
+    全字段可选,使「只改一个旋钮」(如 model)的 PUT 不会把其余键重置为默认。"""
+    model: str | None = None
+    language: str | None = None
+    vad: bool | None = None
+    vad_threshold: float | None = None
+    no_speech: float | None = None
+    log_prob: float | None = None
+    compression_ratio: float | None = None
+    repetition_penalty: float | None = None
+    no_repeat_ngram: int | None = None
+    condition_prev: bool | None = None
+    halluc_silence: float | None = None
+    force_confirm_after: int | None = None
+    stall_seek_seconds: float | None = None
+    rms_normalize: bool | None = None
+    halluc_filter_enabled: bool | None = None
+
+
+class AsrSettingsOut(BaseModel):
+    """完整 ASR 配置(AsrConfig.to_dict 的形状)。"""
+    model: str
+    language: str
+    vad: bool
+    vad_threshold: float
+    no_speech: float
+    log_prob: float
+    compression_ratio: float
+    repetition_penalty: float
+    no_repeat_ngram: int
+    condition_prev: bool
+    halluc_silence: float | None = None
+    force_confirm_after: int
+    stall_seek_seconds: float
+    rms_normalize: bool
+    halluc_filter_enabled: bool
+
+
+class AsrStatusOut(BaseModel):
+    # not_downloaded | downloading | ready | failed
+    state: str
+    ready: bool
+    model: str
+    error: str | None = None
+
+
 class ReferenceCreate(BaseModel):
     kind: Literal["external", "internal"]
     source_path: str | None = None       # external 必填
