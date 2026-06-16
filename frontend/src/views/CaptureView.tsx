@@ -14,13 +14,13 @@ import { Button } from "@/components/ui/button";
 import { api, type CaptureSessionDetail } from "@/lib/api";
 import { native } from "@/lib/native";
 
-/** 来源选项;笔记/剪贴板/截图 + 外录(麦克风)/内录(系统声音)均可勾选 */
+/** 来源选项;笔记/剪贴板/截图 + 外录(麦克风)/内录(系统声音)均已可勾选 */
 const SOURCE_OPTIONS = [
-  { id: "note", icon: StickyNote, label: "笔记", disabled: false, coming: false },
-  { id: "clipboard", icon: Clipboard, label: "剪贴板", disabled: false, coming: false },
-  { id: "screenshot", icon: Camera, label: "截图", disabled: false, coming: false },
-  { id: "mic", icon: Mic, label: "🎤 外录(麦克风)", disabled: false, coming: false },
-  { id: "system_audio", icon: Volume2, label: "🔊 内录(系统声音)", disabled: false, coming: false },
+  { id: "note", icon: StickyNote, label: "笔记" },
+  { id: "clipboard", icon: Clipboard, label: "剪贴板" },
+  { id: "screenshot", icon: Camera, label: "截图" },
+  { id: "mic", icon: Mic, label: "🎤 外录(麦克风)" },
+  { id: "system_audio", icon: Volume2, label: "🔊 内录(系统声音)" },
 ];
 
 /** 将秒数格式化为 MM:SS */
@@ -248,21 +248,21 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
 
           {/* 来源开关 */}
           <ul className="mt-8 w-full divide-y divide-border/60 overflow-hidden rounded-xl border border-border/70 bg-card text-left">
-            {SOURCE_OPTIONS.map(({ id, icon: Icon, label, disabled, coming }) => (
+            {SOURCE_OPTIONS.map(({ id, icon: Icon, label }) => (
               <li
                 key={id}
-                className={`flex items-center gap-3 px-4 py-2.5 ${disabled ? "opacity-50" : "cursor-pointer hover:bg-muted/40 transition-colors"}`}
-                onClick={() => !disabled && toggleSource(id)}
+                className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-muted/40 transition-colors"
+                onClick={() => toggleSource(id)}
               >
                 <span
                   className={`flex size-4 shrink-0 items-center justify-center rounded border transition-colors ${
-                    !disabled && selectedSources.has(id)
+                    selectedSources.has(id)
                       ? "border-primary bg-primary"
                       : "border-muted-foreground/40 bg-transparent"
                   }`}
                   aria-hidden
                 >
-                  {!disabled && selectedSources.has(id) && (
+                  {selectedSources.has(id) && (
                     <svg
                       viewBox="0 0 12 12"
                       className="size-2.5 text-primary-foreground"
@@ -280,11 +280,6 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
                   strokeWidth={1.75}
                 />
                 <span className="flex-1 text-sm font-medium text-foreground">{label}</span>
-                {coming && (
-                  <span className="rounded-full border border-amber-600/25 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-300">
-                    即将到来
-                  </span>
-                )}
               </li>
             ))}
           </ul>
