@@ -188,6 +188,49 @@ def test_flush_shifts_to_absolute_and_is_idempotent():
     assert len(confirmed) == n
 
 
+def test_flush_channel_only_flushes_that_channel():
+    """FIX D:flush_channel(idle) 只排空该路,不强制确认另一路的 pending partial。"""
+    eng = _FakeEngine({
+        "mic": [_seg("mic 短尾", 0, 0.5, "mic")],
+        "device": [_seg("device 进行中", 0, 0.5, "device")],
+    })
+    confirmed = []
+    loop = StreamLoop(eng, AsrConfig(),
+                      on_confirmed=confirmed.append, on_partial=lambda s: None)
+    loop.set_sources({
+        "mic": _FakeSource(base=0.0, available=0.5),
+        "device": _FakeSource(base=0.0, available=0.5),
+    })
+    # 先让 device 攒一个 partial(单段、未到 force 轮 → 作 partial,未确认)。
+    loop._transcribe_channel("device")
+    assert loop._states["device"].partial is not None
+    assert all(c.source == "device" for c in confirmed) is True or confirmed == []
+    confirmed.clear()
+    # mic 转 IDLE → 只 flush mic:mic 短尾被确认,device 的 partial 不被强制确认。
+    loop.flush_channel("mic")
+    assert any(c.source == "mic" and "mic 短尾" in c.text for c in confirmed)
+    assert all(c.source != "device" for c in confirmed)   # device 的 partial 未被 flush
+    assert loop._states["device"].partial is not None     # device partial 仍在
+
+
+def test_flush_all_still_flushes_every_channel():
+    """FIX D:loop.flush()(收尾用)仍排空所有路。"""
+    eng = _FakeEngine({
+        "mic": [_seg("mic 尾", 0, 0.5, "mic")],
+        "device": [_seg("device 尾", 0, 0.5, "device")],
+    })
+    confirmed = []
+    loop = StreamLoop(eng, AsrConfig(),
+                      on_confirmed=confirmed.append, on_partial=lambda s: None)
+    loop.set_sources({
+        "mic": _FakeSource(base=0.0, available=0.5),
+        "device": _FakeSource(base=0.0, available=0.5),
+    })
+    loop.flush()
+    assert any(c.source == "mic" for c in confirmed)
+    assert any(c.source == "device" for c in confirmed)
+
+
 def test_slice_start_clamped_to_base_offset():
     """cursor 落后于 base_offset(那段已滚出缓冲)→ slice_start_abs 取 base_offset。"""
     eng = _FakeEngine({"mic": []})

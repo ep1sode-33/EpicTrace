@@ -291,7 +291,9 @@ def main(argv: list[str] | None = None) -> int:
                     flushed_idle[channel] = False
                 elif not flushed_idle[channel] and now - last_growth_at[channel] >= _IDLE_FLUSH_SECS:
                     flushed_idle[channel] = True
-                    loop.flush()
+                    # 只 flush 这一路转 IDLE 的短尾(FIX D);绝不因它空闲就强制确认另一路
+                    # mid-utterance 的 pending partial(此前 loop.flush() 全路 flush 的副作用)。
+                    loop.flush_channel(channel)
             # 每 5s 打印每路采集时长 + 近段 RMS 能量:近零能量 = 没收到声音(权限/设备),
             # 而非转写问题——让「mic 寄」在终端一眼可诊断。
             now = time.time()

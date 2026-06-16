@@ -97,17 +97,24 @@ class StreamLoop:
         # 本轮已扫描到切片末端 → 推进 scanned_end(含 0 段;FIX B),使静音源不再霸占调度。
         st.mark_scanned(slice_end_abs)
 
-    def flush(self) -> None:
-        """排空短尾(FIX 3):正常 tick 只处理 ≥1s 未处理音频,短促一句话+停顿(尾段 <1s)永不被转。
+    def flush_channel(self, ch: str) -> None:
+        """只排空某一路的短尾(FIX D):若该路有 ANY 未处理音频(> _MIN_FLUSH_TAIL≈0.2s,低于
+        正常 1s 门)就转一次、平移、ingest;再对该路 StreamState.flush() 强制确认残留 partial 并 emit。
 
-        收尾(stop)或某路转 IDLE 时调用:逐路若有 ANY 未处理音频(> _MIN_FLUSH_TAIL≈0.2s,
-        低于正常 1s 门)就转一次、平移、ingest;再对每路 StreamState.flush() 强制确认残留 partial
-        并 emit。无未处理音频且无 partial 的源是 no-op(故可幂等重复调用)。"""
-        for ch in self._sources:
-            if self._unprocessed(ch) > _MIN_FLUSH_TAIL:
-                self._transcribe_channel(ch)
-            for c in self._states[ch].flush():
-                self._on_confirmed(c)
+        worker 的 IDLE 检测对「转 IDLE 的那一路」调用本方法——只确认它自己的短尾/partial,绝不
+        因一路空闲就强制确认另一路 mid-utterance 的 pending partial(此前 flush() 全路 flush 的副作用)。
+        无未处理音频且无 partial 的源是 no-op(故可幂等重复调用)。"""
+        if ch not in self._sources:
+            return
+        if self._unprocessed(ch) > _MIN_FLUSH_TAIL:
+            self._transcribe_channel(ch)
+        for c in self._states[ch].flush():
+            self._on_confirmed(c)
+
+    def flush(self) -> None:
+        """排空所有路的短尾(FIX 3,收尾 stop 用):逐路调 flush_channel。"""
+        for ch in list(self._sources):
+            self.flush_channel(ch)
 
     @staticmethod
     def _shift(seg: TranscriptSegment, offset: float) -> TranscriptSegment:
