@@ -173,10 +173,15 @@ def extraction_download_models(request: Request):
 
 
 def _asr_status(prov, model: str) -> AsrStatusOut:
-    """ASR provisioner 当前状态 + 目标模型就绪与否。is_ready(model) 看的是配置里选中的
-    模型(而非 provisioner 上次下载的 _last_model),前端据此显示「这个 model 是否已下」。"""
+    """ASR provisioner 当前状态 + 目标模型就绪与否。is_ready(model) 看的是配置里选中的模型。
+
+    **state 以 is_ready 为准**:模型已在缓存就报 "ready",不依赖 provisioner 本进程是否下过
+    (其 state 属性靠 _last_model,app 重启后为 None → 会把已下好的模型误报「未下载」)。
+    仅当未就绪时才用 provisioner 的过渡态(downloading / failed / not_downloaded)。"""
+    ready = prov.is_ready(model)
+    state = "ready" if ready else prov.state
     return AsrStatusOut(
-        state=prov.state, ready=prov.is_ready(model), model=model,
+        state=state, ready=ready, model=model,
         error=getattr(prov, "last_error", None),
     )
 

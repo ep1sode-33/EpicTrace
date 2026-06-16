@@ -136,6 +136,29 @@ def test_put_asr_settings_preserves_extraction(app_client):
 # ---- GET /api/asr/status:形状 + 反映选中模型就绪与否 ----
 
 
+def test_asr_status_reports_ready_when_model_cached_even_if_state_stale(tmp_path):
+    """app 重启后:模型已在缓存(is_ready=True),但 provisioner 本进程没下过(state=not_downloaded)。
+    状态接口必须报 state=ready —— 否则 UI 显示「未下载」,而模型其实能用(真机踩过)。"""
+
+    class _StaleProv:
+        last_error = None
+
+        def is_ready(self, model):
+            return True
+
+        @property
+        def state(self):
+            return "not_downloaded"
+
+        def download_model(self, model, *, progress_cb=None):
+            return "ready"
+
+    c = _client(tmp_path, _StaleProv())
+    body = c.get("/api/asr/status").json()
+    assert body["ready"] is True
+    assert body["state"] == "ready"
+
+
 def test_asr_status_shape_not_downloaded(tmp_path):
     prov = _FakeAsrProvisioner()
     c = _client(tmp_path, prov)
