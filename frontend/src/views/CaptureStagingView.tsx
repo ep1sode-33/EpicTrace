@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, Clock, FolderOpen, Loader2, Trash2 } from "lucide-react";
 import { api, type CaptureSession, type CaptureSessionDetail, type Project } from "@/lib/api";
+import { groupTimelineItems } from "@/lib/transcript";
 import { Button } from "@/components/ui/button";
 
 /** 状态徽标样式 */
@@ -216,31 +217,61 @@ export function CaptureStagingView({ onOrganized }: Props) {
                         <div className="relative space-y-2">
                           {/* 竖线 */}
                           <div className="absolute left-[5.5rem] top-0 h-full w-px bg-border/50" aria-hidden />
-                          {selected.events.map((ev) => (
-                            <div key={ev.id} className="flex items-start gap-3">
-                              {/* 相对时间刻度 */}
-                              <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground pt-0.5">
-                                {fmtRel(relSec(selected.started_at, ev.ts))}
-                              </span>
-                              {/* 时间线节点 */}
-                              <span className="relative z-10 mt-1 flex size-3 shrink-0 items-center justify-center">
-                                <span className={`size-2 rounded-full ${dotColor(ev.kind)}`} aria-hidden />
-                              </span>
-                              {/* 事件内容 */}
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-1.5">
-                                  <span className="text-xs font-medium text-foreground">
-                                    {kindLabel(ev.kind, ev.meta)}
+                          {/* 连续同源转写合并成段落(FIX 2):一段只显示一次来源标签 + 一个时间/区间,
+                              整段文本换行展示,不再逐句一行一时间戳。 */}
+                          {groupTimelineItems(selected.events).map((item) => {
+                            if (item.kind === "transcription") {
+                              const startRel = fmtRel(relSec(selected.started_at, item.start_ts));
+                              const endRel = fmtRel(relSec(selected.started_at, item.end_ts));
+                              const timeLabel = startRel === endRel ? startRel : `${startRel}–${endRel}`;
+                              return (
+                                <div key={`tr-${item.ids[0]}`} className="flex items-start gap-3">
+                                  <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground pt-0.5">
+                                    {timeLabel}
                                   </span>
+                                  <span className="relative z-10 mt-1 flex size-3 shrink-0 items-center justify-center">
+                                    <span className={`size-2 rounded-full ${dotColor("transcription")}`} aria-hidden />
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <span className="text-xs font-medium text-foreground">
+                                      {kindLabel("transcription", { source: item.source })}
+                                    </span>
+                                    {item.text && (
+                                      <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                                        {item.text}
+                                      </p>
+                                    )}
+                                  </div>
                                 </div>
-                                {ev.payload && (
-                                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                                    {ev.payload}
-                                  </p>
-                                )}
+                              );
+                            }
+                            const ev = item.event;
+                            return (
+                              <div key={ev.id} className="flex items-start gap-3">
+                                {/* 相对时间刻度 */}
+                                <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground pt-0.5">
+                                  {fmtRel(relSec(selected.started_at, ev.ts))}
+                                </span>
+                                {/* 时间线节点 */}
+                                <span className="relative z-10 mt-1 flex size-3 shrink-0 items-center justify-center">
+                                  <span className={`size-2 rounded-full ${dotColor(ev.kind)}`} aria-hidden />
+                                </span>
+                                {/* 事件内容 */}
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-xs font-medium text-foreground">
+                                      {kindLabel(ev.kind, ev.meta)}
+                                    </span>
+                                  </div>
+                                  {ev.payload && (
+                                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                                      {ev.payload}
+                                    </p>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>

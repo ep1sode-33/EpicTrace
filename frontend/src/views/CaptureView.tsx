@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, type CaptureSessionDetail } from "@/lib/api";
+import { groupTimelineItems } from "@/lib/transcript";
 import { native } from "@/lib/native";
 
 /** 来源选项;笔记/剪贴板/截图 + 麦克风/系统声音采集 均可勾选 */
@@ -385,6 +386,8 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
   const textEvents = session.events.filter((e) =>
     ["note", "clipboard", "screenshot", "transcription"].includes(e.kind),
   );
+  // 连续同源转写合并成段落(FIX 2);newest-first 展示。
+  const feedItems = [...groupTimelineItems(textEvents)].reverse();
 
   return (
     <div className="flex min-h-[calc(100vh-3.5rem)] flex-col px-6 py-8">
@@ -488,35 +491,55 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
         {/* Live feed */}
         <div className="space-y-1">
           <p className="text-xs font-medium text-muted-foreground">
-            采集 feed（{textEvents.length} 条）
+            采集 feed（{feedItems.length} 条）
           </p>
-          {textEvents.length === 0 ? (
+          {feedItems.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border/60 px-5 py-8 text-center text-sm text-muted-foreground">
               暂无采集内容
             </div>
           ) : (
             <ul className="divide-y divide-border/50 overflow-hidden rounded-xl border border-border/70 bg-card">
-              {[...textEvents].reverse().map((ev) => (
-                <li key={ev.id} className="flex items-start gap-3 px-4 py-3">
-                  <span
-                    className={`mt-1.5 size-2 shrink-0 rounded-full ${eventDotColor(ev.kind)}`}
-                    aria-hidden
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
+              {feedItems.map((item) => {
+                if (item.kind === "transcription") {
+                  return (
+                    <li key={`tr-${item.ids[0]}`} className="flex items-start gap-3 px-4 py-3">
+                      <span
+                        className={`mt-1.5 size-2 shrink-0 rounded-full ${eventDotColor("transcription")}`}
+                        aria-hidden
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start gap-1.5">
+                          {/* 整段转写换行展示(不逐句截断);来源标签只显示一次。 */}
+                          <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm text-foreground">
+                            {item.text || "(无内容)"}
+                          </p>
+                          <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                            {sourceLabel({ source: item.source })}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {new Date(item.start_ts).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                }
+                const ev = item.event;
+                return (
+                  <li key={ev.id} className="flex items-start gap-3 px-4 py-3">
+                    <span
+                      className={`mt-1.5 size-2 shrink-0 rounded-full ${eventDotColor(ev.kind)}`}
+                      aria-hidden
+                    />
+                    <div className="min-w-0 flex-1">
                       <p className="truncate text-sm text-foreground">{ev.payload || "(无内容)"}</p>
-                      {ev.kind === "transcription" && (
-                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                          {sourceLabel(ev.meta)}
-                        </span>
-                      )}
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {new Date(ev.ts).toLocaleTimeString()}
+                      </p>
                     </div>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      {new Date(ev.ts).toLocaleTimeString()}
-                    </p>
-                  </div>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
