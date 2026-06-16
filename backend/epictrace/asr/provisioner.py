@@ -51,7 +51,8 @@ def detect_asr_model(cache_dir: Path, model: str) -> bool:
                 continue
             for weight in repo_dir.glob("snapshots/*/model.bin"):
                 try:
-                    if weight.exists() and weight.stat().st_size > 0:  # 跟随 symlink → 真 blob
+                    # is_file() 跟随 symlink:目录名恰为 model.bin 的不算就绪(FIX 4)。
+                    if weight.is_file() and weight.stat().st_size > 0:  # 真 blob
                         return True
                 except OSError:
                     continue

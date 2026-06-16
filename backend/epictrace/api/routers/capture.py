@@ -7,7 +7,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sse_starlette.sse import EventSourceResponse
 
-from epictrace.api.deps import get_db, get_embedder, get_vector_store
+from epictrace.api.deps import (
+    get_asr_provisioner,
+    get_db,
+    get_embedder,
+    get_vector_store,
+)
 from epictrace.db import Database
 from epictrace.schemas import (
     AppendEventIn,
@@ -51,9 +56,20 @@ def _detail(svc: CaptureService, sess) -> CaptureSessionDetailOut:
     )
 
 
+_AUDIO_SOURCES = ("mic", "system_audio")
+
+
 @router.post("/sessions", response_model=CaptureSessionOut, status_code=status.HTTP_201_CREATED)
 def start_session(payload: StartSessionIn, request: Request,
                   db: Database = Depends(get_db)) -> CaptureSessionOut:
+    # 服务端硬门:选了音频源(mic/system_audio)但语音模型未就绪 → 直接 409,绝不建 session。
+    # 前端虽已挡(CaptureView),但直连 API / 陈旧页面 / 竞态仍可能漏进来 → worker 会 Popen 起
+    # WhisperModel 阻塞下载 ~3GB(或挂死)→ 用户最怕的「静默漏录/卡死」。在源头守住(FIX 1)。
+    if any(s in _AUDIO_SOURCES for s in payload.sources):
+        cfg = _asr_settings(request)
+        if not get_asr_provisioner(request).is_ready(cfg.get("model", "large-v3")):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="语音模型未就绪,请先在设置下载")
     try:
         sess = CaptureService(db).start(sources=payload.sources)
     except ActiveSessionExists:
@@ -78,6 +94,15 @@ def _asr_settings(request: Request) -> dict:
         return AsrConfig().to_dict()
 
 
+def _asr_cache_dir(request: Request) -> str | None:
+    """ASR 模型缓存目录(WhisperModel download_root)。与 provisioner 就绪检测同一路径,
+    透传给 worker → 非默认数据目录下二者不再各看各的(FIX 2)。取不到回 None(worker 落默认)。"""
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        return None
+    return str(config.asr_model_dir)
+
+
 def _start_asr(request: Request, sess) -> None:
     sup = getattr(request.app.state, "asr_supervisor", None)
     if sup is None:
@@ -86,7 +111,7 @@ def _start_asr(request: Request, sess) -> None:
         cfg = _asr_settings(request)
         sup.start(session_id=sess.id, sources=list(sess.sources),
                   staging_dir=sess.staging_dir, model=cfg.get("model", "large-v3"),
-                  config=cfg)
+                  config=cfg, cache_dir=_asr_cache_dir(request))
     except Exception as e:  # noqa: BLE001 — 子进程拉起失败降级,不挡 session
         _log.warning("ASR supervisor.start failed for session %s: %s", sess.id, e)
 

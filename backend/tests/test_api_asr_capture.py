@@ -29,11 +29,19 @@ class _Sup:
         self.resumed.append(sid)
 
 
+class _ReadyProvisioner:
+    """假 ASR provisioner:默认就绪(供不测门控的用例,不被空 tmp 缓存挡掉)。"""
+
+    def is_ready(self, model):
+        return True
+
+
 def _client(tmp_path: Path, sup):
     db = Database(AppConfig(data_dir=tmp_path))
     db.create_all()
     app = create_app(db=db)
     app.state.asr_supervisor = sup
+    app.state.asr_provisioner = _ReadyProvisioner()  # 默认就绪,门控不挡(FIX 1)
     return TestClient(app)
 
 
@@ -108,6 +116,7 @@ def test_stop_calls_asr_stop_before_status_flip(tmp_path):
     sup = _OrderSup()
     app = create_app(db=db)
     app.state.asr_supervisor = sup
+    app.state.asr_provisioner = _ReadyProvisioner()
     c = TestClient(app)
     sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
     c.post(f"/api/capture/sessions/{sid}/stop")
@@ -132,6 +141,7 @@ def test_start_passes_resolved_config_to_supervisor(tmp_path):
     sup = _Sup()
     app = create_app(db=db)
     app.state.asr_supervisor = sup
+    app.state.asr_provisioner = _ReadyProvisioner()
     c = TestClient(app)
     c.post("/api/capture/sessions", json={"sources": ["mic"]})
     assert sup.started
@@ -148,6 +158,69 @@ def test_pause_resume_call_supervisor(tmp_path):
     c.post(f"/api/capture/sessions/{sid}/pause")
     c.post(f"/api/capture/sessions/{sid}/resume")
     assert sid in sup.paused and sid in sup.resumed
+
+
+class _FakeProvisioner:
+    """假 ASR provisioner:固定 is_ready 返回值,记录被问的 model。"""
+
+    def __init__(self, ready: bool):
+        self._ready = ready
+        self.asked = []
+
+    def is_ready(self, model):
+        self.asked.append(model)
+        return self._ready
+
+
+def _client_with_prov(tmp_path, sup, prov):
+    db = Database(AppConfig(data_dir=tmp_path))
+    db.create_all()
+    app = create_app(db=db)
+    app.state.asr_supervisor = sup
+    app.state.asr_provisioner = prov
+    return TestClient(app)
+
+
+def test_audio_session_blocked_when_model_not_ready(tmp_path):
+    """FIX 1:选了 mic 但模型未就绪 → 409,session 不建,supervisor.start 不调。"""
+    sup = _Sup()
+    prov = _FakeProvisioner(ready=False)
+    c = _client_with_prov(tmp_path, sup, prov)
+    r = c.post("/api/capture/sessions", json={"sources": ["mic", "note"]})
+    assert r.status_code == 409
+    assert sup.started == []                       # supervisor 没被拉起
+    assert c.get("/api/capture/sessions").json() == []  # session 没被创建
+    assert prov.asked                              # 确实查了就绪态
+
+
+def test_system_audio_session_blocked_when_model_not_ready(tmp_path):
+    """FIX 1:system_audio 同样受门控。"""
+    sup = _Sup()
+    prov = _FakeProvisioner(ready=False)
+    c = _client_with_prov(tmp_path, sup, prov)
+    r = c.post("/api/capture/sessions", json={"sources": ["system_audio"]})
+    assert r.status_code == 409
+    assert sup.started == []
+
+
+def test_audio_session_allowed_when_model_ready(tmp_path):
+    """FIX 1:模型就绪 → 201 + supervisor.start 被调。"""
+    sup = _Sup()
+    prov = _FakeProvisioner(ready=True)
+    c = _client_with_prov(tmp_path, sup, prov)
+    r = c.post("/api/capture/sessions", json={"sources": ["mic"]})
+    assert r.status_code == 201
+    assert sup.started and sup.started[0]["session_id"] == r.json()["id"]
+
+
+def test_non_audio_session_not_gated_when_model_absent(tmp_path):
+    """FIX 1:note/clipboard 等非音频源不受门控:模型缺也 201。"""
+    sup = _Sup()
+    prov = _FakeProvisioner(ready=False)
+    c = _client_with_prov(tmp_path, sup, prov)
+    r = c.post("/api/capture/sessions", json={"sources": ["note", "clipboard"]})
+    assert r.status_code == 201
+    assert prov.asked == []                        # 非音频源根本不查就绪态
 
 
 def test_start_supervisor_error_does_not_block_session(tmp_path):

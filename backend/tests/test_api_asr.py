@@ -153,7 +153,11 @@ def test_download_model_kicks_off_configured_model(tmp_path):
 # ---- capture partial POST→GET 往返(内存态,不落库)----
 
 
-def test_partial_post_then_get_roundtrip(app_client):
+def test_partial_post_then_get_roundtrip(tmp_path):
+    # 起带 mic 的 session 需模型就绪(FIX 1 服务端门控);注入预置就绪的假 provisioner。
+    prov = _FakeAsrProvisioner()
+    prov._ready_models.add("large-v3")
+    app_client = _client(tmp_path, prov)
     sid = app_client.post("/api/capture/sessions",
                           json={"sources": ["mic"]}).json()["id"]
     # 无 partial 时空 dict。

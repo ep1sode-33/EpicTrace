@@ -41,6 +41,18 @@ def test_argv_carries_sources_staging_model():
     assert "/tmp/7" in argv and "medium" in argv
 
 
+def test_argv_carries_cache_dir():
+    """FIX 2:supervisor 把路由传入的 ASR 缓存目录以 --cache-dir 透传 worker,
+    使 worker 的就绪检测 + WhisperModel(download_root) 与 provisioner 落盘同一目录。"""
+    spawned = []
+    sup = AsrSupervisor(spawn=lambda argv: spawned.append(argv) or object())
+    sup.start(session_id=8, sources=["mic"], staging_dir="/tmp/8",
+              model="medium", cache_dir="/data/.asr-models")
+    argv = spawned[0]
+    assert "--cache-dir" in argv
+    assert argv[argv.index("--cache-dir") + 1] == "/data/.asr-models"
+
+
 def test_argv_carries_full_config_json_roundtrips():
     """FIX D:supervisor 把完整 ASR 设置以 --config <json> 透传;worker.parse_args 回程出
     带非默认值的 AsrConfig(不只 model)。"""

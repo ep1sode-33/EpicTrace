@@ -23,6 +23,18 @@ def test_parse_args_default_model():
     assert args.config.model == "large-v3"
 
 
+def test_parse_args_cache_dir():
+    """FIX 2:--cache-dir 透传到 WorkerArgs.cache_dir,供就绪检测 + download_root 用。"""
+    args = parse_args(["--session", "1", "--staging", "/tmp/1",
+                       "--cache-dir", "/data/.asr-models", "--sources", "mic"])
+    assert args.cache_dir == "/data/.asr-models"
+
+
+def test_parse_args_cache_dir_defaults_none():
+    args = parse_args(["--session", "1", "--staging", "/tmp/1", "--sources", "mic"])
+    assert args.cache_dir is None
+
+
 def test_parse_args_config_json_builds_full_asrconfig():
     """FIX D:--config <json> 回程成带非默认值的完整 AsrConfig(不只 model)。"""
     cfg_json = json.dumps({"model": "small", "vad": False, "vad_threshold": 0.3,
@@ -46,6 +58,24 @@ def test_wav_path_is_unique_per_launch():
     name = p.rsplit("/", 1)[-1]
     assert fnmatch.fnmatch(name, "audio-*.wav")
     assert name.startswith("audio-mic-")
+
+
+def test_worker_main_fails_fast_when_model_absent(tmp_path, monkeypatch):
+    """FIX 1(防御纵深):模型不在缓存里 → worker.main 直接退 1,绝不构建 WhisperModel
+    去自动下载。用空 tmp 缓存目录 + 桩掉 _build_engine(若被调到就炸,证明没走到那)。"""
+    import epictrace.asr.worker as worker
+
+    def _boom_engine(*a, **k):
+        raise AssertionError("WhisperModel must NOT be constructed when model absent")
+
+    monkeypatch.setattr(worker, "_build_engine", _boom_engine)
+    monkeypatch.setattr(worker, "_post", lambda *a, **k: None)  # 不真发网络
+
+    rc = worker.main([
+        "--session", "1", "--staging", str(tmp_path),
+        "--cache-dir", str(tmp_path / "empty-cache"), "--sources", "mic",
+    ])
+    assert rc == 1
 
 
 def test_shutdown_stops_sources_and_closes_wavs():

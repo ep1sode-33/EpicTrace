@@ -33,6 +33,7 @@ class _Entry:
     staging_dir: str
     model: str
     config: dict = field(default_factory=dict)
+    cache_dir: str | None = None
 
 
 class AsrSupervisor:
@@ -48,8 +49,8 @@ class AsrSupervisor:
         # _default_spawn:即使 supervisor 在 patch 之前就构造好了,也不会 spawn 真子进程)。
         self._spawn = spawn
         self._procs: dict[int, _Entry] = {}
-        # pause/resume 暂存:session_id -> (sources, staging_dir, model, config)
-        self._paused: dict[int, tuple[list[str], str, str, dict]] = {}
+        # pause/resume 暂存:session_id -> (sources, staging_dir, model, config, cache_dir)
+        self._paused: dict[int, tuple[list[str], str, str, dict, str | None]] = {}
 
     @staticmethod
     def _audio_sources(sources: list[str]) -> list[str]:
@@ -57,7 +58,7 @@ class AsrSupervisor:
         return [s for s in sources if s in _AUDIO_SOURCES]
 
     def _build_argv(self, session_id: int, audio: list[str], staging_dir: str,
-                    model: str, config: dict) -> list[str]:
+                    model: str, config: dict, cache_dir: str | None) -> list[str]:
         argv = [
             "python", "-m", "epictrace.asr.worker",
             "--session", str(session_id),
@@ -66,16 +67,22 @@ class AsrSupervisor:
             # 完整 ASR 设置(已由路由经 SettingsService 解析)以 JSON 透传,worker 据此建
             # AsrConfig.from_dict —— vad/阈值/force_confirm_after 等非默认值都生效(FIX D)。
             "--config", json.dumps(config or {}),
-            "--sources", *audio,
         ]
+        # ASR 模型缓存目录(WhisperModel download_root):与 provisioner 就绪检测同一路径
+        # (FIX 2)。非默认数据目录下二者必须一致,否则 provisioner 说就绪、worker 另路下载。
+        if cache_dir:
+            argv += ["--cache-dir", cache_dir]
+        argv += ["--sources", *audio]
         return argv
 
     def start(self, session_id: int, sources: list[str], staging_dir: str,
-              *, model: str = "large-v3", config: dict | None = None) -> None:
+              *, model: str = "large-v3", config: dict | None = None,
+              cache_dir: str | None = None) -> None:
         """仅当 sources 含音频源时拉起 worker;否则 no-op。重复 start 同一 session 先停旧的。
 
         config = 路由解析好的完整 ASR 设置 dict(SettingsService.get_asr_settings());透传给
         worker 建 AsrConfig。未传则空 dict(worker 落 AsrConfig 默认)。
+        cache_dir = ASR 模型缓存目录,透传 worker 用于就绪检测 + WhisperModel download_root(FIX 2)。
         """
         audio = self._audio_sources(sources)
         if not audio:
@@ -83,11 +90,12 @@ class AsrSupervisor:
         cfg = dict(config or {})
         if session_id in self._procs:
             self.stop(session_id)
-        argv = self._build_argv(session_id, audio, staging_dir, model, cfg)
+        argv = self._build_argv(session_id, audio, staging_dir, model, cfg, cache_dir)
         spawn = self._spawn or _default_spawn  # 调用点解析,便于测试 patch 模块级默认
         proc = spawn(argv)
         self._procs[session_id] = _Entry(proc=proc, sources=audio,
-                                         staging_dir=staging_dir, model=model, config=cfg)
+                                         staging_dir=staging_dir, model=model, config=cfg,
+                                         cache_dir=cache_dir)
 
     def stop(self, session_id: int) -> None:
         """停掉该 session 的 worker(若有):terminate → wait(timeout)→ 仍活则 kill。
@@ -123,8 +131,9 @@ class AsrSupervisor:
         entry = self._procs.get(session_id)
         if entry is None:
             return
-        # 记住重启所需参数后停掉进程;sources/staging/model/config 暂存在 _paused。
-        self._paused[session_id] = (entry.sources, entry.staging_dir, entry.model, entry.config)
+        # 记住重启所需参数后停掉进程;sources/staging/model/config/cache_dir 暂存在 _paused。
+        self._paused[session_id] = (entry.sources, entry.staging_dir, entry.model,
+                                    entry.config, entry.cache_dir)
         self.stop(session_id)
 
     def resume(self, session_id: int) -> None:
@@ -132,5 +141,6 @@ class AsrSupervisor:
         saved = self._paused.pop(session_id, None)
         if saved is None:
             return
-        sources, staging_dir, model, config = saved
-        self.start(session_id, sources, staging_dir, model=model, config=config)
+        sources, staging_dir, model, config, cache_dir = saved
+        self.start(session_id, sources, staging_dir, model=model, config=config,
+                   cache_dir=cache_dir)

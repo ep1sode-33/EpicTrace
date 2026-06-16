@@ -39,6 +39,7 @@ class WorkerArgs:
     staging_dir: str
     model: str
     config: AsrConfig
+    cache_dir: str | None = None
 
 
 def parse_args(argv: list[str]) -> WorkerArgs:
@@ -46,12 +47,14 @@ def parse_args(argv: list[str]) -> WorkerArgs:
 
     --config 是路由经 SettingsService 解析好的完整 ASR 设置 JSON,回程成 AsrConfig(vad/阈值/
     force_confirm_after 等非默认值都生效,FIX D);无 --config 时落 model 单字段(其余默认)。
+    --cache-dir 是 ASR 模型缓存目录(与 provisioner 同一路径,FIX 2);无则落 None(用默认)。
     """
     p = argparse.ArgumentParser(prog="epictrace.asr.worker")
     p.add_argument("--session", dest="session", type=int, required=True)
     p.add_argument("--staging", dest="staging", required=True)
     p.add_argument("--model", dest="model", default="large-v3")
     p.add_argument("--config", dest="config", default=None)
+    p.add_argument("--cache-dir", dest="cache_dir", default=None)
     p.add_argument("--sources", dest="sources", nargs="+", required=True)
     ns = p.parse_args(argv)
     if ns.config:
@@ -59,7 +62,8 @@ def parse_args(argv: list[str]) -> WorkerArgs:
     else:
         cfg = AsrConfig(model=ns.model)
     return WorkerArgs(session_id=ns.session, sources=list(ns.sources),
-                      staging_dir=ns.staging, model=ns.model, config=cfg)
+                      staging_dir=ns.staging, model=ns.model, config=cfg,
+                      cache_dir=ns.cache_dir)
 
 
 def _post(path: str, body: dict) -> None:
@@ -128,6 +132,26 @@ def _shutdown(sources: dict, wavs: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     import sys
+    from pathlib import Path
+
+    from epictrace.asr.provisioner import detect_asr_model
+    from epictrace.config import AppConfig
+
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    cfg = args.config
+    app_config = AppConfig()
+    # 缓存目录优先用路由透传的 --cache-dir(与 provisioner 就绪检测同一路径,FIX 2);
+    # 缺省回退到本进程的 AppConfig.asr_model_dir(默认数据目录场景)。
+    cache_dir = Path(args.cache_dir) if args.cache_dir else app_config.asr_model_dir
+    # fail-fast(FIX 1 防御纵深):server 端已门控,但 worker 仍自检模型真在缓存里——
+    # 缺则报错退出,绝不让 WhisperModel 自动去下载 ~3GB 阻塞(用户最怕的静默卡死)。
+    # 这步在加载 soundfile/audio_sources 等重依赖之前,缺模型时连音频库都不碰。
+    if not detect_asr_model(cache_dir, cfg.model):
+        _log.error("ASR worker: model %s not present in %s, exiting (no auto-download)",
+                   cfg.model, cache_dir)
+        _post(f"/api/capture/sessions/{args.session_id}/events",
+              {"kind": "note", "payload": "语音模型未就绪,本次未启动转录", "meta": {"asr_error": True}})
+        return 1
 
     import soundfile as sf
 
@@ -137,13 +161,9 @@ def main(argv: list[str] | None = None) -> int:
         SystemAudioSource,
     )
     from epictrace.asr.loop import StreamLoop
-    from epictrace.config import AppConfig
 
-    args = parse_args(argv if argv is not None else sys.argv[1:])
-    cfg = args.config
-    app_config = AppConfig()
-    app_config.asr_model_dir.mkdir(parents=True, exist_ok=True)
-    engine = _build_engine(cfg, str(app_config.asr_model_dir))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    engine = _build_engine(cfg, str(cache_dir))
 
     # SIGTERM(supervisor stop 发出)→ 置停止标志,主循环检测后退出,finally 兜底 flush + 关 wav。
     stop_flag = {"stop": False}

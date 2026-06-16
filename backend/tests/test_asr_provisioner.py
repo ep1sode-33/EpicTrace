@@ -43,6 +43,17 @@ def test_download_then_ready(tmp_path: Path):
     assert prov.state == "ready"
 
 
+def test_model_bin_directory_is_not_ready(tmp_path: Path):
+    """FIX 4:snapshots/<h>/model.bin 是个目录(而非真权重文件)→ 未就绪。
+    旧实现只看 exists()+st_size>0,目录也能蒙混过关。"""
+    snap = (tmp_path / "models--Systran--faster-whisper-large-v3"
+            / "snapshots" / "abc123")
+    snap.mkdir(parents=True)
+    (snap / "model.bin").mkdir()  # model.bin 是目录,不是文件
+    prov = AsrProvisioner(cache_dir=tmp_path)
+    assert prov.is_ready("large-v3") is False
+
+
 def test_distil_model_readiness_resolves_repo_dir(tmp_path: Path):
     """FIX G:distil-large-v3 解析到 HF repo Systran/faster-distil-whisper-large-v3,
     缓存目录 models--Systran--faster-distil-whisper-large-v3 须被 is_ready 命中(含权重)。"""

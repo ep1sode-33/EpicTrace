@@ -140,7 +140,7 @@ class _SourceBase:
 
 
 class MicSource(_SourceBase):
-    """麦克风外录:sounddevice 16kHz mono 输入流 + watchdog(样本不增长判失败重启一次)。
+    """麦克风(采集):sounddevice 16kHz mono 输入流 + watchdog(样本不增长判失败重启一次)。
 
     sounddevice 在源 start() 时懒导入(避免测试套件硬依赖 PortAudio)。真采集手测。
     """
@@ -201,7 +201,7 @@ def _is_permission_denied_line(line: str) -> bool:
 
 
 class SystemAudioSource(_SourceBase):
-    """macOS 系统内录:Popen 原生 helper 二进制,从其 stdout 读裸 PCM(16k mono float32 le)。
+    """macOS 系统声音(采集):Popen 原生 helper 二进制,从其 stdout 读裸 PCM(16k mono float32 le)。
 
     helper 自己用 Core Audio process tap → 重采样到 16k mono(见 shell/native helper,Task 12)。
     读 stdout 的线程在 start() 起;另起一守护线程逐行抽干 stderr(防管道填满阻塞 helper),
