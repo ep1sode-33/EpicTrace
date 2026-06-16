@@ -6,6 +6,7 @@ import secrets
 import threading
 from dataclasses import dataclass
 
+from epictrace.asr.config import AsrConfig
 from epictrace.config import AppConfig
 from epictrace.media.mineru_provisioner import MinerUProvisioner
 
@@ -186,6 +187,40 @@ class SettingsService:
             }
             self._write(data)
         return self.get_extraction_settings()
+
+    def get_asr_settings(self) -> dict:
+        """ASR 可调配置(model/language/vad/阈值…)。无持久化 → AsrConfig 默认。
+
+        持久化的 asr 对象与默认合并(经 AsrConfig.from_dict 只取识别的键、补齐缺省),
+        旧设置缺新字段也不崩。
+        """
+        data = self._read_raw()
+        asr = data.get("asr")
+        if not isinstance(asr, dict):
+            asr = {}
+        return AsrConfig.from_dict(asr).to_dict()
+
+    def set_asr_settings(self, d: dict) -> dict:
+        """校验后把部分键合并进现有 asr 设置并持久化,返回更新后的设置。非法值 → ValueError。
+
+        - 校验 model ∈ AsrConfig._VALID_MODELS。
+        - 部分 dict 合并:仅覆盖给出的键,其余保留现状。
+        - 只改 asr;profiles/extraction 等其余顶层键原样保留(读 raw,不经 _load 归一)。
+        锁内做读-改-写,避免与 profile/extraction 写并发交错丢更新。
+        """
+        d = d or {}
+        if "model" in d and d["model"] not in AsrConfig._VALID_MODELS:
+            raise ValueError(f"invalid model: {d['model']}")
+        with self._lock:
+            data = self._read_raw()
+            current = data.get("asr")
+            if not isinstance(current, dict):
+                current = {}
+            # 现状(补默认)叠加传入部分键 → 再经 from_dict 规范化为完整 dict。
+            merged = {**AsrConfig.from_dict(current).to_dict(), **d}
+            data["asr"] = AsrConfig.from_dict(merged).to_dict()
+            self._write(data)
+        return self.get_asr_settings()
 
     def extraction_status(self) -> dict:
         """高质量提取引擎(MinerU)的 provisioning 状态。"""
