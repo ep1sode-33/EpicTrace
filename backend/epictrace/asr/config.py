@@ -34,6 +34,11 @@ class AsrConfig:
 
     # distil-large-v3 是英语专用模型,会毁掉中文转写 → 不作为用户可选项(STEP 6)。
     _VALID_MODELS = ("large-v3", "medium", "small")
+    # CTranslate2 计算精度白名单(FIX H):未知值会让 WhisperModel 加载崩溃,设置层须挡住。
+    _VALID_COMPUTE_TYPES = ("int8", "int8_float32", "float32")
+    # window_seconds 合理区间(FIX H):<=0 会让切片逻辑除零/退化;过大无意义且拖慢。
+    _WINDOW_SECONDS_MIN = 5.0
+    _WINDOW_SECONDS_MAX = 120.0
 
     @classmethod
     def from_dict(cls, d: dict) -> "AsrConfig":
