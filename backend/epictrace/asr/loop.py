@@ -63,14 +63,21 @@ class StreamLoop:
         """转写某路自游标起的未处理切片一次,平移回绝对时间,喂 StreamState 并 emit。"""
         src = self._sources[ch]
         st = self._states[ch]
-        # 切片起点:游标与缓冲实际起点取大(游标落后于截断点时从缓冲头切)。
-        slice_start_abs = max(st.last_confirmed_end, src.base_offset())
+        tail = src.available_seconds()
+        window = self._cfg.window_seconds
+        # 切片起点(STEP 1 有界滑窗):游标 / tail 回看 window_seconds / 缓冲头 三者取大——
+        # 游标负责正常推进,tail-window 上界把回看夹在 ~window_seconds 内(长 session 不重转
+        # 整段),base_offset 下界保证不越缓冲头。
+        slice_start_abs = max(st.last_confirmed_end, tail - window, src.base_offset())
         pcm = src.window_from(slice_start_abs)
         prefix = st.partial.text if st.partial else ""
         segs = self._engine.transcribe_window(pcm, prefix=prefix, source=ch)
         # 引擎返回 slice-相对时间 → 平移回会话绝对时间后再喂 StreamState。
         segs = [self._shift(s, slice_start_abs) for s in segs]
-        for c in st.ingest(segs):
+        # 软强制确认(STEP 1):游标落后 tail 超过 window_seconds 时,本轮强制确认最早 pending
+        # 段推进游标,避免未确认窗口无限增长(否则切片会被 base/window 夹住但游标原地不动)。
+        force_earliest = (tail - st.last_confirmed_end) > window
+        for c in st.ingest(segs, force_confirm_earliest=force_earliest):
             self._on_confirmed(c)
         if st.partial is not None:
             self._on_partial(st.partial)

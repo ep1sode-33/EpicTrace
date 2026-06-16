@@ -21,6 +21,10 @@ class AsrConfig:
     rms_normalize: bool = True
     halluc_filter_enabled: bool = True
     input_device: int | None = None   # sounddevice 输入设备索引;None = 系统默认输入
+    # 有界滑窗(STEP 1):每轮喂引擎的切片最多回看这么多秒——切片起点夹在
+    # max(游标, tail-window_seconds, 缓冲头)。游标落后 tail 超过 window_seconds 时软强制
+    # 确认最早 pending 段推进游标,避免长 session 把整段未确认音频反复重转(成本爆炸 + 漂移)。
+    window_seconds: float = 28.0
 
     _VALID_MODELS = ("large-v3", "distil-large-v3", "medium", "small")
 

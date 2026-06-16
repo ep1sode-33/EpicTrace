@@ -39,7 +39,8 @@ class StreamState:
                 source=self._source, words=seg.words, confirmed=True))
         self.last_confirmed_end = max(self.last_confirmed_end, seg.end)
 
-    def ingest(self, segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+    def ingest(self, segments: list[TranscriptSegment], *,
+               force_confirm_earliest: bool = False) -> list[TranscriptSegment]:
         out: list[TranscriptSegment] = []
         if not segments:
             return out
@@ -51,12 +52,16 @@ class StreamState:
         else:
             # 只有一段:作 partial;连续 N 轮没新确认后再来一轮 → 强制确认它(弱音防卡死)。
             # 强制确认仍跑过滤门:幻觉/重复只推游标不 emit,真实文本才落库(FIX E)。
-            self.partial = segments[0]
-            self._rounds_no_progress += 1
-            if self._rounds_no_progress > self._force_after:
+            # 软强制(STEP 1):游标落后 tail 超过 window_seconds 时,即便未到 N 轮也立刻强制
+            # 确认它推进游标——否则有界滑窗会让切片头被 tail-window 夹住而游标原地不动,未确认
+            # 窗口无限增长。同样跑过滤门(幻觉/重复只推游标不 emit)。
+            if force_confirm_earliest or self._rounds_no_progress + 1 > self._force_after:
                 self._confirm(segments[0], out)
                 self.partial = None
                 self._rounds_no_progress = 0
+            else:
+                self.partial = segments[0]
+                self._rounds_no_progress += 1
         if out:
             self._rounds_no_progress = 0
         return out

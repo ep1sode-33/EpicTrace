@@ -163,3 +163,58 @@ def test_slice_start_clamped_to_base_offset():
     loop._states["mic"].last_confirmed_end = 5.0  # 早于 base_offset 20
     loop.tick()
     assert src.windowed_from[-1] == 20.0
+
+
+def test_slice_start_bounded_by_window_seconds():
+    """STEP 1:cursor 远落后于 tail(120s 未确认)→ slice 起点被 window_seconds 上界夹住,
+    只喂引擎尾部 ~window_seconds,而非整段 120s。"""
+    eng = _FakeEngine({"mic": []})
+    cfg = AsrConfig.from_dict({"window_seconds": 10.0})
+    loop = StreamLoop(eng, cfg, on_confirmed=lambda s: None, on_partial=lambda s: None)
+    # mic:base 0,available 120,cursor 0 → 未处理 120s;但窗口上界让切片只从 110s 起。
+    src = _FakeSource(base=0.0, available=120.0)
+    loop.set_sources({"mic": src, "device": _FakeSource(base=0.0, available=0.0)})
+    loop.tick()
+    # slice_start_abs = max(cursor=0, available-window=110, base=0) = 110
+    assert src.windowed_from[-1] == 110.0
+
+
+def test_window_seconds_never_exceeds_base_offset_clamp():
+    """STEP 1:窗口上界与 base_offset 下界同时作用时取最大(切片仍不越缓冲头)。"""
+    eng = _FakeEngine({"mic": []})
+    cfg = AsrConfig.from_dict({"window_seconds": 10.0})
+    loop = StreamLoop(eng, cfg, on_confirmed=lambda s: None, on_partial=lambda s: None)
+    # base 5(缓冲头);available 8 → available-window = -2 < base → 取 base 5(不越缓冲头)。
+    src = _FakeSource(base=5.0, available=8.0)
+    loop.set_sources({"mic": src, "device": _FakeSource(base=5.0, available=5.0)})
+    loop.tick()
+    assert src.windowed_from[-1] == 5.0
+
+
+def test_soft_force_confirm_keeps_cursor_within_window_of_tail():
+    """STEP 1:每轮喂的切片永远 ≤ ~window_seconds,且游标永不落后 tail 超过 window_seconds。
+
+    源 available 一路涨到 120s,引擎每轮都只给一段 partial(不自然确认);软强制确认应
+    推进最早 pending 段,使 (available - cursor) 收敛在 window_seconds 内。"""
+    cfg = AsrConfig.from_dict({"window_seconds": 10.0})
+    confirmed = []
+    # 引擎:每轮返回一段覆盖切片头部 ~2s 的 partial(slice-相对 0..2)。
+    eng = _FakeEngine({"mic": [_seg("一句话", 0.0, 2.0, "mic")]})
+    loop = StreamLoop(eng, cfg, on_confirmed=confirmed.append, on_partial=lambda s: None)
+    src = _FakeSource(base=0.0, available=0.0)
+    loop.set_sources({"mic": src, "device": _FakeSource(base=0.0, available=0.0)})
+    max_slice_span = 0.0
+    for step in range(60):
+        src._available = float((step + 1) * 2)  # tail 每轮涨 2s,直到 120s
+        before = loop._states["mic"].last_confirmed_end
+        loop.tick()
+        # 本轮切片跨度 = tail - slice_start_abs(slice_start = 上次记录的 windowed_from)。
+        if src.windowed_from:
+            span = src._available - src.windowed_from[-1]
+            max_slice_span = max(max_slice_span, span)
+        # 游标永不落后 tail 超过 window_seconds(+ 一轮 partial 余量)。
+        lag = src._available - loop._states["mic"].last_confirmed_end
+        assert lag <= cfg.window_seconds + 2.5 + 1e-6, f"step={step} lag={lag}"
+        _ = before
+    # 喂引擎的切片跨度始终 ≤ window_seconds(+ 小余量)。
+    assert max_slice_span <= cfg.window_seconds + 2.0 + 1e-6

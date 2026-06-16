@@ -22,3 +22,11 @@ def test_input_device_defaults_none_and_roundtrips():
     c = AsrConfig.from_dict({"input_device": 2})
     assert c.input_device == 2
     assert c.to_dict()["input_device"] == 2
+
+
+def test_window_seconds_default_and_roundtrips():
+    # STEP 1:有界滑窗默认 28s;from_dict/to_dict 往返保住显式值。
+    assert AsrConfig().window_seconds == 28.0
+    c = AsrConfig.from_dict({"window_seconds": 12.0})
+    assert c.window_seconds == 12.0
+    assert c.to_dict()["window_seconds"] == 12.0

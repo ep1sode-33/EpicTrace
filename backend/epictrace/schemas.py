@@ -181,6 +181,7 @@ class AsrSettingsIn(BaseModel):
     rms_normalize: bool | None = None
     halluc_filter_enabled: bool | None = None
     input_device: int | None = None
+    window_seconds: float | None = None
 
 
 class AsrSettingsOut(BaseModel):
@@ -201,6 +202,7 @@ class AsrSettingsOut(BaseModel):
     rms_normalize: bool
     halluc_filter_enabled: bool
     input_device: int | None = None
+    window_seconds: float
 
 
 class AsrDeviceOut(BaseModel):
