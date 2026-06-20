@@ -120,6 +120,19 @@ def get_provisioner(request: Request):
     return prov
 
 
+def get_asr_provisioner(request: Request):
+    """ASR 模型 provisioner。架构转单遍 mlx 后 = mlx 完整 large-v3 的就绪检测/下载
+    (MlxOneshotProvisioner,落 HF 默认缓存)。优先用注入的 app.state.asr_provisioner(测试假件)。"""
+    prov = getattr(request.app.state, "asr_provisioner", None)
+    if prov is not None:
+        return prov
+    from epictrace.asr.provisioner import MlxOneshotProvisioner
+
+    prov = MlxOneshotProvisioner()
+    request.app.state.asr_provisioner = prov
+    return prov
+
+
 def get_retriever(request: Request):
     """混合检索器:dense + sparse → RRF → rerank。优先用注入的 app.state.retriever;
     否则复用延迟构造的 embedder / store / reranker。"""

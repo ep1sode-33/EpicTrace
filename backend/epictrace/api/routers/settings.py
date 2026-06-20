@@ -4,9 +4,13 @@ import threading
 
 from fastapi import APIRouter, HTTPException, Request
 
-from epictrace.api.deps import get_provisioner
+from epictrace.api.deps import get_asr_provisioner, get_provisioner
 from epictrace.llm.openai_compat import OpenAICompatLLM
 from epictrace.schemas import (
+    AsrDeviceOut,
+    AsrSettingsIn,
+    AsrSettingsOut,
+    AsrStatusOut,
     ExtractionSettingsIn,
     ExtractionSettingsOut,
     ExtractionStatusOut,
@@ -163,3 +167,90 @@ def extraction_download_models(request: Request):
 
     threading.Thread(target=_run, daemon=True).start()
     return _provision_status(prov)
+
+
+# ---- ASR 设置/状态/模型下载(faster-whisper)——镜像 extraction 三件套 ----
+
+
+def _asr_status(prov, model: str) -> AsrStatusOut:
+    """ASR provisioner 当前状态 + 目标模型就绪与否。is_ready(model) 看的是配置里选中的模型。
+
+    **state 以 is_ready 为准**:模型已在缓存就报 "ready",不依赖 provisioner 本进程是否下过
+    (其 state 属性靠 _last_model,app 重启后为 None → 会把已下好的模型误报「未下载」)。
+    仅当未就绪时才用 provisioner 的过渡态(downloading / failed / not_downloaded)。"""
+    ready = prov.is_ready(model)
+    state = "ready" if ready else prov.state
+    return AsrStatusOut(
+        state=state, ready=ready, model=model,
+        error=getattr(prov, "last_error", None),
+    )
+
+
+@router.get("/asr/settings", response_model=AsrSettingsOut)
+def get_asr_settings(request: Request):
+    return _svc(request).get_asr_settings()
+
+
+@router.put("/asr/settings", response_model=AsrSettingsOut)
+def put_asr_settings(payload: AsrSettingsIn, request: Request):
+    # 部分更新:只把显式给出(非 None)的键传给服务层合并,其余保留现状。
+    sent = payload.model_dump(exclude_unset=True)
+    patch = {k: v for k, v in sent.items() if v is not None}
+    # input_device 例外:它的「系统默认」就是 None,用户显式选系统默认须能落库,
+    # 故只要请求显式带了 input_device(即便为 null)就纳入 patch(不被上面的非 None 过滤丢掉)。
+    if "input_device" in sent:
+        patch["input_device"] = sent["input_device"]
+    try:
+        return _svc(request).set_asr_settings(patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/asr/devices", response_model=list[AsrDeviceOut])
+def asr_devices():
+    """枚举可用的输入设备(麦克风),供用户挑选采集输入(Feature A)。
+
+    sounddevice 懒导入(测试/无 PortAudio 环境不应硬依赖它);任何错误(ImportError /
+    PortAudio 未装 / 查询失败)都回空列表而非 500——拿不到设备表不该让设置页崩。
+    只回 max_input_channels>0 的设备(输出设备不能当输入)。
+    """
+    try:
+        import sounddevice as sd
+
+        devices = sd.query_devices()
+    except Exception:  # noqa: BLE001 — 缺 sounddevice/PortAudio 或查询失败都回空表
+        return []
+    out: list[dict] = []
+    for i, d in enumerate(devices):
+        try:
+            if d.get("max_input_channels", 0) > 0:
+                out.append({"index": i, "name": d.get("name", "")})
+        except Exception:  # noqa: BLE001 — 单个设备项异常不拖垮整张表
+            continue
+    return out
+
+
+@router.get("/asr/status", response_model=AsrStatusOut)
+def asr_status(request: Request):
+    model = _svc(request).get_asr_settings()["model"]
+    return _asr_status(get_asr_provisioner(request), model)
+
+
+@router.post("/asr/download-model", response_model=AsrStatusOut)
+def asr_download_model(request: Request):
+    """触发当前配置模型的下载(后台线程,粗粒度状态)。立即返回当前状态;前端轮询 status。
+
+    机制同 extraction_download_models:后台线程吞掉上抛异常(失败状态/last_error 由
+    provisioner 记录);下载中重复触发由 provisioner 内部并发守卫 no-op。模型取持久化
+    ASR 设置(无 → AsrConfig 默认 large-v3)。"""
+    prov = get_asr_provisioner(request)
+    model = _svc(request).get_asr_settings()["model"]
+
+    def _run():
+        try:
+            prov.download_model(model)
+        except Exception:  # noqa: BLE001 — 失败状态/last_error 已由 provisioner 记录
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return _asr_status(prov, model)

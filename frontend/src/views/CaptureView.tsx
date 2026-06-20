@@ -8,20 +8,25 @@ import {
   Play,
   Square,
   StickyNote,
+  TriangleAlert,
   Volume2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, type CaptureSessionDetail } from "@/lib/api";
+import { groupTimelineItems } from "@/lib/transcript";
 import { native } from "@/lib/native";
 
-/** 来源选项;笔记/剪贴板/截图 可勾;外录/内录 disabled 待后续 Plan */
+/** 来源选项;笔记/剪贴板/截图 + 麦克风/系统声音采集 均可勾选 */
 const SOURCE_OPTIONS = [
-  { id: "note", icon: StickyNote, label: "笔记", disabled: false, coming: false },
-  { id: "clipboard", icon: Clipboard, label: "剪贴板", disabled: false, coming: false },
-  { id: "screenshot", icon: Camera, label: "截图", disabled: false, coming: false },
-  { id: "mic", icon: Mic, label: "🎤 外录", disabled: true, coming: true },
-  { id: "system_audio", icon: Volume2, label: "🔊 内录", disabled: true, coming: true },
+  { id: "note", icon: StickyNote, label: "笔记" },
+  { id: "clipboard", icon: Clipboard, label: "剪贴板" },
+  { id: "screenshot", icon: Camera, label: "截图" },
+  { id: "mic", icon: Mic, label: "麦克风" },
+  { id: "system_audio", icon: Volume2, label: "系统声音采集" },
 ];
+
+/** 已知来源 ID 集合;用于校验本地存储恢复的来源(过滤未知/损坏值)。 */
+const KNOWN_SOURCE_IDS = ["mic", "system_audio", "note", "clipboard", "screenshot"];
 
 /** 将秒数格式化为 MM:SS */
 function formatTime(secs: number): string {
@@ -30,10 +35,48 @@ function formatTime(secs: number): string {
   return `${m}:${s}`;
 }
 
+/** transcription 事件来源:meta.source 为 "device"(系统声音采集)否则视作麦克风。 */
+function sourceLabel(meta: Record<string, unknown>): string {
+  return meta?.source === "device" ? "系统声音采集" : "麦克风";
+}
+
+/** 事件类型的圆点颜色(不用 emoji)。 */
+function eventDotColor(kind: string): string {
+  switch (kind) {
+    case "note":
+      return "bg-sky-500";
+    case "clipboard":
+      return "bg-zinc-400";
+    case "screenshot":
+      return "bg-violet-500";
+    case "transcription":
+      return "bg-teal-500";
+    default:
+      return "bg-muted-foreground";
+  }
+}
+
 export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => void } = {}) {
-  const [selectedSources, setSelectedSources] = useState<Set<string>>(
-    new Set(["note", "clipboard", "screenshot"]),
-  );
+  const [selectedSources, setSelectedSources] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem("epictrace.capture.sources");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // 校验形状:必须是数组,且只保留已知 ID。否则像 "mic" 这种字符串会被
+        // 拆成逐字符 ID(m/i/c)污染 Set(FIX 5)。
+        if (Array.isArray(parsed)) {
+          return new Set<string>(
+            parsed.filter((id): id is string => KNOWN_SOURCE_IDS.includes(id)),
+          );
+        }
+      }
+    } catch {
+      /* 忽略损坏的本地存储 */
+    }
+    return new Set<string>(); // 首次默认全不勾选,不替用户做主
+  });
+  // 语音模型是否就绪(null=未知/加载中);决定能否开音频源转录。
+  const [asrReady, setAsrReady] = useState<boolean | null>(null);
   const [session, setSession] = useState<CaptureSessionDetail | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [paused, setPaused] = useState(false);
@@ -46,6 +89,23 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const elapsedRef = useRef(0); // 同步 ref 供 timer 使用
+
+  // 记住上次选的采集源(下次进来恢复)。
+  useEffect(() => {
+    try {
+      localStorage.setItem("epictrace.capture.sources", JSON.stringify([...selectedSources]));
+    } catch {
+      /* 忽略 */
+    }
+  }, [selectedSources]);
+
+  // 拉一次语音模型就绪状态(决定音频源能否开)。
+  useEffect(() => {
+    api
+      .getAsrStatus()
+      .then((s) => setAsrReady(s.ready))
+      .catch(() => setAsrReady(null));
+  }, []);
 
   // 检查启动时是否已有活动 session(页面刷新/重新进入时恢复状态)
   useEffect(() => {
@@ -133,10 +193,30 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
   }
 
   async function handleStart() {
+    const sources = Array.from(selectedSources);
+    const audioSelected = sources.includes("mic") || sources.includes("system_audio");
+    if (audioSelected) {
+      // 模型没下却开音频源 → 会静默漏录转写(用户以为在转,其实没转)。硬挡。
+      // 失败必须 fail CLOSED:拉不到就绪态时绝不用可能陈旧的缓存 asrReady 放行(FIX 3),
+      // 否则陈旧的 true 会放过未就绪的模型 → 又回到静默漏录。
+      let ready: boolean;
+      try {
+        ready = (await api.getAsrStatus()).ready;
+        setAsrReady(ready);
+      } catch {
+        setError("无法确认语音模型状态,请重试");
+        return;
+      }
+      if (!ready) {
+        setError(
+          "语音模型未下载,麦克风/系统声音不会被转录(会漏录重要内容)。请先到「设置 → ASR」下载模型,或取消勾选音频源。",
+        );
+        return;
+      }
+    }
     setStarting(true);
     setError(null);
     try {
-      const sources = Array.from(selectedSources);
       const sess = await api.startSession(sources);
       // 拉取 detail（含 events 和 elapsed_seconds）
       const detail = await api.getSession(sess.id);
@@ -240,21 +320,21 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
 
           {/* 来源开关 */}
           <ul className="mt-8 w-full divide-y divide-border/60 overflow-hidden rounded-xl border border-border/70 bg-card text-left">
-            {SOURCE_OPTIONS.map(({ id, icon: Icon, label, disabled, coming }) => (
+            {SOURCE_OPTIONS.map(({ id, icon: Icon, label }) => (
               <li
                 key={id}
-                className={`flex items-center gap-3 px-4 py-2.5 ${disabled ? "opacity-50" : "cursor-pointer hover:bg-muted/40 transition-colors"}`}
-                onClick={() => !disabled && toggleSource(id)}
+                className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-muted/40 transition-colors"
+                onClick={() => toggleSource(id)}
               >
                 <span
                   className={`flex size-4 shrink-0 items-center justify-center rounded border transition-colors ${
-                    !disabled && selectedSources.has(id)
+                    selectedSources.has(id)
                       ? "border-primary bg-primary"
                       : "border-muted-foreground/40 bg-transparent"
                   }`}
                   aria-hidden
                 >
-                  {!disabled && selectedSources.has(id) && (
+                  {selectedSources.has(id) && (
                     <svg
                       viewBox="0 0 12 12"
                       className="size-2.5 text-primary-foreground"
@@ -272,14 +352,22 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
                   strokeWidth={1.75}
                 />
                 <span className="flex-1 text-sm font-medium text-foreground">{label}</span>
-                {coming && (
+                {(id === "mic" || id === "system_audio") && asrReady === false && (
                   <span className="rounded-full border border-amber-600/25 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-300">
-                    即将到来
+                    需下载模型
                   </span>
                 )}
               </li>
             ))}
           </ul>
+
+          {asrReady === false &&
+            (selectedSources.has("mic") || selectedSources.has("system_audio")) && (
+              <p className="mt-3 inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                语音模型未下载,音频源不会转录 —— 请先到「设置 → ASR」下载。
+              </p>
+            )}
 
           <Button
             className="mt-8 gap-1.5"
@@ -296,8 +384,10 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
 
   // —— 有活动 session —— 显示计时 + live feed + 控件
   const textEvents = session.events.filter((e) =>
-    ["note", "clipboard", "screenshot"].includes(e.kind),
+    ["note", "clipboard", "screenshot", "transcription"].includes(e.kind),
   );
+  // 连续同源转写合并成段落(FIX 2);newest-first 展示。
+  const feedItems = [...groupTimelineItems(textEvents)].reverse();
 
   return (
     <div className="flex min-h-[calc(100vh-3.5rem)] flex-col px-6 py-8">
@@ -389,30 +479,67 @@ export function CaptureView({ onSessionStopped }: { onSessionStopped?: () => voi
           </Button>
         </div>
 
+        {/* 音频采集状态:单遍架构下录制中不出字幕,停录后才一次性转写。提示用户这是正常的,
+            避免「录着没字幕」被误当成坏了。 */}
+        {(session.sources.includes("mic") || session.sources.includes("system_audio")) && (
+          <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-teal-500" aria-hidden />
+            音频采集中 —— 停止录制后自动转写(录制时不出字幕,属正常)。
+          </div>
+        )}
+
         {/* Live feed */}
         <div className="space-y-1">
           <p className="text-xs font-medium text-muted-foreground">
-            采集 feed（{textEvents.length} 条）
+            采集 feed（{feedItems.length} 条）
           </p>
-          {textEvents.length === 0 ? (
+          {feedItems.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border/60 px-5 py-8 text-center text-sm text-muted-foreground">
               暂无采集内容
             </div>
           ) : (
             <ul className="divide-y divide-border/50 overflow-hidden rounded-xl border border-border/70 bg-card">
-              {[...textEvents].reverse().map((ev) => (
-                <li key={ev.id} className="flex items-start gap-3 px-4 py-3">
-                  <span className="mt-0.5 text-base leading-none">
-                    {ev.kind === "note" ? "✏️" : ev.kind === "clipboard" ? "📋" : ev.kind === "screenshot" ? "📷" : "•"}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm text-foreground">{ev.payload || "(无内容)"}</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      {new Date(ev.ts).toLocaleTimeString()}
-                    </p>
-                  </div>
-                </li>
-              ))}
+              {feedItems.map((item) => {
+                if (item.kind === "transcription") {
+                  return (
+                    <li key={`tr-${item.ids[0]}`} className="flex items-start gap-3 px-4 py-3">
+                      <span
+                        className={`mt-1.5 size-2 shrink-0 rounded-full ${eventDotColor("transcription")}`}
+                        aria-hidden
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start gap-1.5">
+                          {/* 整段转写换行展示(不逐句截断);来源标签只显示一次。 */}
+                          <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm text-foreground">
+                            {item.text || "(无内容)"}
+                          </p>
+                          <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                            {sourceLabel({ source: item.source })}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {new Date(item.start_ts).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                }
+                const ev = item.event;
+                return (
+                  <li key={ev.id} className="flex items-start gap-3 px-4 py-3">
+                    <span
+                      className={`mt-1.5 size-2 shrink-0 rounded-full ${eventDotColor(ev.kind)}`}
+                      aria-hidden
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm text-foreground">{ev.payload || "(无内容)"}</p>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {new Date(ev.ts).toLocaleTimeString()}
+                      </p>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

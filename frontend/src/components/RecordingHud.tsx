@@ -4,13 +4,16 @@ import {
   ChevronUp,
   Crop,
   Mic,
+  MicOff,
   Pause,
   Pencil,
   Play,
   Square,
   Volume2,
+  VolumeX,
 } from "lucide-react";
-import { api, type CaptureEvent } from "@/lib/api";
+import { api, type CaptureEvent, type CapturePartial } from "@/lib/api";
+import { groupTimelineItems, type TimelineItem } from "@/lib/transcript";
 import { native } from "@/lib/native";
 
 // HUD 窗口尺寸(配合 shell 的 resize_recording_hud)。
@@ -37,13 +40,24 @@ function dotColor(kind: string): string {
       return "bg-zinc-400";
     case "screenshot":
       return "bg-violet-500";
+    case "transcription":
+      return "bg-teal-500";
     case "pause":
       return "bg-amber-500";
     case "resume":
       return "bg-emerald-500";
+    case "source":
+      return "bg-orange-500";
     default:
       return "bg-muted-foreground";
   }
+}
+
+/** 音源开/停事件的标签:meta.source(mic/system_audio)+ meta.action(start/stop)。 */
+function sourceEventLabel(meta?: Record<string, unknown>): { text: string; stop: boolean } {
+  const src = meta?.source === "system_audio" ? "系统声音" : "麦克风";
+  const stop = meta?.action === "stop";
+  return { text: `${src} ${stop ? "停止采集" : "开始采集"}`, stop };
 }
 
 /** 紧凑图标按钮(HUD 专用) */
@@ -77,6 +91,42 @@ function IconBtn({
   );
 }
 
+/**
+ * 音频源开关(HUD 专用)。两态,均可随时点击(中途也能开开始没勾的源):
+ * - 开启:点亮(teal)+ 实心图标 = 正在采集;点击关闭(停采集,mic 灯灭)。
+ * - 关闭:灰 + 斜杠图标(MicOff/VolumeX);点击开启(开始采集)。
+ */
+function AudioToggle({
+  on,
+  onIcon,
+  offIcon,
+  labelOn,
+  labelOff,
+  onClick,
+}: {
+  on: boolean;
+  onIcon: ReactNode;
+  offIcon: ReactNode;
+  labelOn: string;
+  labelOff: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={on ? labelOn : labelOff}
+      className={`flex size-7 shrink-0 items-center justify-center rounded-md transition-colors ${
+        on
+          ? "text-teal-500 hover:bg-teal-500/10"
+          : "text-muted-foreground/60 hover:bg-muted hover:text-foreground"
+      }`}
+    >
+      {on ? onIcon : offIcon}
+    </button>
+  );
+}
+
 export function RecordingHud({ sessionId }: { sessionId: number }) {
   const [elapsed, setElapsed] = useState(0);
   const [paused, setPaused] = useState(false);
@@ -87,6 +137,11 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
   const [sources, setSources] = useState<string[]>([]);
   const [stagingDir, setStagingDir] = useState("");
   const [events, setEvents] = useState<CaptureEvent[]>([]);
+  // 实时暂定段(ASR partial):与 events 分开存,不混进持久事件列表;末尾淡显「暂定」行。
+  const [partials, setPartials] = useState<CapturePartial>({});
+  // 期望开启的音频源 id 集:服务端权威态,挂载 + 每次轮询时刷新;点击乐观切换。
+  // 开关随时可点——开启会(必要时懒启动 worker 并)开始采集,中途也能开开始没勾的源。
+  const [enabled, setEnabled] = useState<string[]>([]);
 
   const elapsedRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -109,6 +164,11 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
         startTimer();
         startPolling();
       })
+      .catch(() => {});
+    // 挂载即拉一次期望开启集(失败/无 ASR 时静默,留空 = 全未开启)。
+    api
+      .getAsrSources(sessionId)
+      .then((m) => setEnabled(m.enabled))
       .catch(() => {});
     return () => {
       stopTimer();
@@ -151,6 +211,16 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
             void native.hideHud();
           }
         })
+        .catch(() => {});
+      // 与会话事件同频拉一份 partial 快照(内存态;失败/无 ASR 时静默,partial 留空)。
+      api
+        .getSessionPartial(sessionId)
+        .then((p) => setPartials(p))
+        .catch(() => {});
+      // 同频刷新期望开启集(服务端权威态;反映 worker 自退/别处改动)。
+      api
+        .getAsrSources(sessionId)
+        .then((m) => setEnabled(m.enabled))
         .catch(() => {});
     }, 1500);
   }
@@ -204,10 +274,16 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
   }
 
   async function handleStop() {
+    stopTimer();
+    stopPolling();
+    // 已暂停时 monitors 早已停(handlePauseResume),再 stopMonitors 会抛 → 必须与 stopSession 分开
+    // try,否则异常吞掉后 stopSession 永不执行,「暂停中点结束」就没反应(必须先继续再结束的 bug)。
     try {
-      stopTimer();
-      stopPolling();
       await native.stopMonitors();
+    } catch {
+      /* 已停 / 无 monitors → 忽略 */
+    }
+    try {
       await api.stopSession(sessionId);
       setStopped(true);
       await native.hideHud();
@@ -236,6 +312,19 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
     }
   }
 
+  // 启停某路音频源(乐观更新 + 失败回滚)。开关随时可点——中途也能开开始没勾的源。
+  // 启用时模型未就绪后端会 409 → 回滚(开关弹回关闭态作为反馈)。
+  async function toggleSource(source: string) {
+    const willEnable = !enabled.includes(source);
+    const prev = enabled;
+    setEnabled(willEnable ? [...enabled, source] : enabled.filter((s) => s !== source));
+    try {
+      await api.setAsrSource(sessionId, source, willEnable);
+    } catch {
+      setEnabled(prev); // 回滚
+    }
+  }
+
   if (stopped) {
     return (
       <div className="flex h-screen items-center justify-center bg-background text-[11px] text-muted-foreground">
@@ -244,16 +333,47 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
     );
   }
 
-  const timeline = events.filter((e) =>
-    ["note", "clipboard", "screenshot", "pause", "resume"].includes(e.kind),
+  // 连续同源转写合并成段落(FIX 2):时间线不再逐句一行,整段一个气泡 + 一个时间戳。
+  const timeline = groupTimelineItems(
+    events.filter((e) =>
+      ["note", "clipboard", "screenshot", "transcription", "pause", "resume", "source"].includes(e.kind),
+    ),
   );
+  // partial 行(每源一条暂定文本);空文本不显示。
+  const partialEntries = Object.entries(partials).filter(([, text]) => text.trim());
 
-  function renderContent(ev: CaptureEvent): ReactNode {
+  // 合并条目的圆点 kind(transcription 段 → transcription;透传 → 原事件 kind)。
+  function itemKind(item: TimelineItem): string {
+    return item.kind === "transcription" ? "transcription" : item.event.kind;
+  }
+  // 合并条目代表时间(段落取首句时间;透传取事件时间)。
+  function itemTs(item: TimelineItem): string {
+    return item.kind === "transcription" ? item.start_ts : item.event.ts;
+  }
+
+  function renderItem(item: TimelineItem): ReactNode {
+    if (item.kind === "transcription")
+      return (
+        <span className="text-foreground">
+          <span className="mr-1 rounded bg-teal-500/15 px-1 py-px text-[9px] font-medium text-teal-700 dark:text-teal-300">
+            {item.source === "device" ? "系统声音采集" : "麦克风"}
+          </span>
+          {item.text || "(无内容)"}
+        </span>
+      );
+    const ev = item.event;
     if (ev.kind === "screenshot") return <span className="text-foreground">截图</span>;
     if (ev.kind === "pause")
       return <span className="text-amber-600 dark:text-amber-400">暂停</span>;
     if (ev.kind === "resume")
       return <span className="text-emerald-600 dark:text-emerald-400">继续</span>;
+    if (ev.kind === "source") {
+      const { text, stop } = sourceEventLabel(ev.meta);
+      return <span className={stop ? "text-rose-600 dark:text-rose-400" : "text-emerald-600 dark:text-emerald-400"}>{text}</span>;
+    }
+    // 剪贴板可能很长 → 单行截断(title 存全文),避免霸占实时时间线。
+    if (ev.kind === "clipboard")
+      return <span className="text-foreground line-clamp-1 break-all" title={ev.payload}>{ev.payload || "(空)"}</span>;
     return <span className="text-foreground">{ev.payload || "(无内容)"}</span>;
   }
 
@@ -296,12 +416,24 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       >
         <Crop className="size-3.5" />
       </IconBtn>
-      <IconBtn disabled title="外录 · 即将到来">
-        <Mic className="size-3.5" />
-      </IconBtn>
-      <IconBtn disabled title="内录 · 即将到来">
-        <Volume2 className="size-3.5" />
-      </IconBtn>
+      {/* 麦克风/系统声音:随时可点的启停开关。点亮(teal)= 正在采集;灰+斜杠 = 已关闭。
+          中途也能开开始没勾的源(必要时后端懒启动 worker);全关一段时间 worker 自退省内存。 */}
+      <AudioToggle
+        on={enabled.includes("mic")}
+        onIcon={<Mic className="size-3.5" />}
+        offIcon={<MicOff className="size-3.5" />}
+        labelOn="麦克风采集中(点击关闭)"
+        labelOff="麦克风已关闭(点击开启)"
+        onClick={() => void toggleSource("mic")}
+      />
+      <AudioToggle
+        on={enabled.includes("system_audio")}
+        onIcon={<Volume2 className="size-3.5" />}
+        offIcon={<VolumeX className="size-3.5" />}
+        labelOn="系统声音采集中(点击关闭)"
+        labelOff="系统声音已关闭(点击开启)"
+        onClick={() => void toggleSource("system_audio")}
+      />
       <IconBtn onClick={handlePauseResume} title={paused ? "继续" : "暂停"}>
         {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
       </IconBtn>
@@ -328,27 +460,49 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       {expanded && (
         <>
           <div className="min-h-0 flex-1 overflow-y-auto border-t border-border/60 px-3 py-2">
-            {timeline.length === 0 ? (
+            {timeline.length === 0 && partialEntries.length === 0 ? (
               <p className="py-8 text-center text-xs text-muted-foreground">暂无采集内容</p>
             ) : (
               <div className="relative pl-1">
                 <div className="absolute bottom-1 left-[5px] top-1 w-px bg-border" aria-hidden />
                 <ul className="space-y-2.5">
-                  {timeline.map((ev) => (
-                    <li key={ev.id} className="relative flex gap-2 pl-4">
+                  {timeline.map((item) => {
+                    const key =
+                      item.kind === "transcription" ? `tr-${item.ids[0]}` : `ev-${item.event.id}`;
+                    return (
+                      <li key={key} className="relative flex gap-2 pl-4">
+                        <span
+                          className={`absolute left-[1px] top-1 size-2 rounded-full ring-2 ring-background ${dotColor(itemKind(item))}`}
+                          aria-hidden
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="break-words text-xs leading-snug">{renderItem(item)}</div>
+                          <div className="mt-0.5 text-[10px] tabular-nums text-muted-foreground">
+                            {new Date(itemTs(item)).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                              second: "2-digit",
+                            })}
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                  {/* 实时暂定段(partial):淡显、空心点,不落库——只是当前正在转写的尾段。 */}
+                  {partialEntries.map(([source, text]) => (
+                    <li key={`partial-${source}`} className="relative flex gap-2 pl-4">
                       <span
-                        className={`absolute left-[1px] top-1 size-2 rounded-full ring-2 ring-background ${dotColor(ev.kind)}`}
+                        className="absolute left-[1px] top-1 size-2 animate-pulse rounded-full border border-teal-500/60 ring-2 ring-background"
                         aria-hidden
                       />
                       <div className="min-w-0 flex-1">
-                        <div className="break-words text-xs leading-snug">{renderContent(ev)}</div>
-                        <div className="mt-0.5 text-[10px] tabular-nums text-muted-foreground">
-                          {new Date(ev.ts).toLocaleTimeString([], {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                            second: "2-digit",
-                          })}
+                        <div className="break-words text-xs leading-snug text-muted-foreground/80">
+                          <span className="mr-1 rounded bg-teal-500/10 px-1 py-px text-[9px] font-medium text-teal-700/80 dark:text-teal-300/80">
+                            {source === "device" ? "系统声音采集" : "麦克风"}
+                          </span>
+                          {text}
                         </div>
+                        <div className="mt-0.5 text-[10px] text-muted-foreground/70">暂定</div>
                       </div>
                     </li>
                   ))}

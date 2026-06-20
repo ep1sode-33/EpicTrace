@@ -12,7 +12,16 @@ import {
   X,
 } from "lucide-react";
 
-import { api, type ExtractionSettings, type ExtractionStatus, type LLMProfile, type Settings } from "@/lib/api";
+import {
+  api,
+  type AsrDevice,
+  type AsrSettings,
+  type AsrStatus,
+  type ExtractionSettings,
+  type ExtractionStatus,
+  type LLMProfile,
+  type Settings,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -251,8 +260,173 @@ export function SettingsView({
         </section>
 
         <ExtractionSection />
+        <AsrSection />
       </div>
     </div>
+  );
+}
+
+const ASR_STATE_LABEL: Record<AsrStatus["state"], string> = {
+  not_downloaded: "未下载",
+  downloading: "下载中",
+  ready: "就绪",
+  failed: "失败",
+};
+
+
+/**
+ * ASR(语音转写)设置区:语音模型(固定完整 large-v3)+ 下载/进度/状态 + 输入设备。面向普通用户,
+ * 不暴露 VAD/阈值旋钮(走后端默认 + 离线评测脚本调参,见 scripts/asr_eval.py)。
+ */
+function AsrSection() {
+  const [settings, setSettings] = useState<AsrSettings | null>(null);
+  const [status, setStatus] = useState<AsrStatus | null>(null);
+  const [devices, setDevices] = useState<AsrDevice[]>([]); // 可选输入设备(麦克风)
+  const [busy, setBusy] = useState(false); // 下载进行中
+  const [saving, setSaving] = useState(false); // 任一字段持久化中
+  const [err, setErr] = useState<string | null>(null);
+
+  // 进入页面:并行拉设置 + 状态 + 输入设备列表(设备列表失败/为空不致命)。
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([api.getAsrSettings(), api.getAsrStatus()])
+      .then(([cfg, s]) => {
+        if (cancelled) return;
+        setSettings(cfg);
+        setStatus(s);
+      })
+      .catch((e) => !cancelled && setErr(String(e)));
+    api
+      .getAsrDevices()
+      .then((d) => !cancelled && setDevices(d))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 下载中:轮询 status 直到 ready/failed 静止态。
+  const transient = busy || status?.state === "downloading";
+  useEffect(() => {
+    if (!transient) return;
+    const t = setInterval(() => {
+      api
+        .getAsrStatus()
+        .then((s) => {
+          setStatus(s);
+          if (s.state === "ready" || s.state === "failed") {
+            setBusy(false);
+            clearInterval(t);
+          }
+        })
+        .catch(() => {});
+    }, 2000);
+    return () => clearInterval(t);
+  }, [transient]);
+
+  const download = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      setStatus(await api.downloadAsrModel());
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  };
+
+  // 任一字段改动即持久化(乐观更新 + 失败回滚)。改模型后顺带刷新 status(就绪针对的是选中模型)。
+  const update = async (patch: Partial<AsrSettings>) => {
+    if (!settings) return;
+    const prev = settings;
+    setSettings({ ...settings, ...patch });
+    setSaving(true);
+    setErr(null);
+    try {
+      const next = await api.putAsrSettings(patch);
+      setSettings(next);
+      if ("model" in patch) {
+        api.getAsrStatus().then(setStatus).catch(() => {});
+      }
+    } catch (e) {
+      setSettings(prev); // 回滚
+      setErr(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const ready = status?.ready === true;
+  const downloading = busy || status?.state === "downloading";
+  const failed = status?.state === "failed";
+
+  return (
+    <section className="mt-10 flex flex-col gap-3 border-t border-border/60 pt-8">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-sm font-semibold text-foreground">语音转写(ASR)</h2>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          录制时只采集音频;停止录制后用本地 mlx large-v3 一次性转写(带标点 + 可回溯时间戳)。
+        </p>
+      </div>
+
+      {/* 模型固定为完整 large-v3(单遍架构:停录后一次性转写);不再提供大小选择。 */}
+      <Field id="asr-model" label="语音模型">
+        <span className="text-sm text-muted-foreground">large-v3(完整,本地 GPU)</span>
+      </Field>
+
+      {/* 输入设备(麦克风):默认麦克风过弱/选错时,让用户改采集输入(Feature A)。
+          值为空串 → 系统默认(input_device=null);否则为 sounddevice 设备索引。 */}
+      {settings && (
+        <Field id="asr-input-device" label="输入设备(麦克风)">
+          <select
+            id="asr-input-device"
+            value={settings.input_device === null ? "" : String(settings.input_device)}
+            disabled={saving || downloading}
+            onChange={(e) =>
+              update({ input_device: e.target.value === "" ? null : Number(e.target.value) })
+            }
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+          >
+            <option value="">系统默认</option>
+            {devices.map((d) => (
+              <option key={d.index} value={String(d.index)}>
+                {d.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+
+      {/* 状态徽标 + 下载/重下按钮(模型首次用到需下载,约数百 MB~GB)。 */}
+      <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5">
+        <span className="flex items-center gap-2 text-sm text-foreground">
+          {downloading && <Loader2 className="size-3.5 animate-spin" />}
+          {ready && !downloading && <CheckCircle2 className="size-3.5 text-primary" strokeWidth={2.25} />}
+          {failed && <TriangleAlert className="size-3.5 text-destructive" />}
+          状态:{status ? ASR_STATE_LABEL[status.state] : "…"}
+        </span>
+        <div className="ml-auto flex gap-2">
+          {ready ? (
+            <Button type="button" variant="outline" size="sm" disabled={downloading}
+                    onClick={download} title="重新下载 mlx large-v3 权重">
+              重新下载
+            </Button>
+          ) : (
+            <Button type="button" size="sm" disabled={downloading} onClick={download}
+                    title="下载 mlx large-v3 权重(首次较久)">
+              {downloading ? (<><Loader2 className="size-3.5 animate-spin" />下载中…</>)
+                : failed ? "重试下载" : "下载模型"}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {(err || status?.error) && (
+        <p className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
+          {err || status?.error}
+        </p>
+      )}
+    </section>
   );
 }
 

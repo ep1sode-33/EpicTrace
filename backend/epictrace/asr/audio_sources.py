@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+import logging
+import subprocess
+import threading
+import time
+
+import numpy as np
+
+_log = logging.getLogger("epictrace")
+
+SAMPLE_RATE = 16000  # Whisper 的输入采样率(一次性转写前把录音降采样到它)
+RECORD_SAMPLE_RATE = 48000  # 录音(mic/内录)采样率:48kHz 全频宽,修掉 16k 的 AM 电台音质
+_CHANNELS = 1
+_PCM_DTYPE = np.float32
+
+# 弱音 RMS 归一化默认目标 / 增益上限(可由 AsrConfig 覆盖)。
+_DEFAULT_TARGET_DBFS = -20.0
+_DEFAULT_MAX_GAIN_DB = 30.0
+_SILENCE_RMS = 1e-4  # 近零能量阈:低于此不放大(否则把底噪轰起来)
+
+
+def rms_normalize(pcm: np.ndarray, *, target_dbfs: float = _DEFAULT_TARGET_DBFS,
+                  max_gain: float = _DEFAULT_MAX_GAIN_DB) -> np.ndarray:
+    """把弱音抬到目标 dBFS(增益上限钳住,近静音不动)。喂模型前的弱音处理(spec §4)。
+
+    纯函数(便于单测):RMS 低于近零阈值视为静音原样返回;否则按 target/当前 RMS 算增益,
+    钳到 [0, max_gain] dB,放大后再 clip 到 [-1, 1] 防削顶溢出。
+    """
+    if pcm.size == 0:
+        return pcm
+    rms = float(np.sqrt(np.mean(np.square(pcm, dtype=np.float64))))
+    if rms < _SILENCE_RMS:
+        return pcm
+    target_rms = 10.0 ** (target_dbfs / 20.0)
+    max_gain_lin = 10.0 ** (max_gain / 20.0)
+    # 把当前 RMS 抬到目标所需增益,钳到增益上限(防把底噪轰起来)。
+    gain = min(target_rms / rms, max_gain_lin)
+    out = pcm * gain
+    # 放大后 clip 到 [-1, 1] 防削顶溢出(归一化目标低于 0dBFS,正常不触顶)。
+    return np.clip(out, -1.0, 1.0).astype(_PCM_DTYPE)
+
+
+class RingBuffer:
+    """线程安全的滚动 PCM 累积:采集回调 push,转写循环按绝对时间切窗口。
+
+    流式做法是**手动切片 + VAD-on + 偏移平移**(见 engine.py 对 §4 WhisperKit 经验的分歧说明:
+    faster-whisper 可安全切片,且只有 clip_timestamps=="0" 才跑 VAD)。为防无限增长,超
+    max_seconds 丢弃最旧的尾巴;每次丢弃把丢掉的样本数累加进 base_offset,使「会话绝对时间」
+    始终可由 `base_offset + 缓冲内下标/sr` 还原(长 session 截断后绝对时间不漂)。
+
+    - base_offset():已被丢弃(不在缓冲内)的最早样本对应的绝对秒数。
+    - available_seconds():缓冲覆盖到的绝对末端 = base_offset + len(buffer)/sr。
+    - window_from(abs_start):返回从绝对 abs_start 起到末端的切片(abs_start 早于 base_offset
+      则从缓冲头开始;晚于末端则空)。
+    """
+
+    def __init__(self, *, sample_rate: int = SAMPLE_RATE, max_seconds: float = 600.0) -> None:
+        self._sr = sample_rate
+        self._max_samples = int(max_seconds * sample_rate)
+        self._buf = np.empty(0, dtype=_PCM_DTYPE)
+        self._dropped = 0  # 累计已丢弃(滚出窗口)的样本数 → base_offset 的样本计
+        self._lock = threading.Lock()
+
+    def push(self, frames: np.ndarray) -> None:
+        with self._lock:
+            self._buf = np.concatenate([self._buf, frames.astype(_PCM_DTYPE, copy=False)])
+            if self._buf.size > self._max_samples:
+                drop = self._buf.size - self._max_samples
+                self._buf = self._buf[drop:]
+                self._dropped += drop
+
+    def read(self) -> np.ndarray:
+        with self._lock:
+            return self._buf.copy()
+
+    def base_offset(self) -> float:
+        """缓冲内第一个样本对应的会话绝对秒数(= 已丢弃样本数 / sr)。"""
+        with self._lock:
+            return self._dropped / float(self._sr)
+
+    def available_seconds(self) -> float:
+        """缓冲覆盖到的会话绝对末端秒数(base_offset + 缓冲时长)。"""
+        with self._lock:
+            return (self._dropped + self._buf.size) / float(self._sr)
+
+    def window_from(self, abs_start: float) -> np.ndarray:
+        """切出从绝对 abs_start 起到缓冲末端的 PCM(供单窗口转写)。
+
+        abs_start 早于 base_offset(那段已滚出窗口)→ 从缓冲头开始;
+        abs_start 晚于末端 → 空数组。
+        """
+        with self._lock:
+            idx = int(round(abs_start * self._sr)) - self._dropped
+            if idx < 0:
+                idx = 0
+            if idx >= self._buf.size:
+                return np.empty(0, dtype=_PCM_DTYPE)
+            return self._buf[idx:].copy()
+
+    def pending_seconds(self) -> float:
+        with self._lock:
+            return self._buf.size / float(self._sr)
+
+    def sample_count(self) -> int:
+        with self._lock:
+            return int(self._buf.size)
+
+
+class _SourceBase:
+    """音源公共接口:start/stop + read()(全量 mono float32,采样率见 sample_rate)+ pending_seconds()。
+    子类在 push 前做 RMS 归一化(可关;录音应关,见 worker)。真采集 = 真机手测。
+
+    sample_rate:本源的采样率。决策(2026-06-20):录音用 **48kHz**(全频宽,修掉 16k 那种 AM 电台音质);
+    停录后的一次性转写再把 wav 降采样到 16k 喂 Whisper(见 retranscribe)。"""
+
+    def __init__(self, *, rms_normalize_enabled: bool = True,
+                 sample_rate: int = SAMPLE_RATE) -> None:
+        self.sample_rate = sample_rate
+        self._rb = RingBuffer(sample_rate=sample_rate)
+        self._rms = rms_normalize_enabled
+        self._stop = threading.Event()
+        # 最近 emit 帧的 RAW(归一化前)RMS:供诊断暴露弱麦——读 ring buffer 拿的是归一化后
+        # (恒 ~0.1)的电平,看不出输入是否弱;这里在归一化前记原始电平(FIX 1)。
+        # 单写(采集回调)单读(诊断)的标量,GIL 下原子赋值即足够。
+        self._last_input_rms = 0.0
+
+    def _emit(self, frames: np.ndarray) -> None:
+        # 先算 RAW(归一化前)RMS 供诊断,再做弱音归一化喂模型。
+        if frames.size:
+            self._last_input_rms = float(
+                np.sqrt(np.mean(np.square(frames.astype(np.float64)))))
+        if self._rms:
+            frames = rms_normalize(frames)
+        self._rb.push(frames)
+
+    def recent_input_rms(self) -> float:
+        """最近 emit 帧的 RAW(归一化前)输入 RMS,供诊断判断麦克风电平强弱(FIX 1)。"""
+        return self._last_input_rms
+
+    def read(self) -> np.ndarray:
+        return self._rb.read()
+
+    def base_offset(self) -> float:
+        return self._rb.base_offset()
+
+    def available_seconds(self) -> float:
+        return self._rb.available_seconds()
+
+    def window_from(self, abs_start: float) -> np.ndarray:
+        return self._rb.window_from(abs_start)
+
+    def pending_seconds(self) -> float:
+        return self._rb.pending_seconds()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+class MicSource(_SourceBase):
+    """麦克风(采集):sounddevice 48kHz(RECORD_SAMPLE_RATE)mono 输入流 + watchdog(样本不增长判失败重启一次)。
+    录音落 wav 用原生 48k 作事实来源;喂 Whisper 前再由 retranscribe 降采样到 16k。
+
+    sounddevice 在源 start() 时懒导入(避免测试套件硬依赖 PortAudio)。真采集手测。
+    """
+
+    def __init__(self, *, device=None, rms_normalize_enabled: bool = True) -> None:
+        super().__init__(rms_normalize_enabled=rms_normalize_enabled,
+                         sample_rate=RECORD_SAMPLE_RATE)
+        self._device = device
+        self._stream = None
+        self._wd_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        import sounddevice as sd  # 懒导入:测试不碰 PortAudio
+
+        def _cb(indata, frames, time_info, status):  # noqa: ANN001
+            if status:
+                _log.debug("mic stream status: %s", status)
+            # indata: (frames, channels) float32;取单声道一维。
+            self._emit(np.asarray(indata[:, 0], dtype=_PCM_DTYPE))
+
+        self._stream = sd.InputStream(
+            samplerate=self.sample_rate, channels=_CHANNELS, dtype="float32",
+            device=self._device, callback=_cb,
+        )
+        self._stream.start()
+        self._wd_thread = threading.Thread(target=self._watchdog, daemon=True)
+        self._wd_thread.start()
+
+    def _watchdog(self) -> None:
+        """采集已启动但样本数不增长 → 判失败,重启流一次;仍死则记错(mic「假成功」坑)。"""
+        last = self._rb.sample_count()
+        time.sleep(2.0)
+        if self._stop.is_set():
+            return
+        if self._rb.sample_count() == last:
+            _log.warning("mic watchdog: no samples in 2s, restarting input stream once")
+            try:
+                if self._stream is not None:
+                    self._stream.stop()
+                    self._stream.close()
+                self.start()
+            except Exception as e:  # noqa: BLE001
+                _log.error("mic restart failed: %s", e)
+
+    def stop(self) -> None:
+        super().stop()
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._stream = None
+
+
+def _is_permission_denied_line(line: str) -> bool:
+    """helper stderr 行是否表示权限被拒(纯函数,可单测)。大小写不敏感。"""
+    return "PERMISSION_DENIED" in line.upper()
+
+
+class SystemAudioSource(_SourceBase):
+    """macOS 系统声音(采集):Popen 原生 helper 二进制,从其 stdout 读裸 PCM(48k mono float32 le)。
+
+    helper 用 Core Audio process tap → stereo 混 mono、输出 **48kHz**(全频宽,见 shell/native helper)。
+    读 stdout 的线程在 start() 起;另起一守护线程逐行抽干 stderr(防管道填满阻塞 helper),
+    遇 PERMISSION_DENIED 行置 permission_denied 标志供 worker 读取。真采集 + 权限 = 真机手测。
+    """
+
+    def __init__(self, helper_bin: str, *, rms_normalize_enabled: bool = True) -> None:
+        super().__init__(rms_normalize_enabled=rms_normalize_enabled,
+                         sample_rate=RECORD_SAMPLE_RATE)
+        self._bin = helper_bin
+        self._proc: subprocess.Popen | None = None
+        self._reader: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self.permission_denied = False  # stderr 出现 PERMISSION_DENIED 行即置位
+
+    def start(self) -> None:
+        self._proc = subprocess.Popen(
+            [self._bin], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _drain_stderr(self) -> None:
+        """逐行抽干 helper stderr:记日志 + 设权限标志。防 stderr 管道填满阻塞 helper。"""
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        for raw in iter(proc.stderr.readline, b""):
+            line = raw.decode("utf-8", "replace").rstrip()
+            if not line:
+                continue
+            if _is_permission_denied_line(line):
+                self.permission_denied = True
+                _log.error("system-audio helper: %s", line)
+            else:
+                _log.debug("system-audio helper: %s", line)
+
+    def _read_loop(self) -> None:
+        assert self._proc is not None and self._proc.stdout is not None
+        # 每次读约 0.1s 的 float32 PCM(sample_rate * 0.1 * 4 字节);凑成整 float 帧再 push。
+        chunk_bytes = int(self.sample_rate * 0.1) * 4
+        while not self._stop.is_set():
+            raw = self._proc.stdout.read(chunk_bytes)
+            if not raw:
+                break  # helper 退出 / EOF
+            n = len(raw) - (len(raw) % 4)
+            if n <= 0:
+                continue
+            frames = np.frombuffer(raw[:n], dtype="<f4").astype(_PCM_DTYPE)
+            self._emit(frames)
+
+    def stop(self) -> None:
+        super().stop()
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+            self._proc = None

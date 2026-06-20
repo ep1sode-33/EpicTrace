@@ -2,21 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import threading
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sse_starlette.sse import EventSourceResponse
 
-from epictrace.api.deps import get_db, get_embedder, get_vector_store
+from epictrace.api.deps import (
+    get_asr_provisioner,
+    get_db,
+    get_embedder,
+    get_vector_store,
+)
 from epictrace.db import Database
 from epictrace.schemas import (
     AppendEventIn,
+    AsrSourceIn,
     CaptureEventOut,
     CaptureSessionDetailOut,
     CaptureSessionOut,
     IndexStatusOut,
     OrganizeIn,
+    PartialIn,
     RenameIn,
     StartSessionIn,
+    TranscriptReplaceIn,
 )
 from epictrace.api.routers.projects import _ensure_project, _has_running_job
 from epictrace.media.errors import ExtractionEngineNotReady, ExtractionFailed
@@ -36,24 +46,107 @@ from epictrace.services.organize import OrganizeService
 
 router = APIRouter(prefix="/capture", tags=["capture"])  # /api 由 app 工厂挂载
 
+_log = logging.getLogger("epictrace")
 
-def _detail(svc: CaptureService, sess) -> CaptureSessionDetailOut:
+
+def _detail(svc: CaptureService, sess, *, retranscribing: bool = False) -> CaptureSessionDetailOut:
     return CaptureSessionDetailOut(
         id=sess.id, title=sess.title, status=sess.status,
         started_at=sess.started_at, ended_at=sess.ended_at, sources=sess.sources,
         staging_dir=sess.staging_dir,
         events=[CaptureEventOut.model_validate(e) for e in sess.events],
         elapsed_seconds=svc.active_elapsed_seconds(sess.id),
+        retranscribing=retranscribing,
     )
 
 
+_AUDIO_SOURCES = ("mic", "system_audio")
+
+
 @router.post("/sessions", response_model=CaptureSessionOut, status_code=status.HTTP_201_CREATED)
-def start_session(payload: StartSessionIn, db: Database = Depends(get_db)) -> CaptureSessionOut:
+def start_session(payload: StartSessionIn, request: Request,
+                  db: Database = Depends(get_db)) -> CaptureSessionOut:
+    # 服务端硬门:选了音频源(mic/system_audio)但语音模型未就绪 → 直接 409,绝不建 session。
+    # 前端虽已挡(CaptureView),但直连 API / 陈旧页面 / 竞态仍可能漏进来 → worker 会 Popen 起
+    # WhisperModel 阻塞下载 ~3GB(或挂死)→ 用户最怕的「静默漏录/卡死」。在源头守住(FIX 1)。
+    if any(s in _AUDIO_SOURCES for s in payload.sources):
+        # 录制门:转写走停录后的一次性 mlx 完整 v3。经 provisioner(MlxOneshotProvisioner)判就绪——
+        # 与设置页 /asr/status 同一实例,且测试注入的假 provisioner 能统一控制(缺则 409,绝不静默下载)。
+        cfg = _asr_settings(request)
+        if not get_asr_provisioner(request).is_ready(cfg.get("model", "large-v3")):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="语音模型未就绪,请先在设置下载")
     try:
         sess = CaptureService(db).start(sources=payload.sources)
     except ActiveSessionExists:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="a session is already recording")
+    # 选了音频源 → 拉起 ASR worker 子进程(supervisor 内部判定 mic/system_audio 才真起)。
+    # 任何失败只记日志、不挡 session(降级:其余源/事件照常,见 spec §12)。
+    _start_asr(request, sess)
+    # 初始化「期望开启音源集」= 选中的音频源(中途可经 /asr-source 增删,含开始没勾的源)。
+    audio = [s for s in sess.sources if s in _AUDIO_SOURCES]
+    if audio:
+        request.app.state.asr_enabled[sess.id] = audio
+        _record_source_events(db, sess.id, audio, "start")  # 时间线:开局即录的源
     return CaptureSessionOut.model_validate(sess)
+
+
+def _asr_settings(request: Request) -> dict:
+    """从持久化 ASR 设置取完整配置(model/vad/阈值/force_confirm_after…);读取失败回落默认。
+
+    返回完整 dict(经 SettingsService.get_asr_settings → AsrConfig 规范化),透传给 supervisor,
+    worker 据此建完整 AsrConfig —— 非默认调参全部生效(FIX D)。
+    """
+    try:
+        from epictrace.services.settings import SettingsService
+        return SettingsService(request.app.state.config).get_asr_settings()
+    except Exception:  # noqa: BLE001 — 设置读不到不应挡 session
+        from epictrace.asr.config import AsrConfig
+        return AsrConfig().to_dict()
+
+
+def _asr_cache_dir(request: Request) -> str | None:
+    """ASR 模型缓存目录(WhisperModel download_root)。与 provisioner 就绪检测同一路径,
+    透传给 worker → 非默认数据目录下二者不再各看各的(FIX 2)。取不到回 None(worker 落默认)。"""
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        return None
+    return str(config.asr_model_dir)
+
+
+def _start_asr(request: Request, sess) -> None:
+    sup = getattr(request.app.state, "asr_supervisor", None)
+    if sup is None:
+        return
+    try:
+        cfg = _asr_settings(request)
+        sup.start(session_id=sess.id, sources=list(sess.sources),
+                  staging_dir=sess.staging_dir, model=cfg.get("model", "large-v3"),
+                  config=cfg, cache_dir=_asr_cache_dir(request))
+    except Exception as e:  # noqa: BLE001 — 子进程拉起失败降级,不挡 session
+        _log.warning("ASR supervisor.start failed for session %s: %s", sess.id, e)
+
+
+def _stop_asr(request: Request, sid: int) -> None:
+    sup = getattr(request.app.state, "asr_supervisor", None)
+    if sup is None:
+        return
+    try:
+        sup.stop(sid)
+    except Exception as e:  # noqa: BLE001 — 停止尽力而为
+        _log.warning("ASR supervisor.stop failed for session %s: %s", sid, e)
+
+
+def _record_source_events(db: Database, sid: int, sources: list[str], action: str) -> None:
+    """记录音源开/停事件(kind=source,meta={source, action})——供时间线显示「何时开始/停止了哪个源
+    的录音」。失败只记日志、不挡主流程(append_event 要求 session 仍 recording;故停录前调用)。"""
+    svc = CaptureService(db)
+    for src in sources:
+        try:
+            svc.append_event(sid, kind="source", payload="",
+                             meta={"source": src, "action": action})
+        except Exception as e:  # noqa: BLE001 — 记录失败不应拦截开/停源
+            _log.warning("record source event %s/%s failed for session %s: %s", src, action, sid, e)
 
 
 @router.get("/sessions", response_model=list[CaptureSessionOut])
@@ -68,10 +161,11 @@ def active_session(db: Database = Depends(get_db)):
 
 
 @router.get("/sessions/{sid}", response_model=CaptureSessionDetailOut)
-def get_session(sid: int, db: Database = Depends(get_db)) -> CaptureSessionDetailOut:
+def get_session(sid: int, request: Request, db: Database = Depends(get_db)) -> CaptureSessionDetailOut:
     svc = CaptureService(db)
+    retx = sid in getattr(request.app.state, "asr_retranscribing", set())
     try:
-        return _detail(svc, svc.get_session(sid))
+        return _detail(svc, svc.get_session(sid), retranscribing=retx)
     except CaptureSessionNotFound:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
 
@@ -90,13 +184,15 @@ def append_event(sid: int, payload: AppendEventIn, db: Database = Depends(get_db
 
 
 @router.post("/sessions/{sid}/pause", status_code=status.HTTP_204_NO_CONTENT)
-def pause(sid: int, db: Database = Depends(get_db)) -> None:
+def pause(sid: int, request: Request, db: Database = Depends(get_db)) -> None:
     _pause_resume(db, sid, "pause")
+    _asr_pause_resume(request, sid, "pause")
 
 
 @router.post("/sessions/{sid}/resume", status_code=status.HTTP_204_NO_CONTENT)
-def resume(sid: int, db: Database = Depends(get_db)) -> None:
+def resume(sid: int, request: Request, db: Database = Depends(get_db)) -> None:
     _pause_resume(db, sid, "resume")
+    _asr_pause_resume(request, sid, "resume")
 
 
 def _pause_resume(db: Database, sid: int, which: str) -> None:
@@ -109,12 +205,170 @@ def _pause_resume(db: Database, sid: int, which: str) -> None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="session not recording")
 
 
-@router.post("/sessions/{sid}/stop", response_model=CaptureSessionOut)
-def stop_session(sid: int, db: Database = Depends(get_db)) -> CaptureSessionOut:
+def _asr_pause_resume(request: Request, sid: int, which: str) -> None:
+    """暂停/恢复联动 ASR worker(暂停停喂入,恢复重起;失败只记日志,不挡事件流)。"""
+    sup = getattr(request.app.state, "asr_supervisor", None)
+    if sup is None:
+        return
     try:
-        return CaptureSessionOut.model_validate(CaptureService(db).stop(sid))
+        sup.pause(sid) if which == "pause" else sup.resume(sid)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("ASR supervisor.%s failed for session %s: %s", which, sid, e)
+
+
+@router.post("/sessions/{sid}/stop", response_model=CaptureSessionOut)
+def stop_session(sid: int, request: Request, db: Database = Depends(get_db)) -> CaptureSessionOut:
+    svc = CaptureService(db)
+    # 先确认 session 存在(404),再停 ASR worker —— 必须在翻 staged 之前停(FIX B):否则
+    # worker 收尾时的最后几个 confirmed POST 撞到 SessionNotRecording 409 被丢。worker 收
+    # SIGTERM 后会 flush 最后 confirmed 段 + finalize wav,这些 POST 需 session 仍 recording。
+    try:
+        svc.get_session(sid)
     except CaptureSessionNotFound:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    _stop_asr(request, sid)
+    # 仍 recording 时记录「停止录音」事件(停录时还活跃的源)→ 时间线收尾。翻 staged 后 append 会 409。
+    active = [s for s in request.app.state.asr_enabled.get(sid, []) if s in _AUDIO_SOURCES]
+    _record_source_events(db, sid, active, "stop")
+    sess = svc.stop(sid)  # 此刻才翻 staged
+    request.app.state.asr_partials.pop(sid, None)  # 清掉该 session 的内存态 partial
+    request.app.state.asr_enabled.pop(sid, None)    # 清掉期望开启集(下次同 id 不串状态)
+    # 停止后拉起一次性重转(mlx 整文件 → 替换流式转录事件,产权威转录)。失败不挡 stop。
+    _start_retranscribe(request, sess)
+    return CaptureSessionOut.model_validate(sess)
+
+
+def _start_retranscribe(request: Request, sess) -> None:
+    """会话停止后拉起一次性重转子进程(mlx 整文件重转 → 替换流式转录事件)。
+
+    仅当 staging 里确有 audio-*.wav 时才起(无音频则跳过,不白起 mlx)。置 asr_retranscribing 标志,
+    retranscribe 回写 /transcript 时清除。失败只记日志、不挡 stop(降级:保留流式转录)。"""
+    from pathlib import Path
+
+    sup = getattr(request.app.state, "asr_supervisor", None)
+    if sup is None or not hasattr(sup, "retranscribe"):
+        return
+    try:
+        if not any(Path(sess.staging_dir).glob("audio-*.wav")):
+            return  # 本 session 无音频 → 无需重转
+    except Exception:  # noqa: BLE001 — staging 不可读则跳过
+        return
+    try:
+        cfg = _asr_settings(request)
+        request.app.state.asr_retranscribing.add(sess.id)
+        proc = sup.retranscribe(sess.id, sess.staging_dir, config=cfg)
+        # 看护子进程:它正常会 POST /transcript 清掉标志;但若在 POST 之前崩了/失败退出,标志会
+        # 永远挂着,把该 session 的「指派并入库」永久挡死。等它退出后若标志仍在 → 清掉并记错。
+        _watch_retranscribe(request, sess.id, proc)
+    except Exception as e:  # noqa: BLE001 — 重转拉起失败降级
+        request.app.state.asr_retranscribing.discard(sess.id)
+        _log.warning("ASR retranscribe spawn failed for session %s: %s", sess.id, e)
+
+
+def _watch_retranscribe(request: Request, sid: int, proc) -> None:
+    """后台等重转子进程退出;退出时若 asr_retranscribing 仍含 sid(= 没成功回写),清标志解封 organize。
+    proc 无 wait()(测试假件)→ no-op。"""
+    wait = getattr(proc, "wait", None)
+    if wait is None:
+        return
+    flags = request.app.state.asr_retranscribing
+
+    def _w() -> None:
+        try:
+            wait()
+        except Exception:  # noqa: BLE001 — 等待失败也要尝试解封
+            pass
+        if sid in flags:
+            flags.discard(sid)
+            _log.warning("ASR retranscribe for session %s exited without writing transcript; "
+                         "cleared retranscribing flag", sid)
+
+    threading.Thread(target=_w, daemon=True).start()
+
+
+@router.post("/sessions/{sid}/transcript", status_code=status.HTTP_204_NO_CONTENT)
+def replace_transcript(sid: int, payload: TranscriptReplaceIn, request: Request,
+                       db: Database = Depends(get_db)) -> None:
+    """retranscribe 子进程回写权威转录:替换该 session 的全部 kind=transcription 事件,清除重转标志。"""
+    try:
+        CaptureService(db).replace_transcription(sid, payload.segments)
+    except CaptureSessionNotFound:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+    finally:
+        request.app.state.asr_retranscribing.discard(sid)
+
+
+@router.post("/sessions/{sid}/partial", status_code=status.HTTP_204_NO_CONTENT)
+def post_partial(sid: int, payload: PartialIn, request: Request) -> None:
+    """ASR worker 回推实时暂定段(不落库),存内存态 asr_partials[sid][source],经 SSE 推 HUD。"""
+    partials = request.app.state.asr_partials
+    partials.setdefault(sid, {})[payload.source] = payload.text
+
+
+@router.get("/sessions/{sid}/partial")
+def get_partial(sid: int, request: Request) -> dict:
+    """读该 session 的实时暂定段快照({source: text})。供 HUD 现有 1.5s 轮询(不另起 SSE)
+    与 getSession 一起拉取;内存态、无则空 dict。"""
+    return dict(request.app.state.asr_partials.get(sid, {}))
+
+
+def _ensure_asr_worker(request: Request, db: Database, sid: int,
+                       enabled_sources: list[str]) -> None:
+    """启用某音源时确保 worker 在跑:不在跑(从没起 / 已空闲自退)→ 懒启动(带当前期望开启集
+    作初始源);在跑 → 无需动作(worker 自行轮询 reconcile 出新源)。失败只记日志,不挡切换。"""
+    sup = getattr(request.app.state, "asr_supervisor", None)
+    if sup is None:
+        return
+    try:
+        if sup.is_running(sid):
+            return
+        sess = CaptureService(db).get_session(sid)
+        cfg = _asr_settings(request)
+        sup.start(session_id=sid, sources=list(enabled_sources),
+                  staging_dir=sess.staging_dir, model=cfg.get("model", "large-v3"),
+                  config=cfg, cache_dir=_asr_cache_dir(request))
+    except Exception as e:  # noqa: BLE001 — 懒启动失败降级,不挡开关本身
+        _log.warning("ASR ensure worker failed for session %s: %s", sid, e)
+
+
+@router.post("/sessions/{sid}/asr-source", status_code=status.HTTP_204_NO_CONTENT)
+def set_asr_source(sid: int, payload: AsrSourceIn, request: Request,
+                   db: Database = Depends(get_db)) -> None:
+    """启停某路音频源(取代旧软静音):更新该 session 的「期望开启集」(内存态),worker 轮询后
+    reconcile 出要启动/停止的源。开关 = 真·启停采集(关源 mic 灯灭),中途也能开开始没勾的源。
+
+    启用:模型未就绪 → 409(同 start_session 门控);加入集合并确保 worker 在跑(必要时懒启动)。
+    关闭:从集合移除;worker 经轮询停掉该源,但保持存活(模型温存 / 后续再开)。全关久了 worker 自退。
+    幂等:重复启用同源不重复入列;空集不残留键。未知源 id → 400。
+    """
+    if payload.source not in _AUDIO_SOURCES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unknown audio source")
+    enabled_map: dict[int, list[str]] = request.app.state.asr_enabled
+    cur = list(enabled_map.get(sid, []))
+    if payload.enabled:
+        cfg = _asr_settings(request)
+        if not get_asr_provisioner(request).is_ready(cfg.get("model", "large-v3")):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="语音模型未就绪,请先在设置下载")
+        if payload.source not in cur:
+            cur.append(payload.source)
+            _record_source_events(db, sid, [payload.source], "start")  # 中途开源 → 时间线
+        enabled_map[sid] = cur
+        _ensure_asr_worker(request, db, sid, cur)
+    else:
+        if payload.source in cur:
+            cur.remove(payload.source)
+            _record_source_events(db, sid, [payload.source], "stop")   # 中途关源 → 时间线
+        if cur:
+            enabled_map[sid] = cur
+        else:
+            enabled_map.pop(sid, None)
+
+
+@router.get("/sessions/{sid}/asr-source")
+def get_asr_source(sid: int, request: Request) -> dict:
+    """读该 session 的「期望开启音源集」(内存态)。worker 周期性轮询;无则空列表。"""
+    return {"enabled": list(request.app.state.asr_enabled.get(sid, []))}
 
 
 @router.patch("/sessions/{sid}", response_model=CaptureSessionOut)
@@ -129,7 +383,12 @@ def rename_session(sid: int, payload: RenameIn, db: Database = Depends(get_db)) 
 
 
 @router.delete("/sessions/{sid}", status_code=status.HTTP_200_OK)
-def delete_session(sid: int, db: Database = Depends(get_db)) -> dict:
+def delete_session(sid: int, request: Request, db: Database = Depends(get_db)) -> dict:
+    # 先停 ASR worker(若仍在跑),再删 session + staging(避免 worker 还往已删目录写 wav)。
+    _stop_asr(request, sid)
+    request.app.state.asr_partials.pop(sid, None)
+    request.app.state.asr_enabled.pop(sid, None)
+    request.app.state.asr_retranscribing.discard(sid)
     try:
         CaptureService(db).delete(sid)
     except CaptureSessionNotFound:
@@ -144,6 +403,11 @@ def organize_session(sid: int, payload: OrganizeIn, request: Request,
     pid = payload.project_id
     # 先校验目标项目存在(404),避免归类/入库时才以 500 暴出。
     _ensure_project(db, pid)
+    # 权威转录(停录后一次性)还在跑 → 此刻入库的转录是空的(单遍架构没有 live 文本兜底)。
+    # 挡住,等 retranscribe 回写 /transcript 清掉标志后再入库,避免库里落空白转录。
+    if sid in request.app.state.asr_retranscribing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="正在生成权威转录,请稍候再入库")
     svc = IndexService(db, get_embedder(request), lambda: get_vector_store(request))
     # 「检查在跑 + 归类入库 + 启动新 job」整段在锁内:与 /projects/{id}/index 同一套并发护栏,
     # 避免该项目已有索引 job 在跑时再归类起两个并发 job(破坏性)。
@@ -196,6 +460,10 @@ async def stream_events(sid: int, request: Request, db: Database = Depends(get_d
                 yield {"event": "event", "data": json.dumps(
                     {"id": e.id, "kind": e.kind, "payload": e.payload,
                      "ts": e.ts.isoformat(), "meta": e.meta})}
+            # 每轮额外推一份 partial 快照(实时暂定段,内存态;前端单独渲染、不混进 events)。
+            partial = request.app.state.asr_partials.get(sid, {})
+            if partial:
+                yield {"event": "partial", "data": json.dumps(partial)}
             if sess.status != "recording":
                 yield {"event": "done", "data": "{}"}
                 break

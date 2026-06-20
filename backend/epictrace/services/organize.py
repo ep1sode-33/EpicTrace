@@ -74,7 +74,18 @@ class OrganizeService:
                 ingest_method="session", description=f"采集自 session {session_id}",
                 source_session_id=session_id,
             ))
-        # 3) 标记 organized
+        # 3) ASR 原始音频:staging 里的 audio-*.wav(子进程边录边落)作为文件入库进 Project,
+        #    同截图(本期无音频处理器 → extracted_text 空;日后可重转写)。直接扫 staging 顶层
+        #    的 audio-*.wav(不依赖事件 payload),按文件名排序保证稳定顺序。
+        for wav in sorted(staging_root.glob("audio-*.wav")):
+            if not wav.is_file():
+                continue
+            records.append(self._ingest.ingest_file(
+                project_id=project_id, source_path=str(wav),
+                ingest_method="session", description=f"采集自 session {session_id}",
+                source_session_id=session_id,
+            ))
+        # 4) 标记 organized
         with self._db.session() as s:
             s.get(CaptureSession, session_id).status = "organized"
         return records

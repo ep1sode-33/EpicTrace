@@ -339,9 +339,38 @@ def _register_native_drop(window: "webview.Window") -> None:
     window.events.loaded += _bind
 
 
+def _ensure_sysaudio_helper() -> None:
+    """确保 macOS 系统内录 helper 已编译到 data_dir/bin(缺失则用 swiftc 构建一次)。
+    缺 swiftc / 编译失败 → 记日志降级:系统内录不可用,但 mic 等其余源不受影响。
+    后台线程跑,不阻塞开窗;构建很快,且只在缺失时跑(产物会缓存)。"""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from epictrace.config import AppConfig
+
+    out = AppConfig().data_dir / "bin" / "epictrace-sysaudio"
+    if out.exists():
+        return
+    src = Path(__file__).resolve().parent / "native" / "SystemAudioCapture.swift"
+    swiftc = shutil.which("swiftc")
+    if swiftc is None or not src.exists():
+        print("[EpicTrace] 系统内录 helper 未构建(缺 swiftc 或源文件);系统内录暂不可用", flush=True)
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run([swiftc, "-O", str(src), "-o", str(out)],
+                       check=True, timeout=180, capture_output=True)
+        print(f"[EpicTrace] 已构建系统内录 helper: {out}", flush=True)
+    except Exception as e:  # noqa: BLE001 — 构建失败不挡 app 启动
+        print(f"[EpicTrace] 系统内录 helper 构建失败: {e}", flush=True)
+
+
 def main() -> None:
     t = threading.Thread(target=_serve, daemon=True)
     t.start()
+    # 缺失则后台构建系统内录 helper(不阻塞开窗)。
+    threading.Thread(target=_ensure_sysaudio_helper, daemon=True).start()
     if not _wait_until_ready():
         print("[EpicTrace] backend not ready in time; opening window anyway.", flush=True)
     api = Api()

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, Clock, FolderOpen, Loader2, Trash2 } from "lucide-react";
 import { api, type CaptureSession, type CaptureSessionDetail, type Project } from "@/lib/api";
+import { groupTimelineItems } from "@/lib/transcript";
 import { Button } from "@/components/ui/button";
 
 /** 状态徽标样式 */
@@ -48,20 +49,27 @@ function dotColor(kind: string): string {
     case "note": return "bg-sky-500";
     case "clipboard": return "bg-zinc-400";
     case "screenshot": return "bg-violet-500";
+    case "transcription": return "bg-teal-500";
     case "pause": return "bg-amber-500";
     case "resume": return "bg-emerald-500";
+    case "source": return "bg-orange-500";
     default: return "bg-muted-foreground";
   }
 }
 
 /** 事件类型中文标签 */
-function kindLabel(kind: string): string {
+function kindLabel(kind: string, meta?: Record<string, unknown>): string {
   switch (kind) {
     case "note": return "笔记";
     case "clipboard": return "剪贴板";
     case "screenshot": return "截图";
+    case "transcription": return meta?.source === "device" ? "系统声音采集" : "麦克风";
     case "pause": return "暂停";
     case "resume": return "继续";
+    case "source": {  // 音源开/停:何时开始/停止了哪个源的录音
+      const src = meta?.source === "system_audio" ? "系统声音" : "麦克风";
+      return `${src} ${meta?.action === "stop" ? "停止采集" : "开始采集"}`;
+    }
     default: return kind;
   }
 }
@@ -96,6 +104,19 @@ export function CaptureStagingView({ onOrganized }: Props) {
       cancelled = true;
     };
   }, []);
+
+  // 选中的 session 正在重转时,轮询刷新详情,等权威转录到达(retranscribing 转 false)即停。
+  useEffect(() => {
+    if (!selected?.retranscribing) return;
+    const sid = selected.id;
+    const t = setInterval(() => {
+      api
+        .getSession(sid)
+        .then((d) => setSelected((cur) => (cur?.id === sid ? d : cur)))
+        .catch(() => {});
+    }, 2000);
+    return () => clearInterval(t);
+  }, [selected?.id, selected?.retranscribing]);
 
   async function handleSelect(sess: CaptureSession) {
     if (selected?.id === sess.id) {
@@ -205,40 +226,78 @@ export function CaptureStagingView({ onOrganized }: Props) {
                   <div className="border-t border-border/50 bg-muted/20 px-4 py-4 space-y-4">
                     {/* 图形时间线 v1 */}
                     <div>
-                      <p className="mb-2 text-xs font-medium text-muted-foreground">
-                        时间线（{selected.events.length} 条事件）
-                      </p>
+                      <div className="mb-2 flex items-center gap-2">
+                        <p className="text-xs font-medium text-muted-foreground">
+                          时间线（{selected.events.length} 条事件）
+                        </p>
+                        {selected.retranscribing && (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-teal-700 dark:text-teal-300">
+                            <Loader2 className="size-3 animate-spin" />
+                            重新转写中…(生成权威转录,完成后自动替换)
+                          </span>
+                        )}
+                      </div>
                       {selected.events.length === 0 ? (
                         <p className="text-xs text-muted-foreground">无事件</p>
                       ) : (
                         <div className="relative space-y-2">
                           {/* 竖线 */}
                           <div className="absolute left-[5.5rem] top-0 h-full w-px bg-border/50" aria-hidden />
-                          {selected.events.map((ev) => (
-                            <div key={ev.id} className="flex items-start gap-3">
-                              {/* 相对时间刻度 */}
-                              <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground pt-0.5">
-                                {fmtRel(relSec(selected.started_at, ev.ts))}
-                              </span>
-                              {/* 时间线节点 */}
-                              <span className="relative z-10 mt-1 flex size-3 shrink-0 items-center justify-center">
-                                <span className={`size-2 rounded-full ${dotColor(ev.kind)}`} aria-hidden />
-                              </span>
-                              {/* 事件内容 */}
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-1.5">
-                                  <span className="text-xs font-medium text-foreground">
-                                    {kindLabel(ev.kind)}
+                          {/* 连续同源转写合并成段落(FIX 2):一段只显示一次来源标签 + 一个时间/区间,
+                              整段文本换行展示,不再逐句一行一时间戳。 */}
+                          {groupTimelineItems(selected.events).map((item) => {
+                            if (item.kind === "transcription") {
+                              const startRel = fmtRel(relSec(selected.started_at, item.start_ts));
+                              const endRel = fmtRel(relSec(selected.started_at, item.end_ts));
+                              const timeLabel = startRel === endRel ? startRel : `${startRel}–${endRel}`;
+                              return (
+                                <div key={`tr-${item.ids[0]}`} className="flex items-start gap-3">
+                                  <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground pt-0.5">
+                                    {timeLabel}
                                   </span>
+                                  <span className="relative z-10 mt-1 flex size-3 shrink-0 items-center justify-center">
+                                    <span className={`size-2 rounded-full ${dotColor("transcription")}`} aria-hidden />
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <span className="text-xs font-medium text-foreground">
+                                      {kindLabel("transcription", { source: item.source })}
+                                    </span>
+                                    {item.text && (
+                                      <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                                        {item.text}
+                                      </p>
+                                    )}
+                                  </div>
                                 </div>
-                                {ev.payload && (
-                                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                                    {ev.payload}
-                                  </p>
-                                )}
+                              );
+                            }
+                            const ev = item.event;
+                            return (
+                              <div key={ev.id} className="flex items-start gap-3">
+                                {/* 相对时间刻度 */}
+                                <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground pt-0.5">
+                                  {fmtRel(relSec(selected.started_at, ev.ts))}
+                                </span>
+                                {/* 时间线节点 */}
+                                <span className="relative z-10 mt-1 flex size-3 shrink-0 items-center justify-center">
+                                  <span className={`size-2 rounded-full ${dotColor(ev.kind)}`} aria-hidden />
+                                </span>
+                                {/* 事件内容 */}
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-xs font-medium text-foreground">
+                                      {kindLabel(ev.kind, ev.meta)}
+                                    </span>
+                                  </div>
+                                  {ev.payload && (
+                                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                                      {ev.payload}
+                                    </p>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
@@ -264,7 +323,8 @@ export function CaptureStagingView({ onOrganized }: Props) {
                         <Button
                           size="sm"
                           onClick={handleOrganize}
-                          disabled={!selectedProjectId || organizing}
+                          disabled={!selectedProjectId || organizing || selected?.retranscribing}
+                          title={selected?.retranscribing ? "正在生成权威转录,完成后才能入库" : undefined}
                           className="gap-1.5 shrink-0"
                         >
                           {organizing ? (
@@ -273,6 +333,11 @@ export function CaptureStagingView({ onOrganized }: Props) {
                           指派并入库
                         </Button>
                       </div>
+                    )}
+                    {sess.status === "staged" && selected?.retranscribing && (
+                      <p className="text-xs text-muted-foreground -mt-2">
+                        正在生成权威转录,完成后即可入库。
+                      </p>
                     )}
                     {sess.status === "recording" && (
                       <p className="text-xs text-muted-foreground border-t border-border/50 pt-3">
