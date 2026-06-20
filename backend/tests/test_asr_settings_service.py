@@ -9,7 +9,7 @@ from epictrace.services.settings import SettingsService
 def test_default_asr_settings(tmp_path: Path):
     svc = SettingsService(AppConfig(data_dir=tmp_path))
     s = svc.get_asr_settings()
-    assert s["model"] == "large-v3" and s["language"] == "zh" and s["vad"] is True
+    assert s["model"] == "large-v3" and s["language"] == "auto" and s["vad"] is True
 
 
 def test_set_and_validate(tmp_path: Path):

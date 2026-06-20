@@ -15,7 +15,6 @@ import {
 import {
   api,
   type AsrDevice,
-  type AsrModel,
   type AsrSettings,
   type AsrStatus,
   type ExtractionSettings,
@@ -274,16 +273,10 @@ const ASR_STATE_LABEL: Record<AsrStatus["state"], string> = {
   failed: "失败",
 };
 
-const ASR_MODEL_LABEL: Record<AsrModel, string> = {
-  "large-v3": "large-v3 —— 质量最高(默认)",
-  medium: "medium —— 速度/质量折中",
-  small: "small —— 最快,质量较低",
-};
 
 /**
- * ASR(语音转写)设置区:模型大小下拉 + 下载/进度/状态。改动即 PUT 持久化
- * (乐观更新 + 失败回滚),与 Extraction 同款。面向普通用户,不暴露 VAD/阈值旋钮
- * (这些走后端默认 + 离线评测脚本调参,见 scripts/asr_eval.py)。
+ * ASR(语音转写)设置区:语音模型(固定完整 large-v3)+ 下载/进度/状态 + 输入设备。面向普通用户,
+ * 不暴露 VAD/阈值旋钮(走后端默认 + 离线评测脚本调参,见 scripts/asr_eval.py)。
  */
 function AsrSection() {
   const [settings, setSettings] = useState<AsrSettings | null>(null);
@@ -372,26 +365,14 @@ function AsrSection() {
       <div className="flex flex-col gap-1">
         <h2 className="text-sm font-semibold text-foreground">语音转写(ASR)</h2>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          采集 session 里麦克风 / 系统声音采集的实时转写引擎(faster-whisper,本地运行)。
+          录制时只采集音频;停止录制后用本地 mlx large-v3 一次性转写(带标点 + 可回溯时间戳)。
         </p>
       </div>
 
-      {/* 模型大小:改动即 PUT 持久化(乐观更新 + 失败回滚)。 */}
-      {settings && (
-        <Field id="asr-model" label="模型大小">
-          <select
-            id="asr-model"
-            value={settings.model}
-            disabled={saving || downloading}
-            onChange={(e) => update({ model: e.target.value as AsrModel })}
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-          >
-            {(["large-v3", "medium", "small"] as const).map((v) => (
-              <option key={v} value={v}>{ASR_MODEL_LABEL[v]}</option>
-            ))}
-          </select>
-        </Field>
-      )}
+      {/* 模型固定为完整 large-v3(单遍架构:停录后一次性转写);不再提供大小选择。 */}
+      <Field id="asr-model" label="语音模型">
+        <span className="text-sm text-muted-foreground">large-v3(完整,本地 GPU)</span>
+      </Field>
 
       {/* 输入设备(麦克风):默认麦克风过弱/选错时,让用户改采集输入(Feature A)。
           值为空串 → 系统默认(input_device=null);否则为 sounddevice 设备索引。 */}
@@ -427,12 +408,12 @@ function AsrSection() {
         <div className="ml-auto flex gap-2">
           {ready ? (
             <Button type="button" variant="outline" size="sm" disabled={downloading}
-                    onClick={download} title="按当前模型大小重新下载权重">
+                    onClick={download} title="重新下载 mlx large-v3 权重">
               重新下载
             </Button>
           ) : (
             <Button type="button" size="sm" disabled={downloading} onClick={download}
-                    title="下载所选模型权重(首次较久)">
+                    title="下载 mlx large-v3 权重(首次较久)">
               {downloading ? (<><Loader2 className="size-3.5 animate-spin" />下载中…</>)
                 : failed ? "重试下载" : "下载模型"}
             </Button>

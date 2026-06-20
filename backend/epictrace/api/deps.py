@@ -121,17 +121,14 @@ def get_provisioner(request: Request):
 
 
 def get_asr_provisioner(request: Request):
-    """ASR 模型 provisioner(faster-whisper)。优先用注入的 app.state.asr_provisioner(测试假件);
-    否则按 app.state.config.asr_model_dir 懒构造并缓存。cache_dir 与 worker 的
-    WhisperModel(download_root=asr_model_dir) 一致,故就绪检测看的是真正落盘的目录。"""
+    """ASR 模型 provisioner。架构转单遍 mlx 后 = mlx 完整 large-v3 的就绪检测/下载
+    (MlxOneshotProvisioner,落 HF 默认缓存)。优先用注入的 app.state.asr_provisioner(测试假件)。"""
     prov = getattr(request.app.state, "asr_provisioner", None)
     if prov is not None:
         return prov
-    from epictrace.config import AppConfig
-    from epictrace.asr.provisioner import AsrProvisioner
+    from epictrace.asr.provisioner import MlxOneshotProvisioner
 
-    config = getattr(request.app.state, "config", None) or AppConfig()
-    prov = AsrProvisioner(cache_dir=config.asr_model_dir)
+    prov = MlxOneshotProvisioner()
     request.app.state.asr_provisioner = prov
     return prov
 

@@ -25,6 +25,110 @@ _DISTIL_REPO = {
 }
 
 
+# mlx 一次性转写模型(完整 large-v3)。决策 2026-06-18:转写只走停录后的一次性 mlx;
+# 录制门(start_session)据此判就绪——模型在则放行,缺则 409(不静默自动下 ~3GB)。
+MLX_ONESHOT_REPO = "mlx-community/whisper-large-v3-mlx"
+
+
+def mlx_model_ready(repo: str = MLX_ONESHOT_REPO) -> bool:
+    """mlx 转写模型是否**真**就绪:Apple Silicon + mlx_whisper 已装 + HF 缓存里有**含真权重**的快照
+    (不触发自动下载)。供 start_session 录制门 + 设置页状态用(纯文件探测,可被测试 monkeypatch)。
+
+    **关键**:不只看 snapshots 目录非空——残缺/中断下载会留下只含 config 的快照,真权重还是
+    blobs 里的 *.incomplete。须命中 config.json + 真权重(weights.npz 或 *.safetensors,跟随 symlink
+    非缺失)才算就绪;否则一次性转写时会触发自动下载或直接崩(对齐旧 detect_asr_model 的「有真权重」保证)。"""
+    import importlib.util
+    import platform
+    import sys as _sys
+
+    if platform.machine() != "arm64" or _sys.platform != "darwin":
+        return False
+    if importlib.util.find_spec("mlx_whisper") is None:
+        return False
+    flat = "models--" + repo.replace("/", "--")
+    return _snapshot_has_weights(_DEFAULT_HF_CACHE_DIR / flat / "snapshots")
+
+
+def _is_real_file(p: Path) -> bool:
+    """真·非空常规文件。**跟随符号链接**——HF 缓存 snapshots/ 里的文件都是指向 blobs/ 的软链,
+    必须解析到目标才算数;断链(中断下载的 *.incomplete 占位)、目录、空文件(0 字节占位)都不算。"""
+    try:
+        return p.is_file() and p.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _snapshot_has_weights(snaps: Path) -> bool:
+    """HF 缓存 snapshots/ 下是否有**含真权重**的快照:config.json + (weights.npz 或 *.safetensors)。
+    纯文件系统探测,**与平台无关**(故可在任意 CI 直测,不被 mlx_model_ready 的 arm64/mlx 门挡掉)。
+    残缺/中断下载只留 config(权重还在 blobs 的 *.incomplete,snapshots 里是断链)→ 不算就绪;
+    用 _is_real_file 而非 .exists()/glob,挡掉断链/目录/0 字节占位的假就绪。"""
+    try:
+        if not snaps.is_dir():
+            return False
+        for snap in snaps.iterdir():
+            if not _is_real_file(snap / "config.json"):
+                continue
+            if _is_real_file(snap / "weights.npz") or \
+                    any(_is_real_file(p) for p in snap.glob("*.safetensors")):
+                return True
+        return False
+    except OSError:
+        return False
+
+
+class MlxOneshotProvisioner:
+    """一次性转写模型(mlx 完整 large-v3)的就绪检测 + 下载。架构转单遍 mlx 后,设置页「ASR 模型
+    状态/下载」与录制门状态都走它(取代 faster-whisper 的 AsrProvisioner)。is_ready 忽略传入的
+    faster-whisper 风格 model 名,只认 mlx 完整 v3。接口对齐 AsrProvisioner 供 _asr_status 复用。"""
+
+    def __init__(self, repo: str = MLX_ONESHOT_REPO) -> None:
+        self._repo = repo
+        self._downloading = False
+        self._failed = False
+        self.last_error: str | None = None
+        self._lock = threading.Lock()
+
+    def is_ready(self, model: str | None = None) -> bool:
+        return mlx_model_ready(self._repo)
+
+    @property
+    def state(self) -> str:
+        if self._downloading:
+            return "downloading"
+        if self.is_ready():
+            return "ready"
+        if self._failed:
+            return "failed"
+        return "not_downloaded"
+
+    def download_model(self, model: str | None = None, *, progress_cb: ProgressCb | None = None) -> str:
+        """下载 mlx 完整 v3 到 HF 缓存(huggingface_hub.snapshot_download)。下载中重复调 no-op;
+        已就绪直接回 ready。失败置 failed + last_error 再上抛(后台触发线程捕获)。"""
+        with self._lock:
+            if self._downloading:
+                return self.state
+            if self.is_ready():
+                return "ready"
+            self._downloading = True
+            self._failed = False
+            self.last_error = None
+        try:
+            from huggingface_hub import snapshot_download
+            if progress_cb is not None:
+                progress_cb(f"下载 {self._repo} …")
+            snapshot_download(self._repo)
+        except Exception as e:  # noqa: BLE001 — 任何失败落 failed + last_error 再上抛
+            with self._lock:
+                self._downloading = False
+                self._failed = True
+                self.last_error = str(e)
+            raise
+        with self._lock:
+            self._downloading = False
+        return self.state
+
+
 def _repo_glob(model: str) -> str:
     """返回该模型在 HF 缓存里期望的目录名 glob(models--<owner>--<repo>)。"""
     repo = _DISTIL_REPO.get(model)
@@ -68,6 +172,13 @@ def _default_download_runner(model: str, cache_dir: Path, progress_cb: ProgressC
     测试也可注入假 runner 完全绕开真下载。
     """
     from faster_whisper import WhisperModel  # 懒加载:未装也不影响模块导入
+
+    # 消除 tqdm 惰性创建的 multiprocessing 信号量(退出期 leaked semaphore 告警源,见 worker._build_engine)。
+    try:
+        from tqdm.std import TqdmDefaultWriteLock
+        TqdmDefaultWriteLock.mp_lock = None
+    except Exception:  # noqa: BLE001
+        pass
 
     progress_cb("正在下载模型(首次较久)…")
     WhisperModel(model, download_root=str(cache_dir))

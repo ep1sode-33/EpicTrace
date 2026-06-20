@@ -28,6 +28,14 @@ dependencies = [
   "faster-whisper",
   "sounddevice",
   "soundfile",
+  # 把 48k 录音降采样到 16k 喂 Whisper(retranscribe._to_asr_16k 多相重采样,带抗混叠)。
+  "scipy",
+  # 繁体→简体规整(large-v3+zh 常吐繁体):OpenCC t2s,在 ASR 子进程产文本处后处理(asr/text_normalize)。
+  "opencc",
+  # mlx-whisper:Apple GPU(MLX)上跑完整 large-v3——CTranslate2/faster-whisper 在 Mac 上无
+  # Metal 后端只能 CPU,故会话停止时的整文件重转(asr/retranscribe + asr/mlx_engine)用 mlx。
+  # 仅 Apple Silicon 装(mlx 是 arm64-only);Intel/其它平台不装、退回 faster-whisper。
+  'mlx-whisper; platform_machine == "arm64" and sys_platform == "darwin"',
   # 注:MinerU 不进核心环境(几 GB)。它由 MinerUProvisioner 用 uv 装进
   # <data_dir>/.MinerU-venv,运行期子进程调用(见 epictrace/media/mineru*.py)。
 ]

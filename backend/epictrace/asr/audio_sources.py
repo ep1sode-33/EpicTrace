@@ -9,7 +9,8 @@ import numpy as np
 
 _log = logging.getLogger("epictrace")
 
-SAMPLE_RATE = 16000  # 全管线统一 16kHz mono float32(Whisper 期望)
+SAMPLE_RATE = 16000  # Whisper 的输入采样率(一次性转写前把录音降采样到它)
+RECORD_SAMPLE_RATE = 48000  # 录音(mic/内录)采样率:48kHz 全频宽,修掉 16k 的 AM 电台音质
 _CHANNELS = 1
 _PCM_DTYPE = np.float32
 
@@ -107,11 +108,16 @@ class RingBuffer:
 
 
 class _SourceBase:
-    """音源公共接口:start/stop + read()(全量 16k mono float32)+ pending_seconds()。
-    子类在 push 前做 RMS 归一化(可关)。真采集 = 真机手测。"""
+    """音源公共接口:start/stop + read()(全量 mono float32,采样率见 sample_rate)+ pending_seconds()。
+    子类在 push 前做 RMS 归一化(可关;录音应关,见 worker)。真采集 = 真机手测。
 
-    def __init__(self, *, rms_normalize_enabled: bool = True) -> None:
-        self._rb = RingBuffer()
+    sample_rate:本源的采样率。决策(2026-06-20):录音用 **48kHz**(全频宽,修掉 16k 那种 AM 电台音质);
+    停录后的一次性转写再把 wav 降采样到 16k 喂 Whisper(见 retranscribe)。"""
+
+    def __init__(self, *, rms_normalize_enabled: bool = True,
+                 sample_rate: int = SAMPLE_RATE) -> None:
+        self.sample_rate = sample_rate
+        self._rb = RingBuffer(sample_rate=sample_rate)
         self._rms = rms_normalize_enabled
         self._stop = threading.Event()
         # 最近 emit 帧的 RAW(归一化前)RMS:供诊断暴露弱麦——读 ring buffer 拿的是归一化后
@@ -152,13 +158,15 @@ class _SourceBase:
 
 
 class MicSource(_SourceBase):
-    """麦克风(采集):sounddevice 16kHz mono 输入流 + watchdog(样本不增长判失败重启一次)。
+    """麦克风(采集):sounddevice 48kHz(RECORD_SAMPLE_RATE)mono 输入流 + watchdog(样本不增长判失败重启一次)。
+    录音落 wav 用原生 48k 作事实来源;喂 Whisper 前再由 retranscribe 降采样到 16k。
 
     sounddevice 在源 start() 时懒导入(避免测试套件硬依赖 PortAudio)。真采集手测。
     """
 
     def __init__(self, *, device=None, rms_normalize_enabled: bool = True) -> None:
-        super().__init__(rms_normalize_enabled=rms_normalize_enabled)
+        super().__init__(rms_normalize_enabled=rms_normalize_enabled,
+                         sample_rate=RECORD_SAMPLE_RATE)
         self._device = device
         self._stream = None
         self._wd_thread: threading.Thread | None = None
@@ -173,7 +181,7 @@ class MicSource(_SourceBase):
             self._emit(np.asarray(indata[:, 0], dtype=_PCM_DTYPE))
 
         self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=_CHANNELS, dtype="float32",
+            samplerate=self.sample_rate, channels=_CHANNELS, dtype="float32",
             device=self._device, callback=_cb,
         )
         self._stream.start()
@@ -213,15 +221,16 @@ def _is_permission_denied_line(line: str) -> bool:
 
 
 class SystemAudioSource(_SourceBase):
-    """macOS 系统声音(采集):Popen 原生 helper 二进制,从其 stdout 读裸 PCM(16k mono float32 le)。
+    """macOS 系统声音(采集):Popen 原生 helper 二进制,从其 stdout 读裸 PCM(48k mono float32 le)。
 
-    helper 自己用 Core Audio process tap → 重采样到 16k mono(见 shell/native helper,Task 12)。
+    helper 用 Core Audio process tap → stereo 混 mono、输出 **48kHz**(全频宽,见 shell/native helper)。
     读 stdout 的线程在 start() 起;另起一守护线程逐行抽干 stderr(防管道填满阻塞 helper),
     遇 PERMISSION_DENIED 行置 permission_denied 标志供 worker 读取。真采集 + 权限 = 真机手测。
     """
 
     def __init__(self, helper_bin: str, *, rms_normalize_enabled: bool = True) -> None:
-        super().__init__(rms_normalize_enabled=rms_normalize_enabled)
+        super().__init__(rms_normalize_enabled=rms_normalize_enabled,
+                         sample_rate=RECORD_SAMPLE_RATE)
         self._bin = helper_bin
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
@@ -254,8 +263,8 @@ class SystemAudioSource(_SourceBase):
 
     def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
-        # 每次读约 0.1s 的 float32 PCM(16000 * 0.1 * 4 字节);凑成整 float 帧再 push。
-        chunk_bytes = int(SAMPLE_RATE * 0.1) * 4
+        # 每次读约 0.1s 的 float32 PCM(sample_rate * 0.1 * 4 字节);凑成整 float 帧再 push。
+        chunk_bytes = int(self.sample_rate * 0.1) * 4
         while not self._stop.is_set():
             raw = self._proc.stdout.read(chunk_bytes)
             if not raw:

@@ -40,12 +40,30 @@ function gapSeconds(aTs: string, bTs: string): number {
   return Math.abs(b - a) / 1000;
 }
 
+/** CJK 字符(含中日韩标点/假名/全角):判断衔接处是否中文,决定拼接时是否插空格。 */
+const CJK = /[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]/;
+
+/**
+ * 拼接同段落的相邻转写片段:中文片段**直连**(中文本无词间空格,用空格连接会把连贯中文切成
+ * 「一坨」碎片——这正是症状来源);仅当衔接处两侧**都不是 CJK**(至少一侧英文/数字)时插一个
+ * 空格,避免英文单词黏连(hello world 不变 helloworld)。空片段跳过。
+ */
+function joinSegments(texts: string[]): string {
+  let out = "";
+  for (const t of texts) {
+    if (!t) continue;
+    if (out && !CJK.test(out[out.length - 1]) && !CJK.test(t[0])) out += " ";
+    out += t;
+  }
+  return out;
+}
+
 /**
  * 把按时间排好的事件列表合并成时间线条目(FIX 2):
  * 连续、同 meta.source、且相邻间隔 ≤30s 的 transcription 事件合成一段段落;
  * 来源切换 / 出现非转写事件 / 间隔过大都断段。非转写事件原样透传。
  *
- * 纯函数,不改入参;中文转写用空格连接(可读、不黏连;空 payload 跳过)。
+ * 纯函数,不改入参;中文片段直连、CJK/ASCII 边界补空格(joinSegments;空 payload 跳过)。
  */
 export function groupTimelineItems(events: CaptureEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
@@ -59,7 +77,7 @@ export function groupTimelineItems(events: CaptureEvent[]): TimelineItem[] {
       items.push({
         kind: "transcription",
         source: cur.source,
-        text: cur.texts.join(" "),
+        text: joinSegments(cur.texts),
         start_ts: cur.start_ts,
         end_ts: cur.end_ts,
         ids: cur.ids,

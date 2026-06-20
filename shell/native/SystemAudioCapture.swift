@@ -1,8 +1,9 @@
 // macOS 系统内录 helper:用 Core Audio process tap(macOS 14.2+)捕获全系统输出音频,
-// 重采样到 16kHz mono Float32,把裸 PCM(小端 float32 帧)写到 stdout。
+// 输出 48kHz mono Float32(全频宽,修掉 16k 的 AM 电台音质;停录后转写再降采样到 16k),把裸 PCM
+// (小端 float32 帧)写到 stdout。
 //
 // 用法:作为独立命令行二进制运行(无参数),Python 侧 Popen 它、从 stdout 读 PCM。
-//   - stdout = 裸 PCM 流(little-endian Float32,16000Hz,单声道)——与 SystemAudioSource 的契约一致。
+//   - stdout = 裸 PCM 流(little-endian Float32,48000Hz,单声道)——与 SystemAudioSource 的契约一致。
 //   - stderr = 诊断日志 + 权限启发式信号 `PERMISSION_DENIED`。
 //
 // 关键 macOS 坑(均已处理,详见各处注释):
@@ -50,7 +51,7 @@ enum CaptureError: Error, CustomStringConvertible {
 
 // MARK: - 输出常量(契约:与 Python SystemAudioSource 对齐)
 
-private let kTargetSampleRate: Double = 16000  // 16kHz
+private let kTargetSampleRate: Double = 48000  // 48kHz(全频宽;转写前再降到 16k)
 private let kTargetChannels: UInt32 = 1         // mono
 // 输出格式 = little-endian Float32 帧。Apple Silicon / Intel 均为小端,
 // AVAudioPCMBuffer 的 floatChannelData 即为主机字节序的 Float32 → 直接写 stdout。
@@ -65,7 +66,7 @@ final class SystemAudioCapturer {
 
     private let processingQueue = DispatchQueue(label: "epictrace.sysaudio.io", qos: .userInitiated)
 
-    // 重采样:手动 stereo→mono 后,AVAudioConverter 把源率→16kHz。
+    // 重采样:手动 stereo→mono 后,AVAudioConverter 把源率→48kHz。
     private var audioConverter: AVAudioConverter?
     private var monoSourceFormat: AVAudioFormat?
     private var monoTargetFormat: AVAudioFormat?
@@ -280,9 +281,9 @@ final class SystemAudioCapturer {
         } else {
             actualSourceRate = tapRate
         }
-        logErr("[sysaudio] source rate=\(actualSourceRate)Hz, channels=\(sourceChannels), nonInterleaved=\(isNonInterleaved) → target 16kHz mono")
+        logErr("[sysaudio] source rate=\(actualSourceRate)Hz, channels=\(sourceChannels), nonInterleaved=\(isNonInterleaved) → target 48kHz mono")
 
-        // 建 AVAudioConverter:源(actualSourceRate, mono) → 目标(16kHz, mono)。
+        // 建 AVAudioConverter:源(actualSourceRate, mono) → 目标(48kHz, mono)。
         // stereo→mono 在 IO 回调里手动做,converter 只负责重采样。
         guard let srcFmt = AVAudioFormat(
             commonFormat: .pcmFormatFloat32, sampleRate: actualSourceRate,
@@ -319,7 +320,7 @@ final class SystemAudioCapturer {
         guard startErr == noErr else { throw CaptureError.deviceStartFailed(startErr) }
     }
 
-    /// IO 回调:stereo→mono 混音 → AVAudioConverter 重采样到 16kHz → 写 stdout。
+    /// IO 回调:stereo→mono 混音 → AVAudioConverter 重采样到 48kHz → 写 stdout。
     private func processAudioInput(
         _ inInputData: UnsafePointer<AudioBufferList>,
         sourceRate: Double,
@@ -380,9 +381,11 @@ final class SystemAudioCapturer {
             mono = [Float](UnsafeBufferPointer(start: ptr0, count: frameCount))
         }
 
-        // --- 重采样到 16kHz ---
+        // --- 采样率对齐到 48kHz ---
+        // 仅当源恰为 48kHz 时直通(无损);否则(44.1k/96k 等)走 converter 重采样到 48k,
+        // 保证 stdout 永远是 48kHz——否则 Python 侧按 48k 解释非 48k 流会变速。
         let samples: [Float]
-        if sourceRate <= kTargetSampleRate {
+        if sourceRate == kTargetSampleRate {
             samples = mono
         } else {
             guard let converter = audioConverter,

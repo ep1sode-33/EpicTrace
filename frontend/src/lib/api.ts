@@ -61,6 +61,8 @@ export interface AsrSettings {
   language: string;
   vad: boolean;
   vad_threshold: number;
+  /** VAD 最短语音块时长(ms);减少近静音幻觉。 */
+  vad_min_speech_ms: number;
   no_speech: number;
   log_prob: number;
   compression_ratio: number;
@@ -97,7 +99,12 @@ export type CaptureEvent = { id: number; kind: string; ts: string; payload: stri
 /** 实时暂定段(ASR partial)快照:source("mic"|"device") -> 暂定文本。不落库。 */
 export type CapturePartial = Record<string, string>;
 export type CaptureSession = { id: number; title: string; status: string; started_at: string; ended_at: string | null; sources: string[]; staging_dir: string };
-export type CaptureSessionDetail = CaptureSession & { events: CaptureEvent[]; elapsed_seconds: number };
+export type CaptureSessionDetail = CaptureSession & {
+  events: CaptureEvent[];
+  elapsed_seconds: number;
+  /** 会话停止后正在整文件重转(权威转录尚未到达);暂存区据此显示「重新转写中…」并轮询。 */
+  retranscribing?: boolean;
+};
 
 /** sendMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
 export interface StreamHandlers {
@@ -251,15 +258,17 @@ export const api = {
   getSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}`).then(j<CaptureSessionDetail>),
   // 实时暂定段快照(内存态,不落库)。HUD 在现有轮询里与 getSession 一起拉,渲染为「暂定」行。
   getSessionPartial: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}/partial`).then(j<CapturePartial>),
-  // 软静音集(内存态):被静音的音频源 id 列表("mic"/"system_audio")。worker 周期性轮询同一接口。
-  getAsrMute: (sid: number) =>
-    fetch(`${BASE}/api/capture/sessions/${sid}/asr-mute`).then(j<{ muted: string[] }>),
-  // 软静音切换某路音频源(不重启 worker):204,无 body。
-  setAsrMute: (sid: number, source: string, muted: boolean) =>
-    fetch(`${BASE}/api/capture/sessions/${sid}/asr-mute`, {
+  // 期望开启音源集(内存态):当前开启的音频源 id 列表("mic"/"system_audio")。worker 周期性轮询同一接口。
+  getAsrSources: (sid: number) =>
+    fetch(`${BASE}/api/capture/sessions/${sid}/asr-source`).then(j<{ enabled: string[] }>),
+  // 启停某路音频源(真启停采集,中途也能开开始没勾的源):204,无 body。模型未就绪时启用会 409。
+  setAsrSource: (sid: number, source: string, enabled: boolean) =>
+    fetch(`${BASE}/api/capture/sessions/${sid}/asr-source`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, muted }),
-    }).then(() => {}),
+      body: JSON.stringify({ source, enabled }),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`${r.status}`);
+    }),
   appendEvent: (sid: number, kind: string, payload = "") =>
     fetch(`${BASE}/api/capture/sessions/${sid}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, payload }) }).then(j<CaptureEvent>),
   pauseSession: (sid: number) => fetch(`${BASE}/api/capture/sessions/${sid}/pause`, { method: "POST" }).then(() => {}),

@@ -8,19 +8,29 @@ from epictrace.db import Database
 
 
 class _Sup:
-    """假 supervisor:记录调用,不起任何真子进程。"""
+    """假 supervisor:记录调用,不起任何真子进程。is_running 据 start/stop 跟踪在跑集。"""
 
     def __init__(self):
         self.started = []
         self.stopped = []
         self.paused = []
         self.resumed = []
+        self.retranscribed = []
+        self._running: set[int] = set()
+
+    def retranscribe(self, sid, staging, *, config=None, model=None):
+        self.retranscribed.append({"sid": sid, "staging": staging, "config": config})
 
     def start(self, **kw):
         self.started.append(kw)
+        self._running.add(kw["session_id"])
 
     def stop(self, sid):
         self.stopped.append(sid)
+        self._running.discard(sid)
+
+    def is_running(self, sid):
+        return sid in self._running
 
     def pause(self, sid):
         self.paused.append(sid)
@@ -182,7 +192,8 @@ def _client_with_prov(tmp_path, sup, prov):
 
 
 def test_audio_session_blocked_when_model_not_ready(tmp_path):
-    """FIX 1:选了 mic 但模型未就绪 → 409,session 不建,supervisor.start 不调。"""
+    """选了 mic 但模型未就绪 → 409,session 不建,supervisor.start 不调。门经 provisioner.is_ready
+    (= 注入的假件可控,与设置页同一实例;真件 MlxOneshotProvisioner 检 mlx 完整 v3)。"""
     sup = _Sup()
     prov = _FakeProvisioner(ready=False)
     c = _client_with_prov(tmp_path, sup, prov)
@@ -194,7 +205,7 @@ def test_audio_session_blocked_when_model_not_ready(tmp_path):
 
 
 def test_system_audio_session_blocked_when_model_not_ready(tmp_path):
-    """FIX 1:system_audio 同样受门控。"""
+    """system_audio 同样受门控(经 provisioner)。"""
     sup = _Sup()
     prov = _FakeProvisioner(ready=False)
     c = _client_with_prov(tmp_path, sup, prov)
@@ -223,44 +234,117 @@ def test_non_audio_session_not_gated_when_model_absent(tmp_path):
     assert prov.asked == []                        # 非音频源根本不查就绪态
 
 
-def test_asr_mute_post_then_get(tmp_path):
-    """Feature B:POST asr-mute 软静音一路 → GET 返回该 session 的 muted 列表。"""
+class _FakeProc:
+    """假 worker 句柄:poll() 返回 None = 在跑(供真 AsrSupervisor.is_running)。"""
+
+    def terminate(self): ...
+    def kill(self): ...
+    def wait(self, timeout=None):
+        return 0
+    def poll(self):
+        return None
+
+
+def _client_real_sup(tmp_path: Path, sup):
+    """注入**真** AsrSupervisor(spawn 假件)+ 就绪 provisioner,用于测懒启动 / is_running 逻辑。"""
+    db = Database(AppConfig(data_dir=tmp_path))
+    db.create_all()
+    app = create_app(db=db)
+    app.state.asr_supervisor = sup
+    app.state.asr_provisioner = _ReadyProvisioner()
+    return TestClient(app)
+
+
+def test_asr_enabled_initialized_from_audio_sources(tmp_path):
+    """起 session 时「期望开启集」= 选中的音频源(非音频源不计)。"""
     sup = _Sup()
     c = _client(tmp_path, sup)
     sid = c.post("/api/capture/sessions",
-                 json={"sources": ["mic", "system_audio"]}).json()["id"]
-    # 初始无静音。
-    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": []}
-    # 静音 system_audio → 204 + GET 反映。
-    r = c.post(f"/api/capture/sessions/{sid}/asr-mute",
-               json={"source": "system_audio", "muted": True})
-    assert r.status_code == 204
-    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": ["system_audio"]}
+                 json={"sources": ["mic", "note"]}).json()["id"]
+    assert c.get(f"/api/capture/sessions/{sid}/asr-source").json() == {"enabled": ["mic"]}
 
 
-def test_asr_mute_then_unmute_clears(tmp_path):
-    """Feature B:静音后取消静音 → muted 列表清空(不残留)。重复静音不重复入列。"""
-    sup = _Sup()
-    c = _client(tmp_path, sup)
-    sid = c.post("/api/capture/sessions",
-                 json={"sources": ["mic", "system_audio"]}).json()["id"]
-    c.post(f"/api/capture/sessions/{sid}/asr-mute", json={"source": "mic", "muted": True})
-    # 重复静音同源:幂等,不出现两次。
-    c.post(f"/api/capture/sessions/{sid}/asr-mute", json={"source": "mic", "muted": True})
-    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": ["mic"]}
-    # 取消静音 → 清空。
-    c.post(f"/api/capture/sessions/{sid}/asr-mute", json={"source": "mic", "muted": False})
-    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": []}
-
-
-def test_asr_mute_cleared_on_stop(tmp_path):
-    """Feature B:停止 session 清掉其 muted 条目(下次同 id 不串状态)。"""
+def test_asr_source_enable_then_disable(tmp_path):
+    """启停某路:GET 反映期望开启集;关闭移除;空集不残留;重复启用幂等。"""
     sup = _Sup()
     c = _client(tmp_path, sup)
     sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
-    c.post(f"/api/capture/sessions/{sid}/asr-mute", json={"source": "mic", "muted": True})
+    # 中途加开 system_audio(开始没勾)→ 204 + GET 反映。
+    r = c.post(f"/api/capture/sessions/{sid}/asr-source",
+               json={"source": "system_audio", "enabled": True})
+    assert r.status_code == 204
+    assert c.get(f"/api/capture/sessions/{sid}/asr-source").json() == {
+        "enabled": ["mic", "system_audio"]}
+    # 重复启用同源:幂等。
+    c.post(f"/api/capture/sessions/{sid}/asr-source",
+           json={"source": "system_audio", "enabled": True})
+    assert c.get(f"/api/capture/sessions/{sid}/asr-source").json() == {
+        "enabled": ["mic", "system_audio"]}
+    # 关闭 mic → 移除。
+    c.post(f"/api/capture/sessions/{sid}/asr-source", json={"source": "mic", "enabled": False})
+    assert c.get(f"/api/capture/sessions/{sid}/asr-source").json() == {"enabled": ["system_audio"]}
+
+
+def test_asr_source_enable_blocked_when_model_not_ready(tmp_path):
+    """启用音源需模型就绪(同 start_session 门控,经 provisioner):未就绪 → 409,期望集不变。"""
+    sup = _Sup()
+    prov = _FakeProvisioner(ready=False)
+    c = _client_with_prov(tmp_path, sup, prov)
+    # 起无音频源的 session(不受门控)。
+    sid = c.post("/api/capture/sessions", json={"sources": ["note"]}).json()["id"]
+    r = c.post(f"/api/capture/sessions/{sid}/asr-source", json={"source": "mic", "enabled": True})
+    assert r.status_code == 409
+    assert c.get(f"/api/capture/sessions/{sid}/asr-source").json() == {"enabled": []}
+
+
+def test_asr_source_unknown_source_400(tmp_path):
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
+    r = c.post(f"/api/capture/sessions/{sid}/asr-source", json={"source": "bogus", "enabled": True})
+    assert r.status_code == 400
+
+
+def test_asr_source_cleared_on_stop(tmp_path):
+    """停止 session 清掉其期望开启集(下次同 id 不串状态)。"""
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
     c.post(f"/api/capture/sessions/{sid}/stop")
-    assert c.get(f"/api/capture/sessions/{sid}/asr-mute").json() == {"muted": []}
+    assert c.get(f"/api/capture/sessions/{sid}/asr-source").json() == {"enabled": []}
+
+
+def test_asr_source_enable_lazy_starts_worker_when_not_running(tmp_path):
+    """中途开音源:worker 没在跑(起 session 时没勾音频源)→ 懒启动 worker(带当前期望集)。"""
+    from epictrace.asr.supervisor import AsrSupervisor
+
+    spawned = []
+    sup = AsrSupervisor(spawn=lambda argv: spawned.append(argv) or _FakeProc())
+    c = _client_real_sup(tmp_path, sup)
+    # 起无音频源的 session → 不起 worker。
+    sid = c.post("/api/capture/sessions", json={"sources": ["note"]}).json()["id"]
+    assert spawned == [] and sup.is_running(sid) is False
+    # 中途开 mic → 懒启动 worker。
+    r = c.post(f"/api/capture/sessions/{sid}/asr-source", json={"source": "mic", "enabled": True})
+    assert r.status_code == 204
+    assert len(spawned) == 1 and "mic" in spawned[0]
+    assert sup.is_running(sid) is True
+
+
+def test_asr_source_enable_no_restart_when_worker_running(tmp_path):
+    """中途加开第二路:worker 已在跑 → 不重启(worker 自行轮询 reconcile 出新源)。"""
+    from epictrace.asr.supervisor import AsrSupervisor
+
+    spawned = []
+    sup = AsrSupervisor(spawn=lambda argv: spawned.append(argv) or _FakeProc())
+    c = _client_real_sup(tmp_path, sup)
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
+    assert len(spawned) == 1                      # 起 session 时已起 worker
+    c.post(f"/api/capture/sessions/{sid}/asr-source",
+           json={"source": "system_audio", "enabled": True})
+    assert len(spawned) == 1                      # 没有第二次 spawn(worker 自行 reconcile)
+    assert c.get(f"/api/capture/sessions/{sid}/asr-source").json() == {
+        "enabled": ["mic", "system_audio"]}
 
 
 def test_start_supervisor_error_does_not_block_session(tmp_path):
@@ -275,3 +359,127 @@ def test_start_supervisor_error_does_not_block_session(tmp_path):
     r = c.post("/api/capture/sessions", json={"sources": ["mic"]})
     # supervisor.start 抛错也不挡 session 创建(降级:其余源/事件照常)。
     assert r.status_code == 201
+
+
+# ---- C:停止时整文件重转 → 替换转录事件 ----
+
+
+def test_replace_transcript_replaces_only_transcription_events(tmp_path):
+    """POST /transcript:删旧 transcription 事件 + 插权威段(meta.authoritative);其它事件(note)不动。"""
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
+    # 录制中先落几条流式转录 + 一条 note。
+    c.post(f"/api/capture/sessions/{sid}/events",
+           json={"kind": "transcription", "payload": "流式错字", "meta": {"source": "mic"}})
+    c.post(f"/api/capture/sessions/{sid}/events", json={"kind": "note", "payload": "我的笔记"})
+    c.post(f"/api/capture/sessions/{sid}/stop")
+    # 权威重转回写。
+    r = c.post(f"/api/capture/sessions/{sid}/transcript", json={"segments": [
+        {"source": "mic", "text": "权威转录第一段", "start": 0.0, "end": 2.0, "audio_offset": 0.0,
+         "words": [{"w": "权威", "s": 0.0, "e": 0.5}], "wav": "audio-mic-1.wav"},
+        {"source": "mic", "text": "权威转录第二段", "start": 2.0, "end": 4.0, "audio_offset": 2.0},
+    ]})
+    assert r.status_code == 204
+    events = c.get(f"/api/capture/sessions/{sid}").json()["events"]
+    trans = [e for e in events if e["kind"] == "transcription"]
+    notes = [e for e in events if e["kind"] == "note"]
+    assert [e["payload"] for e in trans] == ["权威转录第一段", "权威转录第二段"]  # 流式被替换
+    assert all(e["meta"].get("authoritative") for e in trans)
+    assert notes and notes[0]["payload"] == "我的笔记"                          # note 不动
+
+
+def test_replace_transcript_clears_retranscribing_flag(tmp_path):
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
+    c.post(f"/api/capture/sessions/{sid}/stop")
+    # 手动置重转标志(模拟 stop 已起重转),再回写 /transcript 应清除它。
+    c.app.state.asr_retranscribing.add(sid)
+    assert c.get(f"/api/capture/sessions/{sid}").json()["retranscribing"] is True
+    c.post(f"/api/capture/sessions/{sid}/transcript", json={"segments": []})
+    assert c.get(f"/api/capture/sessions/{sid}").json()["retranscribing"] is False
+
+
+def test_stop_spawns_retranscribe_when_audio_present(tmp_path):
+    """有 audio-*.wav → stop 触发 retranscribe + 置 retranscribing 标志。"""
+    from pathlib import Path
+
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
+    staging = c.get(f"/api/capture/sessions/{sid}").json()["staging_dir"]
+    Path(staging, "audio-mic-1.wav").write_bytes(b"")  # 占位:_start_retranscribe 只 glob 存在性
+    c.post(f"/api/capture/sessions/{sid}/stop")
+    assert sup.retranscribed and sup.retranscribed[0]["sid"] == sid
+    assert c.get(f"/api/capture/sessions/{sid}").json()["retranscribing"] is True
+
+
+def test_stop_no_retranscribe_without_audio(tmp_path):
+    """无 audio wav → stop 不触发 retranscribe(不白起 mlx)。"""
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions", json={"sources": ["note"]}).json()["id"]
+    c.post(f"/api/capture/sessions/{sid}/stop")
+    assert sup.retranscribed == []
+    assert c.get(f"/api/capture/sessions/{sid}").json()["retranscribing"] is False
+
+
+def test_organize_blocked_while_retranscribing(tmp_path):
+    """单遍架构:权威转录(停录后一次性)还在跑时入库会落空转录 → organize 返回 409。"""
+    (tmp_path / "proj").mkdir()
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    pid = c.post("/api/projects", json={"title": "P", "folder_path": str(tmp_path / "proj")}).json()["id"]
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic"]}).json()["id"]
+    c.post(f"/api/capture/sessions/{sid}/stop")
+    c.app.state.asr_retranscribing.add(sid)
+    r = c.post(f"/api/capture/sessions/{sid}/organize", json={"project_id": pid})
+    assert r.status_code == 409 and "权威转录" in r.json()["detail"]
+
+
+def test_retranscribe_watcher_clears_flag_when_child_exits_without_writing(tmp_path):
+    """看护:重转子进程退出但没回写 /transcript(失败)→ 清 asr_retranscribing,避免 organize 被永久挡死。"""
+    import time as _t
+    import types
+
+    from epictrace.api.routers.capture import _watch_retranscribe
+    c = _client(tmp_path, _Sup())
+
+    class _Proc:
+        def wait(self):
+            return 1  # 立即退出,模拟失败(未 POST /transcript)
+
+    sid = 999
+    c.app.state.asr_retranscribing.add(sid)
+    req = types.SimpleNamespace(app=types.SimpleNamespace(state=c.app.state))
+    _watch_retranscribe(req, sid, _Proc())
+    for _ in range(100):
+        if sid not in c.app.state.asr_retranscribing:
+            break
+        _t.sleep(0.02)
+    assert sid not in c.app.state.asr_retranscribing
+
+
+def test_source_events_recorded_on_start_toggle_stop(tmp_path):
+    """时间线:开局/中途开关/停录都记录音源 start/stop 事件(kind=source,meta={source,action})。"""
+    sup = _Sup()
+    c = _client(tmp_path, sup)
+    sid = c.post("/api/capture/sessions", json={"sources": ["mic", "system_audio"]}).json()["id"]
+    # 开局:两个音源各一条 start,按 sources 顺序(事件按 ts 升序,无重复)。
+    evs = c.get(f"/api/capture/sessions/{sid}").json()["events"]
+    start = [(e["meta"]["source"], e["meta"]["action"]) for e in evs if e["kind"] == "source"]
+    assert start == [("mic", "start"), ("system_audio", "start")]
+    # 中途关 system_audio → 一条 stop。
+    c.post(f"/api/capture/sessions/{sid}/asr-source", json={"source": "system_audio", "enabled": False})
+    # 停录 → 仍活跃的 mic 记 stop。
+    c.post(f"/api/capture/sessions/{sid}/stop")
+    evs = c.get(f"/api/capture/sessions/{sid}").json()["events"]
+    src = [(e["meta"]["source"], e["meta"]["action"]) for e in evs if e["kind"] == "source"]
+    # 断言**精确有序全序列**(顺序 + 无重复):开局两条 start → 中途关 → 停录关。
+    assert src == [
+        ("mic", "start"),
+        ("system_audio", "start"),
+        ("system_audio", "stop"),   # 中途关
+        ("mic", "stop"),            # 停录时关
+    ]

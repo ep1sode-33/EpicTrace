@@ -139,6 +139,57 @@ def test_stop_graceful_no_kill():
     assert "kill" not in events
 
 
+def test_is_running_reflects_proc_state():
+    """动态音源懒启动判定:没起过 = 不在跑;起了 = 在跑;进程自退(poll 非 None)= 不在跑。"""
+    class _P:
+        def __init__(self):
+            self.dead = False
+
+        def terminate(self):
+            self.dead = True
+
+        def kill(self):
+            self.dead = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0 if self.dead else None
+
+    procs = []
+    sup = AsrSupervisor(spawn=lambda argv: procs.append(_P()) or procs[-1])
+    assert sup.is_running(3) is False            # 没起过
+    sup.start(session_id=3, sources=["mic"], staging_dir="/tmp/3")
+    assert sup.is_running(3) is True             # 起了
+    procs[0].dead = True                         # 模拟 worker 自退(全关空闲超时)
+    assert sup.is_running(3) is False            # poll 非 None → 不在跑
+    # 自退后 stop 也不报错(entry 仍在,terminate 死进程无害)。
+    sup.stop(3)
+    assert sup.is_running(3) is False
+
+
+def test_is_running_false_after_stop():
+    class _P:
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return None
+
+    sup = AsrSupervisor(spawn=lambda argv: _P())
+    sup.start(session_id=4, sources=["mic"], staging_dir="/tmp/4")
+    assert sup.is_running(4) is True
+    sup.stop(4)
+    assert sup.is_running(4) is False            # entry 已 pop
+
+
 def test_pause_resume_restarts_worker():
     events = []
 

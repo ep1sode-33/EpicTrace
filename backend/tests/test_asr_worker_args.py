@@ -72,6 +72,8 @@ def test_worker_main_fails_fast_when_model_absent(tmp_path, monkeypatch):
 
     monkeypatch.setattr(worker, "_build_engine", _boom_engine)
     monkeypatch.setattr(worker, "_post", lambda *a, **k: None)  # 不真发网络
+    monkeypatch.setattr(worker, "_mlx_ready", lambda *a, **k: False)  # 测 faster-whisper fail-fast 路
+    monkeypatch.setattr(worker, "_LIVE_TRANSCRIPTION", True)  # 模型 fail-fast 只在 live 模式跑
 
     rc = worker.main([
         "--session", "1", "--staging", str(tmp_path),
@@ -92,14 +94,19 @@ def test_worker_main_shuts_down_sources_when_engine_build_fails(tmp_path, monkey
     # 过 fail-fast:假装模型存在(main 内部从 provisioner 局部 import,故 patch 源模块)。
     monkeypatch.setattr(prov, "detect_asr_model", lambda *a, **k: True)
     monkeypatch.setattr(worker, "_post", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "_mlx_ready", lambda *a, **k: False)  # 走 faster-whisper 引擎构建路
+    monkeypatch.setattr(worker, "_LIVE_TRANSCRIPTION", True)  # 引擎构建只在 live 模式发生
 
     closed = {"stopped": 0, "wav_closed": 0}
 
     class _FakeSource:
         def __init__(self, *a, **k):
-            pass
+            self.sample_rate = 48000  # worker 用 s.sample_rate 建 wav(48k 录音)
         def start(self):
             pass
+        def read(self):
+            import numpy as np
+            return np.empty(0, dtype=np.float32)
         def stop(self):
             closed["stopped"] += 1
 
@@ -137,28 +144,47 @@ def test_worker_main_shuts_down_sources_when_engine_build_fails(tmp_path, monkey
     assert closed["wav_closed"] == 1
 
 
-def test_active_channels_from_muted():
-    """Feature B:由「已起的 worker 通道集」+「前端静音源 id 列表」算出仍活跃的通道。
+def test_desired_channels_maps_source_ids():
+    """动态音源:前端期望开启的源 id(mic/system_audio)→ worker 通道集(mic/device);未知源忽略。"""
+    from epictrace.asr.worker import desired_channels
 
-    前端源 id(mic/system_audio)→ worker 通道(mic/device);静音的源对应的通道被剔除,
-    其余保留。未起的源即便出现在静音列表里也无副作用。"""
-    from epictrace.asr.worker import active_channels
-
-    started = {"mic", "device"}
-    # 无静音 → 全活跃。
-    assert active_channels(started, []) == {"mic", "device"}
-    # 静音 system_audio(→device)→ 只剩 mic。
-    assert active_channels(started, ["system_audio"]) == {"mic"}
-    # 静音 mic → 只剩 device。
-    assert active_channels(started, ["mic"]) == {"device"}
-    # 两路都静音 → 空集。
-    assert active_channels(started, ["mic", "system_audio"]) == set()
-    # 静音了一个根本没起的源 → 不影响已起的。
-    assert active_channels({"mic"}, ["system_audio"]) == {"mic"}
+    assert desired_channels([]) == set()
+    assert desired_channels(["mic"]) == {"mic"}
+    assert desired_channels(["system_audio"]) == {"device"}
+    assert desired_channels(["mic", "system_audio"]) == {"mic", "device"}
+    # 未知源 id 忽略,不污染通道集。
+    assert desired_channels(["mic", "bogus"]) == {"mic"}
 
 
-def test_fetch_muted_returns_none_on_failure(monkeypatch):
-    """FIX A:GET asr-mute 失败回 None(非 []),供调用方保留上次已知静音集、不误恢复全部。"""
+def test_reconcile_channels_computes_start_stop():
+    """动态音源:据期望开启通道集 vs 已启动集,算出 (要启动, 要停止)。"""
+    from epictrace.asr.worker import reconcile_channels
+
+    # 期望 {mic,device},已起 {mic} → 启动 device,无停止。
+    assert reconcile_channels({"mic", "device"}, {"mic"}) == ({"device"}, set())
+    # 期望 {mic},已起 {mic,device} → 无启动,停止 device(中途关源)。
+    assert reconcile_channels({"mic"}, {"mic", "device"}) == (set(), {"device"})
+    # 期望空,已起 {mic} → 停止 mic(全关)。
+    assert reconcile_channels(set(), {"mic"}) == (set(), {"mic"})
+    # 一致 → 无动作。
+    assert reconcile_channels({"mic"}, {"mic"}) == (set(), set())
+
+
+def test_idle_exit_due():
+    """动态音源:无任何音源且持续 timeout 秒 → 该自退(模型随进程释放)。"""
+    from epictrace.asr.worker import idle_exit_due
+
+    # idle_since=None(当前有音源)→ 永不到期。
+    assert idle_exit_due(None, 100.0, 60.0) is False
+    # 空闲未满 timeout。
+    assert idle_exit_due(10.0, 50.0, 60.0) is False
+    # 空闲恰满 / 超过 timeout。
+    assert idle_exit_due(10.0, 70.0, 60.0) is True
+    assert idle_exit_due(10.0, 80.0, 60.0) is True
+
+
+def test_fetch_enabled_returns_none_on_failure(monkeypatch):
+    """网络抖动:GET asr-source 失败回 None(非 []),供调用方保留上次已知集、不误停所有源。"""
     import urllib.error
 
     from epictrace.asr import worker
@@ -167,70 +193,7 @@ def test_fetch_muted_returns_none_on_failure(monkeypatch):
         raise urllib.error.URLError("network down")
 
     monkeypatch.setattr(worker.urllib.request, "urlopen", _boom)
-    assert worker._fetch_muted(7) is None
-
-
-def test_apply_mute_transition_advances_offsets_and_cursors():
-    """FIX A:某路 active→muted 时,推进其 wav 写游标到当前样本数 + ASR 游标到 available_seconds,
-    使静音区间既不落 wav 也不被转写;unmute 后从「现在」继续。仅对「转静音」的通道动作。"""
-    import numpy as np
-
-    from epictrace.asr.worker import apply_mute_transition
-
-    class _Src:
-        def __init__(self, samples, avail):
-            self._samples = samples
-            self._avail = avail
-        def read(self):
-            return np.zeros(self._samples, dtype="float32")
-        def available_seconds(self):
-            return self._avail
-
-    class _Loop:
-        def __init__(self):
-            self.skipped = []
-        def skip_channel_to(self, ch, secs):
-            self.skipped.append((ch, secs))
-
-    sources = {"mic": _Src(48000, 30.0), "device": _Src(16000, 20.0)}
-    written = {"mic": 0, "device": 16000}  # device 已写齐,mic 落后
-    loop = _Loop()
-    # mic active→muted(从 {mic,device} 变成 {device});device 仍活跃。
-    apply_mute_transition({"mic", "device"}, {"device"}, sources, written, loop)
-    # mic 的 wav 写游标推进到当前样本数(跳过将静音的 backlog,unmute 不回填)。
-    assert written["mic"] == 48000
-    # mic 的 ASR 游标跳到 available_seconds(静音区间不被转写)。
-    assert loop.skipped == [("mic", 30.0)]
-    # device 未转静音 → 不动它的写游标。
-    assert written["device"] == 16000
-
-
-def test_apply_mute_transition_noop_on_unmute():
-    """FIX A:某路 muted→active(取消静音)不该触发跳游标/改写偏移——只在「转静音」时动作。"""
-    import numpy as np
-
-    from epictrace.asr.worker import apply_mute_transition
-
-    class _Src:
-        def read(self):
-            return np.zeros(1000, dtype="float32")
-        def available_seconds(self):
-            return 5.0
-
-    class _Loop:
-        def __init__(self):
-            self.skipped = []
-        def skip_channel_to(self, ch, secs):
-            self.skipped.append((ch, secs))
-
-    sources = {"mic": _Src()}
-    written = {"mic": 0}
-    loop = _Loop()
-    # mic muted→active:不在「转静音」集合 → 无副作用。
-    apply_mute_transition({"mic"}, {"mic"}, sources, written, loop)
-    apply_mute_transition(set(), {"mic"}, sources, written, loop)
-    assert loop.skipped == []
-    assert written["mic"] == 0
+    assert worker._fetch_enabled(7) is None
 
 
 def test_shutdown_stops_sources_and_closes_wavs():
@@ -261,3 +224,37 @@ def test_shutdown_stops_sources_and_closes_wavs():
     assert "stop:mic" in events and "stop:device" in events
     # mic wav close 抛错被吞,device wav 仍关闭。
     assert "close:device" in events
+
+
+def test_build_engine_prefers_mlx_when_ready(monkeypatch):
+    """live 引擎:_mlx_ready 为真 → _build_engine 返回 MlxWhisperEngine(不构建 faster-whisper)。"""
+    import epictrace.asr.worker as worker
+    from epictrace.asr.config import AsrConfig
+    from epictrace.asr.mlx_engine import MlxWhisperEngine
+
+    monkeypatch.setattr(worker, "_mlx_ready", lambda *a, **k: True)
+    eng = worker._build_engine(AsrConfig(), "/tmp/cache")
+    assert isinstance(eng, MlxWhisperEngine)
+
+
+def test_build_engine_falls_back_to_faster_whisper(monkeypatch):
+    """_mlx_ready 为假 → 走 faster-whisper 构建(WhisperModel 桩掉,不真加载)。"""
+    import sys
+    import types
+
+    import epictrace.asr.worker as worker
+    from epictrace.asr.config import AsrConfig
+
+    monkeypatch.setattr(worker, "_mlx_ready", lambda *a, **k: False)
+    built = {}
+
+    class _FakeWM:
+        def __init__(self, model, **k):
+            built["model"] = model
+
+    fake_fw = types.ModuleType("faster_whisper")
+    fake_fw.WhisperModel = _FakeWM
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+    eng = worker._build_engine(AsrConfig(model="medium"), "/tmp/cache")
+    from epictrace.asr.engine import FasterWhisperEngine
+    assert isinstance(eng, FasterWhisperEngine) and built["model"] == "medium"

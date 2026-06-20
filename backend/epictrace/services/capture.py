@@ -150,6 +150,37 @@ class CaptureService:
             s.expunge(ev)
             return ev
 
+    def replace_transcription(self, session_id: int, segments: list[dict]) -> int:
+        """用权威重转结果替换该 session 的全部 kind=transcription 事件(会话停止后调,staged 可用,
+        不做 recording 检查)。其它事件(note/screenshot/...)不动。返回插入的段数。
+
+        每段的 ts 由 started_at + 音频偏移(start 秒)重建:使时间线按音频时间排序、段落分组(按 ts
+        间隔)照常工作。meta 带 source/audio_offset/start/end/words/wav + authoritative 标记(供引用回跳)。"""
+        from datetime import timedelta
+
+        with self._db.session() as s:
+            sess = self._require(s, session_id)
+            base = _naive(sess.started_at)
+            for ev in list(sess.events):
+                if ev.kind == "transcription":
+                    s.delete(ev)
+            s.flush()
+            inserted = 0
+            for seg in segments:
+                try:
+                    offset = float(seg.get("start", 0.0))
+                except (TypeError, ValueError):
+                    offset = 0.0
+                meta = {k: seg[k] for k in
+                        ("source", "audio_offset", "start", "end", "words", "wav") if k in seg}
+                meta["authoritative"] = True
+                s.add(CaptureEvent(session_id=session_id, kind="transcription",
+                                   ts=base + timedelta(seconds=offset),
+                                   payload=str(seg.get("text", "")), meta=meta))
+                inserted += 1
+            s.flush()
+            return inserted
+
     def pause(self, session_id: int) -> CaptureEvent:
         return self.append_event(session_id, kind="pause")
 

@@ -67,3 +67,72 @@ def test_loop_suppression_requires_three_identical():
                           [("哈哈", 0.0, 2.0), ("哈哈哈", 2.0, 4.0)])
     # 只一段成子串关系(非连续 >=3 循环)→ 不抑制。
     assert not f.is_duplicate("哈哈哈哈哈", 4.0, 6.0, [("哈哈哈哈", 0.0, 2.0)])
+
+
+def test_intra_segment_loop_detection():
+    """rank3:段内立即重复(>=4 字长串多遍无间隔拼接)判幻觉;短单元真实重复语音绝不误杀。"""
+    f = HallucinationFilter()
+    # 正例:长串两遍 / 三遍。
+    assert f.is_intra_segment_loop("我会去看你我会去看你")
+    assert f.is_intra_segment_loop("这次没有这次没有")
+    assert f.is_hallucination("我会去看你 我会去看你")  # 经 is_hallucination 命中(空白被签名归一)
+    # 反例:短重复单元(<4 字)一律放行,保住真实重复语音。
+    assert not f.is_intra_segment_loop("测试测试测试")
+    assert not f.is_intra_segment_loop("你好你好你好今天天气很好")
+    assert not f.is_intra_segment_loop("哈哈哈哈")
+    assert not f.is_intra_segment_loop("好的好的")
+    assert not f.is_hallucination("你好你好你好今天天气很好")
+
+
+def test_expanded_silence_patterns_and_substring_consistency():
+    """rank2:扩充的静音/标注精确串 + 子串对 clean+lower 后文本一致比对;正常句不误伤。"""
+    f = HallucinationFilter()
+    assert f.is_hallucination("谢谢大家")        # 上游 t2s 后的简体
+    assert f.is_hallucination("我们下期再见")
+    assert f.is_hallucination("[music]")
+    assert f.is_hallucination("一键三连支持一下")  # 子串命中
+    assert not f.is_hallucination("我们下周再讨论这个方案")  # 正常句不误伤
+    assert not f.is_hallucination("关注我们团队的进展")      # 收紧后不再误伤
+
+
+def test_repetition_loop_catches_degenerate_single_char_runs():
+    """STEP(集成验证发现):弱音尾巴退化复读环——单字超长连串 / 分词后高重复 → 判幻觉,
+    但短重复语音放行(不误杀)。"""
+    f = HallucinationFilter()
+    # 单字超长连串(无空格)→ char streak >=8。
+    assert f.is_repetition_loop("是" * 30)
+    assert f.is_hallucination("是" * 40)
+    # 空格分词后高重复(唯一率<0.4)。
+    assert f.is_repetition_loop(" ".join(["是"] * 30))
+    assert f.is_repetition_loop("unden" * 9)            # 子词重复(无空格)长连串
+    # 反例:正常重复/短串放行。
+    assert not f.is_repetition_loop("测试测试测试测试")   # 交替双字,无单字长连串
+    assert not f.is_repetition_loop("对对对")             # 太短
+    assert not f.is_repetition_loop("哈哈哈哈")           # 4 连 <8
+    assert not f.is_repetition_loop("大家好呀最近有没有被这个消息刷屏")  # 正常句
+    assert not f.is_hallucination("大家好呀最近有没有被这个消息刷屏")
+
+
+def test_silence_watermark_hallucinations_filtered():
+    """真机实测:权限被拒/弱音输入时 Whisper 脑补的平台水印(静音幻觉)→ 整段或子串命中即滤。"""
+    f = HallucinationFilter()
+    assert f.is_hallucination("优优独播剧场YoYo Television Series Exclusive")
+    assert f.is_hallucination("优优独播剧场")
+    assert f.is_hallucination("中文字幕志愿者")
+    assert not f.is_hallucination("我们来聊聊独播剧场的运营")  # 正常句不误伤(无完整水印串)
+
+
+def test_is_low_quality_segment_drops_decode_garbage():
+    """段级质量过滤(isLowQualitySegment 移植):极低 avg_logprob / 极高 compression_ratio 的解码退化段
+    被判低质丢弃;正常段放行。"""
+    f = HallucinationFilter()
+    # 正常段(高置信、低压缩比)→ 放行。
+    assert not f.is_low_quality("大家好今天聊聊摩托车赛车服", avg_logprob=-0.2, compression_ratio=1.1)
+    # avg_logprob 极低 → 低质。
+    assert f.is_low_quality("含糊不清的一段", avg_logprob=-2.5, compression_ratio=1.2)
+    # 低 logprob + 极短 → 低质。
+    assert f.is_low_quality("嗯啊", avg_logprob=-1.6, compression_ratio=1.0)
+    # 高压缩比 + 够长 → 解码复读环 → 低质。
+    assert f.is_low_quality("这个这个这个这个这个这个", avg_logprob=-0.5, compression_ratio=3.5)
+    # 关闭过滤器 → 一律放行。
+    assert not HallucinationFilter(enabled=False).is_low_quality("x", -9.0, 9.0)

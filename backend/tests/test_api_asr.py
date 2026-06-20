@@ -66,7 +66,7 @@ def test_get_asr_settings_defaults(app_client):
     assert body == AsrConfig().to_dict()
     # 抽查几个弱音友好默认(spec §9)。
     assert body["model"] == "large-v3"
-    assert body["language"] == "zh"
+    assert body["language"] == "auto"
     assert body["vad"] is True
     assert body["condition_prev"] is False
     assert body["force_confirm_after"] == 4
@@ -81,7 +81,7 @@ def test_put_asr_settings_partial_update_persists(app_client):
     body = r.json()
     assert body["model"] == "medium"
     # 部分更新:未给的键保留默认,不被重置。
-    assert body["language"] == "zh"
+    assert body["language"] == "auto"
     assert body["vad"] is True
     # 持久化:再 GET 取到新值。
     assert app_client.get("/api/asr/settings").json()["model"] == "medium"

@@ -46,9 +46,18 @@ function dotColor(kind: string): string {
       return "bg-amber-500";
     case "resume":
       return "bg-emerald-500";
+    case "source":
+      return "bg-orange-500";
     default:
       return "bg-muted-foreground";
   }
+}
+
+/** 音源开/停事件的标签:meta.source(mic/system_audio)+ meta.action(start/stop)。 */
+function sourceEventLabel(meta?: Record<string, unknown>): { text: string; stop: boolean } {
+  const src = meta?.source === "system_audio" ? "系统声音" : "麦克风";
+  const stop = meta?.action === "stop";
+  return { text: `${src} ${stop ? "停止采集" : "开始采集"}`, stop };
 }
 
 /** 紧凑图标按钮(HUD 专用) */
@@ -83,46 +92,37 @@ function IconBtn({
 }
 
 /**
- * 音频源软静音开关(HUD 专用)。三态:
- * - 未启用(本 session 没选这个源):灰、不可点。
- * - 已启用 + 未静音:点亮(teal)+ 实心图标 = 正在采集;点击静音。
- * - 已启用 + 已静音:灰 + 斜杠图标(MicOff/VolumeX);点击恢复。
+ * 音频源开关(HUD 专用)。两态,均可随时点击(中途也能开开始没勾的源):
+ * - 开启:点亮(teal)+ 实心图标 = 正在采集;点击关闭(停采集,mic 灯灭)。
+ * - 关闭:灰 + 斜杠图标(MicOff/VolumeX);点击开启(开始采集)。
  */
 function AudioToggle({
-  enabled,
-  muted,
-  onLit,
-  onMuted,
+  on,
+  onIcon,
+  offIcon,
   labelOn,
-  labelMuted,
-  labelDisabled,
+  labelOff,
   onClick,
 }: {
-  enabled: boolean;
-  muted: boolean;
-  onLit: ReactNode;
-  onMuted: ReactNode;
+  on: boolean;
+  onIcon: ReactNode;
+  offIcon: ReactNode;
   labelOn: string;
-  labelMuted: string;
-  labelDisabled: string;
+  labelOff: string;
   onClick: () => void;
 }) {
-  const active = enabled && !muted;
   return (
     <button
       type="button"
-      disabled={!enabled}
       onClick={onClick}
-      title={!enabled ? labelDisabled : muted ? labelMuted : labelOn}
-      className={`flex size-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed ${
-        !enabled
-          ? "text-muted-foreground/30"
-          : active
-            ? "text-teal-500 hover:bg-teal-500/10"
-            : "text-muted-foreground/60 hover:bg-muted hover:text-foreground"
+      title={on ? labelOn : labelOff}
+      className={`flex size-7 shrink-0 items-center justify-center rounded-md transition-colors ${
+        on
+          ? "text-teal-500 hover:bg-teal-500/10"
+          : "text-muted-foreground/60 hover:bg-muted hover:text-foreground"
       }`}
     >
-      {active ? onLit : onMuted}
+      {on ? onIcon : offIcon}
     </button>
   );
 }
@@ -139,8 +139,9 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
   const [events, setEvents] = useState<CaptureEvent[]>([]);
   // 实时暂定段(ASR partial):与 events 分开存,不混进持久事件列表;末尾淡显「暂定」行。
   const [partials, setPartials] = useState<CapturePartial>({});
-  // 软静音集(被静音的音频源 id):服务端权威态,挂载 + 每次轮询时刷新;点击乐观切换。
-  const [muted, setMuted] = useState<string[]>([]);
+  // 期望开启的音频源 id 集:服务端权威态,挂载 + 每次轮询时刷新;点击乐观切换。
+  // 开关随时可点——开启会(必要时懒启动 worker 并)开始采集,中途也能开开始没勾的源。
+  const [enabled, setEnabled] = useState<string[]>([]);
 
   const elapsedRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -164,10 +165,10 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
         startPolling();
       })
       .catch(() => {});
-    // 挂载即拉一次软静音集(失败/无 ASR 时静默,留空 = 全未静音)。
+    // 挂载即拉一次期望开启集(失败/无 ASR 时静默,留空 = 全未开启)。
     api
-      .getAsrMute(sessionId)
-      .then((m) => setMuted(m.muted))
+      .getAsrSources(sessionId)
+      .then((m) => setEnabled(m.enabled))
       .catch(() => {});
     return () => {
       stopTimer();
@@ -216,10 +217,10 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
         .getSessionPartial(sessionId)
         .then((p) => setPartials(p))
         .catch(() => {});
-      // 同频刷新软静音集(服务端权威态;反映在别处/上次会话的改动)。
+      // 同频刷新期望开启集(服务端权威态;反映 worker 自退/别处改动)。
       api
-        .getAsrMute(sessionId)
-        .then((m) => setMuted(m.muted))
+        .getAsrSources(sessionId)
+        .then((m) => setEnabled(m.enabled))
         .catch(() => {});
     }, 1500);
   }
@@ -273,10 +274,16 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
   }
 
   async function handleStop() {
+    stopTimer();
+    stopPolling();
+    // 已暂停时 monitors 早已停(handlePauseResume),再 stopMonitors 会抛 → 必须与 stopSession 分开
+    // try,否则异常吞掉后 stopSession 永不执行,「暂停中点结束」就没反应(必须先继续再结束的 bug)。
     try {
-      stopTimer();
-      stopPolling();
       await native.stopMonitors();
+    } catch {
+      /* 已停 / 无 monitors → 忽略 */
+    }
+    try {
       await api.stopSession(sessionId);
       setStopped(true);
       await native.hideHud();
@@ -305,16 +312,16 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
     }
   }
 
-  // 软静音切换某路音频源(乐观更新 + 失败回滚)。仅对本 session 启用的源可点。
-  async function toggleMute(source: string) {
-    if (!sources.includes(source)) return;
-    const willMute = !muted.includes(source);
-    const prev = muted;
-    setMuted(willMute ? [...muted, source] : muted.filter((s) => s !== source));
+  // 启停某路音频源(乐观更新 + 失败回滚)。开关随时可点——中途也能开开始没勾的源。
+  // 启用时模型未就绪后端会 409 → 回滚(开关弹回关闭态作为反馈)。
+  async function toggleSource(source: string) {
+    const willEnable = !enabled.includes(source);
+    const prev = enabled;
+    setEnabled(willEnable ? [...enabled, source] : enabled.filter((s) => s !== source));
     try {
-      await api.setAsrMute(sessionId, source, willMute);
+      await api.setAsrSource(sessionId, source, willEnable);
     } catch {
-      setMuted(prev); // 回滚
+      setEnabled(prev); // 回滚
     }
   }
 
@@ -329,7 +336,7 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
   // 连续同源转写合并成段落(FIX 2):时间线不再逐句一行,整段一个气泡 + 一个时间戳。
   const timeline = groupTimelineItems(
     events.filter((e) =>
-      ["note", "clipboard", "screenshot", "transcription", "pause", "resume"].includes(e.kind),
+      ["note", "clipboard", "screenshot", "transcription", "pause", "resume", "source"].includes(e.kind),
     ),
   );
   // partial 行(每源一条暂定文本);空文本不显示。
@@ -360,6 +367,13 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       return <span className="text-amber-600 dark:text-amber-400">暂停</span>;
     if (ev.kind === "resume")
       return <span className="text-emerald-600 dark:text-emerald-400">继续</span>;
+    if (ev.kind === "source") {
+      const { text, stop } = sourceEventLabel(ev.meta);
+      return <span className={stop ? "text-rose-600 dark:text-rose-400" : "text-emerald-600 dark:text-emerald-400"}>{text}</span>;
+    }
+    // 剪贴板可能很长 → 单行截断(title 存全文),避免霸占实时时间线。
+    if (ev.kind === "clipboard")
+      return <span className="text-foreground line-clamp-1 break-all" title={ev.payload}>{ev.payload || "(空)"}</span>;
     return <span className="text-foreground">{ev.payload || "(无内容)"}</span>;
   }
 
@@ -402,27 +416,23 @@ export function RecordingHud({ sessionId }: { sessionId: number }) {
       >
         <Crop className="size-3.5" />
       </IconBtn>
-      {/* 麦克风/系统声音:本 session 启用的源 = 可点的软静音开关(不重启 worker)。
-          点亮(teal)= 正在采集(未静音);灰+斜杠图标 = 已软静音;未启用的源灰且不可点。 */}
+      {/* 麦克风/系统声音:随时可点的启停开关。点亮(teal)= 正在采集;灰+斜杠 = 已关闭。
+          中途也能开开始没勾的源(必要时后端懒启动 worker);全关一段时间 worker 自退省内存。 */}
       <AudioToggle
-        enabled={sources.includes("mic")}
-        muted={muted.includes("mic")}
-        onLit={<Mic className="size-3.5" />}
-        onMuted={<MicOff className="size-3.5" />}
-        labelOn="麦克风采集中(点击静音)"
-        labelMuted="麦克风已静音(点击恢复)"
-        labelDisabled="本 session 未启用麦克风"
-        onClick={() => void toggleMute("mic")}
+        on={enabled.includes("mic")}
+        onIcon={<Mic className="size-3.5" />}
+        offIcon={<MicOff className="size-3.5" />}
+        labelOn="麦克风采集中(点击关闭)"
+        labelOff="麦克风已关闭(点击开启)"
+        onClick={() => void toggleSource("mic")}
       />
       <AudioToggle
-        enabled={sources.includes("system_audio")}
-        muted={muted.includes("system_audio")}
-        onLit={<Volume2 className="size-3.5" />}
-        onMuted={<VolumeX className="size-3.5" />}
-        labelOn="系统声音采集中(点击静音)"
-        labelMuted="系统声音已静音(点击恢复)"
-        labelDisabled="本 session 未启用系统声音采集"
-        onClick={() => void toggleMute("system_audio")}
+        on={enabled.includes("system_audio")}
+        onIcon={<Volume2 className="size-3.5" />}
+        offIcon={<VolumeX className="size-3.5" />}
+        labelOn="系统声音采集中(点击关闭)"
+        labelOff="系统声音已关闭(点击开启)"
+        onClick={() => void toggleSource("system_audio")}
       />
       <IconBtn onClick={handlePauseResume} title={paused ? "继续" : "暂停"}>
         {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}

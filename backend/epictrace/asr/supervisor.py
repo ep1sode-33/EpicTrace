@@ -63,13 +63,13 @@ class AsrSupervisor:
             "python", "-m", "epictrace.asr.worker",
             "--session", str(session_id),
             "--staging", staging_dir,
+            # --model:仅休眠的 live 模式(worker._LIVE_TRANSCRIPTION=True)用;纯录音器忽略它。
             "--model", model,
             # 完整 ASR 设置(已由路由经 SettingsService 解析)以 JSON 透传,worker 据此建
             # AsrConfig.from_dict —— vad/阈值/force_confirm_after 等非默认值都生效(FIX D)。
             "--config", json.dumps(config or {}),
         ]
-        # ASR 模型缓存目录(WhisperModel download_root):与 provisioner 就绪检测同一路径
-        # (FIX 2)。非默认数据目录下二者必须一致,否则 provisioner 说就绪、worker 另路下载。
+        # --cache-dir:faster-whisper download_root,仅休眠的 live 模式用(纯录音器不加载模型,忽略)。
         if cache_dir:
             argv += ["--cache-dir", cache_dir]
         argv += ["--sources", *audio]
@@ -96,6 +96,20 @@ class AsrSupervisor:
         self._procs[session_id] = _Entry(proc=proc, sources=audio,
                                          staging_dir=staging_dir, model=model, config=cfg,
                                          cache_dir=cache_dir)
+
+    def is_running(self, session_id: int) -> bool:
+        """该 session 的 worker 是否仍在跑。用于中途启用音源时判定:不在跑则懒启动,
+        在跑则只更新控制通道(worker 自行 reconcile 增删源)。
+
+        worker 可能已自行退出(全部音源关闭 + 空闲超时自退)——entry 还在但进程已死,故用
+        proc.poll() 判活(返回非 None = 已退);无 poll 的句柄(测试假件)按在跑处理。"""
+        entry = self._procs.get(session_id)
+        if entry is None:
+            return False
+        poll = getattr(entry.proc, "poll", None)
+        if poll is None:
+            return True
+        return poll() is None
 
     def stop(self, session_id: int) -> None:
         """停掉该 session 的 worker(若有):terminate → wait(timeout)→ 仍活则 kill。
@@ -125,6 +139,21 @@ class AsrSupervisor:
                 wait(timeout=_STOP_KILL_TIMEOUT)
             except Exception as e:  # noqa: BLE001
                 _log.warning("ASR worker kill failed for session %s: %s", session_id, e)
+
+    def retranscribe(self, session_id: int, staging_dir: str, *,
+                     config: dict | None = None, model: str | None = None) -> object | None:
+        """会话停止后拉起一次性重转子进程(mlx 整文件重转 → 替换流式转录事件)。
+
+        fire-and-forget:返回进程句柄(真件 Popen),不 track、不 wait(后台跑完自行退出,经
+        POST /transcript 回写)。spawn 走同一注入点(测试假件不起真子进程)。失败由调用方吞。"""
+        argv = ["python", "-m", "epictrace.asr.retranscribe",
+                "--session", str(session_id), "--staging", staging_dir]
+        if config:
+            argv += ["--config", json.dumps(config)]
+        if model:
+            argv += ["--model", model]
+        spawn = self._spawn or _default_spawn
+        return spawn(argv)
 
     def pause(self, session_id: int) -> None:
         """暂停 = 停掉 worker(下游 confirmed/partial 自然停);恢复时按原参数重启。"""
