@@ -33,3 +33,31 @@ def test_mrr():
     gold = (GoldSpan(1, 100, 200),)
     assert mrr([C(9, 0, 1), C(1, 150, 160)], gold) == 0.5   # 第 2 名首次命中
     assert mrr([C(9, 0, 1)], gold) == 0.0                   # 无命中
+
+
+import math
+
+from scripts.rag_eval.metrics import (
+    context_precision_at_k, context_precision_ordered_at_k, ndcg_at_k,
+)
+
+
+def test_ndcg_perfect_and_imperfect():
+    gold = (GoldSpan(1, 0, 10),)
+    # 命中在第 1 名 → nDCG=1.0
+    assert ndcg_at_k([C(1, 0, 5), C(9, 0, 1)], gold, k=2) == 1.0
+    # 命中在第 2 名 → DCG=1/log2(3), IDCG=1/log2(2)=1 → nDCG=1/log2(3)
+    got = ndcg_at_k([C(9, 0, 1), C(1, 0, 5)], gold, k=2)
+    assert math.isclose(got, 1.0 / math.log2(3), rel_tol=1e-9)
+    assert ndcg_at_k([C(9, 0, 1)], gold, k=2) == 0.0   # 无命中
+
+
+def test_context_precision_plain_and_ordered():
+    gold = (GoldSpan(1, 0, 10), GoldSpan(2, 0, 10))
+    ranked = [C(1, 0, 5), C(9, 0, 1), C(2, 0, 5)]      # 命中在第 1、3 名
+    # plain: 命中 2 / 取前 3 = 2/3
+    assert math.isclose(context_precision_at_k(ranked, gold, k=3), 2 / 3, rel_tol=1e-9)
+    # ordered: (precision@1 * 1 + precision@3 * 1) / 命中数 = (1/1 + 2/3) / 2
+    assert math.isclose(
+        context_precision_ordered_at_k(ranked, gold, k=3), (1.0 + 2 / 3) / 2, rel_tol=1e-9)
+    assert context_precision_ordered_at_k([C(9, 0, 1)], gold, k=3) == 0.0
