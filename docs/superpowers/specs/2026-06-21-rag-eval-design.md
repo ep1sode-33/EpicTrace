@@ -156,9 +156,12 @@ judge 吃 (question, retrieved-context, generated-answer, reference-answer):
 
 ### 6.D Judge 基础设施
 
-- **judge 模型**:BYOK 里最强 profile,`temperature=0`,**结构化 JSON 输出**(声明表 + 裁决),失败重试,**判不出标 NaN 不标 0**(judge 超时 ≠ 不忠实)。复用 `OpenAICompatLLM`,零新依赖。
-- **判官 ≠ 选手 + 校准(可信前提)**:self-preference bias 是实证风险(judge 系统性偏爱本家族输出),故 judge **推荐非 DeepSeek 家族**(如 `GPT-5.5`,OpenAI-compat 直接进 `OpenAICompatLLM`),与 RAG 生成器(`DeepSeek V4 Pro`)分家;`judge_model` 为可换 config profile,不卡计划结构。装上 judge **先做一次人工一致性校准**:手标 30–50 条裁决,量 judge 与人工的 **Cohen's kappa**,达标才采信(选型首看与人工标注一致,其次成本与家族);报告标明 judge 模型。
+- **judge 模型 = `claude-opus-4-8`(Opus 4.8)**,经一个**与被测不同家族**的端点调用 —— 被测生成走 DeepSeek(BYOK),judge 走 Claude Opus,从根上消除 self-preference bias(**判官 ≠ 选手**)。Opus 4.8 是最强 Opus(官方明确其知识工作 / 代码审查类「逐条判别 + 找毛病」最好,中文好、说理清晰),且 Opus 4.6/4.7/4.8 同价($5/$25 每 MTok)→ 直接用最强;端点限流时按 **4.8 → 4.7 → 4.6** 回退。
+- **接入方式**:复用 `OpenAICompatLLM` —— 把 Claude 代理端点(OpenAI 兼容 `/v1/chat/completions`)配成一个独立的「judge」profile(base_url + key + `model=claude-opus-4-8`),零新依赖。**key 不进 git**,从 BYOK 设置 / 环境变量读(它是临时 key,会轮换)。落地时先验证该端点确为 OpenAI 兼容;若只支持 Anthropic 原生协议(`/v1/messages`),退化为用官方 `anthropic` SDK(单独小依赖)。
+- **确定性**:Opus 4.8 **移除了 `temperature`/`top_p`/`top_k`**(原生 API 传了会 400;经 OpenAI 兼容代理一般被丢弃、不报错)→ **别靠 `temperature=0` 求确定性**;改靠 ① **judge 结果缓存**(run 间稳定)② 结构化 JSON 输出。Opus 4.8 默认开 adaptive thinking —— 判官先推理再裁决,反而提判别质量。
+- **结构化 JSON 输出**(声明表 + 裁决),失败重试,**判不出标 NaN 不标 0**(judge 超时 ≠ 不忠实)。
 - **缓存**:judge 结果按 `(metric, question_id, answer_hash, context_hash, judge_model)` 落盘;相同 run 重跑不付费,只有答案/上下文变了才重判。
+- **(可选)双判官交叉**:不怕烧 token 时,可再加 DeepSeek 当第二判官,只在两判官**分歧**时人工抽查/记噪声 —— 但主分以 off-family 的 Opus 4.8 为准(同家族判官不进主分)。
 
 ### 6.E 输出
 
