@@ -38,3 +38,40 @@ def score_answer_relevancy(judge, *, question: str, answer: str) -> float:
         return max(0.0, min(1.0, float(out["relevancy"])))
     except (TypeError, ValueError):
         return math.nan
+
+
+def _mean_bool(xs) -> float:
+    return sum(1 for x in xs if x is True) / len(xs) if xs else math.nan
+
+
+def score_answer_correctness(judge, *, question: str, answer: str, reference: str) -> float:
+    """声明级 F1:答案声明被参考支撑(P)× 参考声明被答案覆盖(R)。"""
+    user = (
+        "对照【参考答案】评估【答案】。给出两个布尔数组:\n"
+        "answer_claims_supported(答案每条原子声明是否被参考支撑)、"
+        "reference_claims_covered(参考每条原子声明是否被答案覆盖)。\n"
+        "只输出 JSON:{\"answer_claims_supported\":[true/false...],"
+        "\"reference_claims_covered\":[true/false...]}。\n\n"
+        f"【问题】\n{question}\n\n【参考答案】\n{reference}\n\n【答案】\n{answer}"
+    )
+    out = judge.judge_json(_FAITH_SYS, user)
+    if not out:
+        return math.nan
+    p = _mean_bool(out.get("answer_claims_supported") or [])
+    r = _mean_bool(out.get("reference_claims_covered") or [])
+    if math.isnan(p) or math.isnan(r) or (p + r) == 0:
+        return 0.0 if not (math.isnan(p) or math.isnan(r)) else math.nan
+    return 2 * p * r / (p + r)
+
+
+def score_refusal_correctness(judge, *, question: str, answer: str) -> float:
+    """否定/不可答题:答案是否为恰当的「拒答/说没有」。仅对 negation 题调用。"""
+    user = (
+        "判断【答案】是否在恰当地表示『资料中没有/无法回答』(拒答)。\n"
+        "只输出 JSON:{\"is_refusal\": true/false}。\n\n"
+        f"【问题】\n{question}\n\n【答案】\n{answer}"
+    )
+    out = judge.judge_json(_FAITH_SYS, user)
+    if not out or "is_refusal" not in out:
+        return math.nan
+    return 1.0 if out["is_refusal"] is True else 0.0

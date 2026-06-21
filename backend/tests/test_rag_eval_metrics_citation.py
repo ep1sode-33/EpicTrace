@@ -26,3 +26,23 @@ def test_accuracy_uses_gold():
     assert citation_accuracy("依据 [1] 和 [2]", pool, gold) == 0.5
     assert math.isnan(citation_accuracy("无引用", pool, gold))
     assert math.isnan(citation_accuracy("越界 [9]", pool, gold))   # 无合法引用
+
+
+import math as _math
+
+from scripts.rag_eval.metrics_citation import score_citation_faithfulness
+
+
+class _FakeJudge2:
+    def __init__(self, reply):
+        self._reply = reply
+
+    def judge_json(self, system, user):
+        return self._reply
+
+
+def test_citation_faithfulness():
+    j = _FakeJudge2({"citations": [{"supported": True}, {"supported": False}]})
+    assert score_citation_faithfulness(j, answer="见 [1][2]", cited_texts=["t1", "t2"]) == 0.5
+    assert _math.isnan(score_citation_faithfulness(_FakeJudge2(None), answer="x", cited_texts=["t"]))
+    assert _math.isnan(score_citation_faithfulness(_FakeJudge2({"citations": []}), answer="x", cited_texts=[]))
