@@ -1,0 +1,4 @@
+[
+  {"glob": "/Volumes/Port-Data/Archive/CS 2505/**/*.pdf", "slices": {"domain": "study-cs", "doc_type": "pdf", "lang": "en", "q_type": "single_hop"}, "source": "own"},
+  {"glob": "/Users/william/Desktop/TX AI培训/**/*.docx", "slices": {"domain": "work-ai", "doc_type": "docx", "lang": "zh", "q_type": "single_hop"}, "source": "own"}
+]

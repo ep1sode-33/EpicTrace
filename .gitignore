@@ -44,3 +44,8 @@ build/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# RAG 评测(冻结语料拷贝、run 归档、本地 corpus_spec —— 派生物/本地配置,不进 git)
+backend/eval-data/
+backend/scripts/rag_eval/runs/
+backend/scripts/rag_eval/corpus_spec.json
