@@ -157,7 +157,7 @@ judge 吃 (question, retrieved-context, generated-answer, reference-answer):
 ### 6.D Judge 基础设施
 
 - **judge 模型**:BYOK 里最强 profile,`temperature=0`,**结构化 JSON 输出**(声明表 + 裁决),失败重试,**判不出标 NaN 不标 0**(judge 超时 ≠ 不忠实)。复用 `OpenAICompatLLM`,零新依赖。
-- **判官 ≠ 选手**:judge 模型尽量别与被测生成同一个(避免 self-preference bias),报告标明 judge 模型。
+- **判官 ≠ 选手 + 校准(可信前提)**:self-preference bias 是实证风险(judge 系统性偏爱本家族输出),故 judge **推荐非 DeepSeek 家族**(如 `GPT-5.5`,OpenAI-compat 直接进 `OpenAICompatLLM`),与 RAG 生成器(`DeepSeek V4 Pro`)分家;`judge_model` 为可换 config profile,不卡计划结构。装上 judge **先做一次人工一致性校准**:手标 30–50 条裁决,量 judge 与人工的 **Cohen's kappa**,达标才采信(选型首看与人工标注一致,其次成本与家族);报告标明 judge 模型。
 - **缓存**:judge 结果按 `(metric, question_id, answer_hash, context_hash, judge_model)` 落盘;相同 run 重跑不付费,只有答案/上下文变了才重判。
 
 ### 6.E 输出
