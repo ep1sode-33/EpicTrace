@@ -156,12 +156,11 @@ judge 吃 (question, retrieved-context, generated-answer, reference-answer):
 
 ### 6.D Judge 基础设施
 
-- **judge 模型 = `claude-opus-4-8`(Opus 4.8)**,经一个**与被测不同家族**的端点调用 —— 被测生成走 DeepSeek(BYOK),judge 走 Claude Opus,从根上消除 self-preference bias(**判官 ≠ 选手**)。Opus 4.8 是最强 Opus(官方明确其知识工作 / 代码审查类「逐条判别 + 找毛病」最好,中文好、说理清晰),且 Opus 4.6/4.7/4.8 同价($5/$25 每 MTok)→ 直接用最强;端点限流时按 **4.8 → 4.7 → 4.6** 回退。
-- **接入方式**:复用 `OpenAICompatLLM` —— 把 Claude 代理端点(OpenAI 兼容 `/v1/chat/completions`)配成一个独立的「judge」profile(base_url + key + `model=claude-opus-4-8`),零新依赖。**key 不进 git**,从 BYOK 设置 / 环境变量读(它是临时 key,会轮换)。落地时先验证该端点确为 OpenAI 兼容;若只支持 Anthropic 原生协议(`/v1/messages`),退化为用官方 `anthropic` SDK(单独小依赖)。
-- **确定性**:Opus 4.8 **移除了 `temperature`/`top_p`/`top_k`**(原生 API 传了会 400;经 OpenAI 兼容代理一般被丢弃、不报错)→ **别靠 `temperature=0` 求确定性**;改靠 ① **judge 结果缓存**(run 间稳定)② 结构化 JSON 输出。Opus 4.8 默认开 adaptive thinking —— 判官先推理再裁决,反而提判别质量。
-- **结构化 JSON 输出**(声明表 + 裁决),失败重试,**判不出标 NaN 不标 0**(judge 超时 ≠ 不忠实)。
+- **judge 模型 = `claude-opus-4-8`**(Anthropic Messages,经 krill-ai 代理 `BASE_URL/v1/messages`,`BASE_URL` 来自本机 `temp_key` 文件)。选它因为**被测生成器 = DeepSeek V4 Pro**(用户唯一 BYOK chat/agent profile,近前沿:SWE-bench Verified 80.6%,仅次于 Opus 4.7);judge 用**不同家族**的 Claude Opus 正好满足「判官≠选手」、避免 self-preference bias。Opus 对「蕴含 / 声明核验 / JSON」这种判官任务绰绰有余,成本用户明确不设限。`claude-opus-4-7 / 4-6` 同端点可用,作更省的近似替代。
+- **judge 客户端 = 独立的薄 Anthropic-Messages 客户端**(httpx POST `/v1/messages`;`x-api-key` 或 `Authorization: Bearer` 均可 + `anthropic-version: 2023-06-01`;响应取 `content[].text`)——**与产品的 `OpenAICompatLLM` 分开**(那是 DeepSeek 生成器走 OpenAI chat 格式;judge 走 Anthropic 格式)。仍**零新依赖**(httpx 已在用,不引 anthropic SDK)。
+- **结构化输出(实测坑)**:Opus 即便被要求「只输出 JSON」也会把结果包在 ```json 围栏里 → judge 解析**必须先剥 markdown 围栏**再 `json.loads`;更稳的是用 Anthropic **强制 tool_use**(`tools` + `tool_choice`)拿保证干净的结构化结果。`temperature=0`,失败重试,**判不出标 NaN 不标 0**(judge 超时 ≠ 不忠实)。
 - **缓存**:judge 结果按 `(metric, question_id, answer_hash, context_hash, judge_model)` 落盘;相同 run 重跑不付费,只有答案/上下文变了才重判。
-- **(可选)双判官交叉**:不怕烧 token 时,可再加 DeepSeek 当第二判官,只在两判官**分歧**时人工抽查/记噪声 —— 但主分以 off-family 的 Opus 4.8 为准(同家族判官不进主分)。
+- **判官 ≠ 选手**:已由「judge=Claude / 生成=DeepSeek」满足;报告标明 judge 模型。**注意**:若日后把 Claude 也纳入被测生成器对比,需换一个非 Claude 家族的 judge,否则对 Claude 生成结果有 self-preference。
 
 ### 6.E 输出
 
