@@ -4,6 +4,7 @@ from __future__ import annotations
 
 def build_retriever(project_id: int):
     # 懒导入:测试/纯逻辑路径不拉重依赖。
+    from epictrace.config import AppConfig
     from epictrace.embedding.bge_m3 import BgeM3Embedder
     from epictrace.retrieval.pipeline import HybridRetriever
     from epictrace.retrieval.rerank import BgeReranker
@@ -13,5 +14,6 @@ def build_retriever(project_id: int):
     reranker = BgeReranker()
     embedder.warmup()          # 必须在建 Milvus(gRPC)之前 warmup,避免 macOS fork 段错误
     reranker.warmup()
-    store = MilvusLiteStore()  # 默认数据目录;eval 索引在该库内,project_id 区隔
+    cfg = AppConfig()
+    store = MilvusLiteStore(db_path=cfg.milvus_path, dim=1024)
     return HybridRetriever(embedder, store, reranker)

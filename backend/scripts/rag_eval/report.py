@@ -38,7 +38,11 @@ def diff_runs(summary_a: dict, summary_b: dict, metrics: list[str] | None = None
             continue
         cells = []
         for m in metrics:
-            d = rb[name].get(m, 0.0) - ra[name].get(m, 0.0)
+            va, vb = ra[name].get(m), rb[name].get(m)
+            if va is None or vb is None:
+                cells.append("nan")
+                continue
+            d = vb - va
             cells.append(f"{d:+.2f}{_mark(d)}")
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
     return "\n".join(lines)
