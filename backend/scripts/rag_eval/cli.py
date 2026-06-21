@@ -54,12 +54,10 @@ def _cmd_retrieve(ns) -> int:
 def _cmd_run(ns) -> int:
     # 测量点 ②③ 外循环:载 golden → 装配 retriever+judge+chat_model+llm+cache → 跑生成 → 落盘 + 报表。
     # 重组件装配走 wiring(懒导入真件);CLI 测试 monkeypatch 掉 wiring.* 与 cli.run_generation。
-    import sys as _sys
-
     from scripts.rag_eval import wiring
     from scripts.rag_eval.judge_cache import JudgeCache
     # 经模块属性取 run_generation:未 patch 时走本模块 __getattr__ 懒导入;CLI 测试 patch 后取假件。
-    _run_generation = getattr(_sys.modules[__name__], "run_generation")
+    _run_generation = getattr(sys.modules[__name__], "run_generation")
     golden = load_golden(ns.golden)
     cfg = EvalConfig(k=ns.k, dense_n=ns.dense_n, fuse_m=ns.fuse_m, label=ns.label or "")
     cache = JudgeCache(_RUNS / "judge_cache.jsonl")

@@ -1,7 +1,6 @@
 """生成指标(LLM judge)。judge.judge_json(system,user)->dict|None;None/无声明 → NaN(不记 0)。"""
 from __future__ import annotations
 
-import json
 import math
 
 _FAITH_SYS = "你是严格的 RAG 评测裁判。只输出 JSON,不要多余文字、不要解释。"

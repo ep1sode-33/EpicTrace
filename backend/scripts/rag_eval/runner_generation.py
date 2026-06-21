@@ -8,7 +8,6 @@ from __future__ import annotations
 import math
 
 from epictrace.agent.answer import stream_final_answer
-from epictrace.agent.citations import build_citations
 from epictrace.agent.react import FALLBACK, run_react_loop
 from epictrace.agent.tools import ChunkAccumulator, build_tools
 

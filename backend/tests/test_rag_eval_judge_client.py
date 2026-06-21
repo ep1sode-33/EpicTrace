@@ -10,6 +10,7 @@ def test_extract_json_strips_fences():
 def test_load_judge_config_from_keyfile(tmp_path, monkeypatch):
     monkeypatch.delenv("RAG_EVAL_JUDGE_KEY", raising=False)
     monkeypatch.delenv("RAG_EVAL_JUDGE_BASE_URL", raising=False)
+    monkeypatch.delenv("RAG_EVAL_JUDGE_MODEL", raising=False)
     kf = tmp_path / "temp_key"
     kf.write_text("KEY=sk-abc123\nBASE_URL=https://api-slb.krill-ai.com\n", encoding="utf-8")
     cfg = load_judge_config(str(kf))
