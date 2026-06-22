@@ -35,6 +35,17 @@ def citation_accuracy(answer: str, pool, gold_spans) -> float:
     return hits / len(valid)
 
 
+def citation_recall(answer: str, pool, gold_spans) -> float:
+    """端到端可追溯性:答案**实际引用的块**覆盖了多少 gold 跨度(引没引到 gold 源)。
+    与 accuracy 互补——单 gold 跨度下,多引相关旁证会拉低 accuracy 但不影响 recall。
+    无 gold 跨度 → nan;没引/没覆盖 → 0。"""
+    if not gold_spans:
+        return math.nan
+    valid = [pool[n - 1] for n in parse_citation_ids(answer) if 1 <= n <= len(pool)]
+    covered = sum(1 for g in gold_spans if any(chunk_hits(c, (g,)) for c in valid))
+    return covered / len(gold_spans)
+
+
 _CF_SYS = "你是严格的引用核验裁判。只输出 JSON,不要多余文字。"
 
 

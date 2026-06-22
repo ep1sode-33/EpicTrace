@@ -46,3 +46,19 @@ def test_citation_faithfulness():
     assert score_citation_faithfulness(j, answer="见 [1][2]", cited_texts=["t1", "t2"]) == 0.5
     assert _math.isnan(score_citation_faithfulness(_FakeJudge2(None), answer="x", cited_texts=["t"]))
     assert _math.isnan(score_citation_faithfulness(_FakeJudge2({"citations": []}), answer="x", cited_texts=[]))
+
+
+def test_recall_complements_accuracy():
+    """citation_recall:答案引用的块覆盖了多少 gold 跨度(端到端可追溯)。与 accuracy 互补——
+    单 gold 下多引相关旁证拉低 accuracy 却不影响 recall。"""
+    from scripts.rag_eval.metrics_citation import citation_recall
+    gold = (GoldSpan(1, 0, 50),)
+    pool = [C(1, 10, 40), C(2, 0, 10)]                 # [1] 命中 gold,[2] 不命中
+    assert citation_recall("依据 [1]", pool, gold) == 1.0
+    assert citation_recall("依据 [2]", pool, gold) == 0.0
+    assert citation_recall("依据 [1] 和 [2]", pool, gold) == 1.0   # 多引含 gold → recall 仍 1(accuracy 仅 0.5)
+    assert citation_recall("无引用", pool, gold) == 0.0            # 没引 → 没覆盖 gold
+    gold2 = (GoldSpan(1, 0, 50), GoldSpan(2, 0, 10))
+    assert citation_recall("依据 [1]", pool, gold2) == 0.5         # 覆盖 1/2 gold
+    assert citation_recall("依据 [1][2]", pool, gold2) == 1.0
+    assert _math.isnan(citation_recall("依据 [1]", pool, ()))      # 无 gold → nan

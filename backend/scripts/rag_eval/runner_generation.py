@@ -17,7 +17,8 @@ from scripts.rag_eval.metrics import (
     context_precision_ordered_at_k, mrr, ndcg_at_k, recall_any_at_k, recall_coverage_at_k,
 )
 from scripts.rag_eval.metrics_citation import (
-    citation_accuracy, citation_validity, parse_citation_ids, score_citation_faithfulness,
+    citation_accuracy, citation_recall, citation_validity, parse_citation_ids,
+    score_citation_faithfulness,
 )
 from scripts.rag_eval.metrics_generation import (
     score_answer_correctness, score_answer_relevancy, score_faithfulness, score_refusal_correctness,
@@ -61,6 +62,7 @@ def _run_one(it, *, build_chat_model, llm, retriever, judge, cache, judge_model,
     m["agent_mrr"] = mrr(pool, it.gold_spans)
     m["citation_validity"] = citation_validity(answer, len(pool))
     m["citation_accuracy"] = citation_accuracy(answer, pool, it.gold_spans)
+    m["citation_recall"] = citation_recall(answer, pool, it.gold_spans)
     m["citation_faithfulness"] = _cached(
         cache, judge_model, "citation_faithfulness", it.id, answer, context,
         lambda: score_citation_faithfulness(judge, answer=answer, cited_texts=cited_texts))

@@ -5,7 +5,7 @@ _CORE = ["recall_any@5", "recall_cov@5", "mrr", "ndcg@5", "ctxp_ord@5"]
 
 # 生成类 run 的核心指标(供生成评测报告方便取用)。
 GEN_CORE = ["faithfulness", "answer_relevancy", "answer_correctness",
-            "citation_accuracy", "citation_faithfulness", "agent_recall_any@5"]
+            "citation_accuracy", "citation_recall", "citation_faithfulness", "agent_recall_any@5"]
 
 
 def _rows(summary: dict) -> dict[str, dict]:
