@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,10 +68,13 @@ def _httpx_transport(url, headers, json_body):
 
 
 class AnthropicJudge:
-    def __init__(self, config: JudgeConfig, *, transport=None, retries: int = 2) -> None:
+    # retries=4(5 次):并发评分时给限流/过载留足退避空间。backoff_base 可调(测试设 0 提速)。
+    def __init__(self, config: JudgeConfig, *, transport=None, retries: int = 4,
+                 backoff_base: float = 2.0) -> None:
         self._cfg = config
         self._transport = transport or _httpx_transport
         self._retries = retries
+        self._backoff = backoff_base
 
     def judge_json(self, system: str, user: str, *, max_tokens: int = 1024) -> dict | None:
         url = self._cfg.base_url.rstrip("/") + "/v1/messages"
@@ -77,15 +82,29 @@ class AnthropicJudge:
                    "content-type": "application/json"}
         body = {"model": self._cfg.model, "max_tokens": max_tokens, "system": system,
                 "messages": [{"role": "user", "content": user}]}
-        for _ in range(self._retries + 1):
+        n = self._retries + 1
+        for attempt in range(n):
             try:
                 status, payload = self._transport(url, headers, body)
-                if status == 200:
-                    blocks = payload.get("content") or []
-                    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-                    parsed = extract_json(text)
-                    if parsed is not None:
-                        return parsed
-            except Exception:  # noqa: BLE001 — 重试
-                pass
+            except Exception as e:  # noqa: BLE001 — 重试
+                print(f"[judge] transport error {type(e).__name__} (try {attempt + 1}/{n})",
+                      file=sys.stderr, flush=True)
+                status, payload = 0, {}
+            if status == 200:
+                blocks = payload.get("content") or []
+                text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+                parsed = extract_json(text)
+                if parsed is not None:
+                    return parsed
+                print(f"[judge] HTTP 200 但 JSON 解析失败 (try {attempt + 1}/{n})", file=sys.stderr, flush=True)
+            elif status in (429, 500, 502, 503, 504, 529):
+                # 限流(429)/过载/网关错:警告 + 指数退避。并发量过高时这里会刷 → 提示该降并发。
+                wait = self._backoff * (2 ** attempt)
+                tag = "RATE-LIMIT(429)" if status == 429 else f"OVERLOAD/5xx({status})"
+                print(f"[judge] {tag} → 退避 {wait:.0f}s 重试 (try {attempt + 1}/{n})",
+                      file=sys.stderr, flush=True)
+                if attempt < self._retries:
+                    time.sleep(wait)
+            else:
+                print(f"[judge] HTTP {status} (try {attempt + 1}/{n})", file=sys.stderr, flush=True)
         return None

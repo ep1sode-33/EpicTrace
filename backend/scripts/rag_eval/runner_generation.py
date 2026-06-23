@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from epictrace.agent.answer import stream_final_answer
 from epictrace.agent.react import FALLBACK, run_react_loop
@@ -65,19 +66,35 @@ def _run_one(it, *, build_chat_model, llm, retriever, judge, cache, judge_model,
     m["citation_validity"] = citation_validity(answer, len(pool))
     m["citation_accuracy"] = citation_accuracy(answer, pool, it.gold_spans)
     m["citation_recall"] = citation_recall(answer, pool, it.gold_spans)
-    m["citation_faithfulness"] = _cached(
-        cache, judge_model, "citation_faithfulness", it.id, answer, context,
-        lambda: score_citation_faithfulness(judge, answer=answer, cited_texts=cited_texts))
-    m["faithfulness"] = _cached(cache, judge_model, "faithfulness", it.id, answer, context,
-                                lambda: score_faithfulness(judge, answer=answer, context=context))
-    m["answer_relevancy"] = _cached(cache, judge_model, "answer_relevancy", it.id, answer, "",
-                                    lambda: score_answer_relevancy(judge, question=it.question, answer=answer))
-    m["answer_correctness"] = _cached(
-        cache, judge_model, "answer_correctness", it.id, answer, it.reference_answer,
-        lambda: score_answer_correctness(judge, question=it.question, answer=answer, reference=it.reference_answer))
+    # 判官评分(4–5 个独立 metric)→ 每题内并发,把串行的判官网络等待压成并行(瓶颈处提速)。
+    # 只并发判官 HTTP(无共享可变态,缓存已加锁);agent/检索在上方已串行跑完,绝不并发碰 Milvus。
+    judge_tasks = {
+        "citation_faithfulness": lambda: _cached(
+            cache, judge_model, "citation_faithfulness", it.id, answer, context,
+            lambda: score_citation_faithfulness(judge, answer=answer, cited_texts=cited_texts)),
+        "faithfulness": lambda: _cached(
+            cache, judge_model, "faithfulness", it.id, answer, context,
+            lambda: score_faithfulness(judge, answer=answer, context=context)),
+        "answer_relevancy": lambda: _cached(
+            cache, judge_model, "answer_relevancy", it.id, answer, "",
+            lambda: score_answer_relevancy(judge, question=it.question, answer=answer)),
+        "answer_correctness": lambda: _cached(
+            cache, judge_model, "answer_correctness", it.id, answer, it.reference_answer,
+            lambda: score_answer_correctness(judge, question=it.question, answer=answer,
+                                             reference=it.reference_answer)),
+    }
     if it.slices.get("q_type") == "negation":
-        m["refusal_correctness"] = _cached(cache, judge_model, "refusal_correctness", it.id, answer, "",
-                                           lambda: score_refusal_correctness(judge, question=it.question, answer=answer))
+        judge_tasks["refusal_correctness"] = lambda: _cached(
+            cache, judge_model, "refusal_correctness", it.id, answer, "",
+            lambda: score_refusal_correctness(judge, question=it.question, answer=answer))
+    with ThreadPoolExecutor(max_workers=len(judge_tasks)) as ex:
+        futs = {name: ex.submit(fn) for name, fn in judge_tasks.items()}
+        for name, fut in futs.items():
+            try:
+                m[name] = fut.result()
+            except Exception as e:  # noqa: BLE001 — 单 metric 异常不崩整轮,记 nan
+                print(f"[judge] metric {name} 异常 {type(e).__name__} → nan", file=sys.stderr, flush=True)
+                m[name] = math.nan
     return {"id": it.id, "slices": it.slices, "metrics": m, "answer": answer}
 
 

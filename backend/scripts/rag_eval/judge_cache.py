@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 
@@ -18,6 +19,7 @@ class JudgeCache:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._mem: dict[str, dict] = {}
+        self._lock = threading.Lock()  # 每题内 5 路判官并发都会 put,文件 append 需互斥
         if self._path.is_file():
             for line in self._path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
@@ -28,7 +30,8 @@ class JudgeCache:
         return self._mem.get(key)
 
     def put(self, key: str, value: dict) -> None:
-        self._mem[key] = value
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"k": key, "v": value}, ensure_ascii=False) + "\n")
+        with self._lock:
+            self._mem[key] = value
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"k": key, "v": value}, ensure_ascii=False) + "\n")
