@@ -40,6 +40,25 @@ def test_single_round_then_answer_collects_pool():
     assert [c.text for c in acc.chunks] == ["TLB项目内容"]
 
 
+def test_force_seed_retrieves_before_loop_even_if_agent_skips():
+    # 模拟"凭记忆跳检索"的 bug:模型一上来就不调工具、直接答。
+    retr = _Retr([_proj_chunk("强制预检索兜底的内容")])
+    model = FakeChatModel(script=[AIMessage(content="我直接答")])
+    acc = ChunkAccumulator()
+    status = run_react_loop(model, _tools(retr), acc, "听起来像常识的问题", history=[])
+    assert [c.text for c in acc.chunks] == ["强制预检索兜底的内容"]  # 预检索把 gold 兜回来
+    assert status == "ok"                                          # 池非空 → 可作答
+
+
+def test_force_seed_off_restores_skip_to_direct():
+    retr = _Retr([_proj_chunk("x")])
+    model = FakeChatModel(script=[AIMessage(content="我直接答")])
+    acc = ChunkAccumulator()
+    status = run_react_loop(model, _tools(retr), acc, "你好", history=[], force_seed=False)
+    assert acc.chunks == []          # 关掉预检索 → 跳检索行为还原
+    assert status == "direct"        # 无工具调用 + 池空 → direct
+
+
 def test_multi_round_accumulates_across_rounds():
     retr = _Retr([_proj_chunk("片段A", cs=0, ce=3)])
     model = FakeChatModel(script=[

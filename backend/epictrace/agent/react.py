@@ -18,14 +18,36 @@ LOOP_SYS = (
 )
 
 
+def _seed_first_retrieval(tools, accumulator: ChunkAccumulator, question: str) -> None:
+    """强制首轮检索:进 agent 循环前,用**原始问题**直接跑一次主检索(search_project_library),
+    把命中的 chunk 塞进池。治两类失败(eval 实测,二者点①用原始问题都能命中 gold):
+      ① agent 自认为知道答案 → 整轮跳检索(池空、凭记忆答、无引用);
+      ② agent 把问题重写成更差的 query → 丢了召回。
+    最终答由 pool 生成,故预检索即保证接地 + 可追溯。无分数门(reranker 分不可阈值化:实测低分但
+    排名正确的内容题会被误杀)。预检索失败不致命——循环里 agent 仍会自行检索。"""
+    seed = next((t for t in tools if getattr(t, "name", "") == "search_project_library"), None)
+    if seed is None:
+        return
+    try:
+        tm = seed.invoke({"name": seed.name, "args": {"query": question},
+                          "id": "seed", "type": "tool_call"})
+        if getattr(tm, "artifact", None):
+            accumulator.extend(list(tm.artifact))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: str,
                    *, history: list[dict], max_rounds: int = 8,
-                   attachment_manifest: str = "") -> str:
+                   attachment_manifest: str = "", force_seed: bool = True) -> str:
     """跑 agent↔tools 循环,只攒池(chunk 从 ToolMessage.artifact 收割)。返回状态:
       "ok"      → 池里有 chunk(或正常停手),交给 GENERATE 作答;
       "direct"  → 全程未调工具且池空(寒暄)→ ChatService 走 direct 直答;
       FALLBACK  → 第一轮就崩且池空 → ChatService 回退 Plan 5。
+    force_seed=True:进循环前强制用原始问题预检索一次(见 _seed_first_retrieval)。
     鲁棒:撞 max_rounds → 停搜 force-answer;某轮 invoke 抛错 → 重试 1 次,再坏则按池空/非空收尾。"""
+    if force_seed:
+        _seed_first_retrieval(tools, accumulator, question)
     bound = chat_model.bind_tools(tools)
     tool_node = ToolNode(tools)
 
