@@ -229,3 +229,19 @@ dataclass/YAML:**retrieval**(`k/dense_n/fuse_m/top_k/RRF-k0/dense-sparse 权重/
 - 报告分片 × 分阶段,`diff` 出 run-vs-run delta。
 - 指标纯函数 + judge 聚合 + runner smoke 有单测(假 LLM,不起真模型)。
 - 跑出一份**基线 run**,把 §11 的弱点各自量化到具体分片(基线即「第一批客户」的起点)。
+
+## 14. 已知局限与超出范围(2026-06-23 更新)
+
+诚实记录:本 harness 已落地核心价值(找+修了 LOOP_SYS / 强制首轮检索 / 意图路由 三个真问题,具统计严谨 + 可复现 + 平衡可信基线 + off-family 判官 + reranker 假阴性洞见)。以下为**有意推后或不适用于本个人项目**的项,记为已知局限而非假装做完——清晰划界本身是工程成熟度的一部分。
+
+1. **判官校准不全**:correctness 判官曾在 22 题上人工校准(二值 kappa=1.0),但判官后来由 krill 代理换成 Claude Code 子代理(off-family Opus),**该校准已过期**;`faithfulness` / `citation_faithfulness` **从未校准** → 这几项分数是"判官说了算",未经人工验证。要对外强断言需重标 30–50 条(含 ≥30% 负例)。
+2. **单标注者,无 IAA**:golden = 合成 + 单人精修,无多标注者一致性(kappa)。单人项目无法凑多标注者;如实声明"单标注者"优于造假 IAA。
+3. **无 held-out 划分**:64 题单一集,既调参又评测;反复 hill-climb 有过拟合风险(目前仅三处改动,风险低)。继续大改前应划 dev/test。
+4. **小片统计力弱**:py/md/multi_hop/negation 等片 n 小;CI 已**诚实**摊出不确定性(如 `multi_hop@5`=[0.40,1.00]),不支持细分片强断言。诚实宽 CI 优于补量造假精度。
+5. **单-gold recall 的假阴性**:多源答案下单一 gold 跨度会冤枉系统(实例 gv2_0002/0026:系统答对但 recall@5=0,已补多 gold)。**judged correctness 是更稳的真信号**;多 gold 修复非系统性。
+6. **无 CI 回归门**:eval 数据本地 + gitignored(隐私),GitHub Actions 无数据可跑 → 要上需先造一份可提交的小 fixture。
+7. **context_relevance 未补**:与已有 `context_precision` 高度重叠,信息增量低;RAG triad 实质已由 recall/precision + faithfulness + answer_relevancy 覆盖。
+8. **gv2_0017 真·检索难项**:reranker 对高度转述的中文叙事(回滚事故)打超低分,把 fused@1 的 gold 挤出 top-6(详见 §11.4 MMR/去冗 + 潜在 reranker-融合集成解);未改 reranker——为 1 个真受益者不冒全管线回归险。
+9. **否定题拒答弱(refusal≈0.60)**:实测 reranker 分**不可阈值化**(否定题反高分、低分内容题被误杀),故不能用分数门做拒答;需 LLM 可答性判断,留后。
+10. **引用显示跳号**:按 pool 位置编号、非连续(如 [5][9],忠实但观感),未做显示层重编号。
+11. **删源**:Review.pdf(题目清单,非内容,两级 recall 均 0)已从语料/索引剔除,连带剔除据其合成的低质题 g0000;golden 64 题。
