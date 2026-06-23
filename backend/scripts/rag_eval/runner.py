@@ -55,10 +55,13 @@ def run_retrieve(golden, retriever, *, project_id: int, config: EvalConfig) -> d
             "per_question": per_q, "by_slice": by_slice, "overall": _aggregate(per_q)}
 
 
-def write_run(result: dict, runs_dir: str | Path) -> Path:
+def write_run(result: dict, runs_dir: str | Path, *, meta: dict | None = None) -> Path:
+    """落盘 run。目录前缀用 **run_hash**(若 meta 给了)而非 config_hash —— 这样改了 prompt/代码/
+    数据的语义不同 run 不再撞同一前缀(修审计)。meta 全量溯源(config/code_fp/dataset_fp/git_sha/
+    模型 id/seed)写进 run.json,使归档自描述、可复现。"""
     runs_dir = Path(runs_dir)
     runs_dir.mkdir(parents=True, exist_ok=True)
-    base = result["config_hash"]
+    base = (meta or {}).get("run_hash") or result["config_hash"]
     seq = len(list(runs_dir.glob(f"{base}-*")))
     out = runs_dir / f"{base}-{seq}"
     out.mkdir(parents=True, exist_ok=True)
@@ -68,5 +71,9 @@ def write_run(result: dict, runs_dir: str | Path) -> Path:
     with (out / "per_question.jsonl").open("w", encoding="utf-8") as f:
         for rec in result["per_question"]:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    (out / "config.json").write_text(json.dumps({"config_hash": base}, ensure_ascii=False), encoding="utf-8")
+    (out / "config.json").write_text(
+        json.dumps({"config_hash": result["config_hash"]}, ensure_ascii=False), encoding="utf-8")
+    if meta is not None:
+        (out / "run.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return out

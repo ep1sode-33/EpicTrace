@@ -29,6 +29,34 @@ def _load_summary(p: str) -> dict:
     return json.loads(Path(p).read_text(encoding="utf-8"))
 
 
+def _build_meta(cfg, golden_path: str, *, judge_model=None, gen_model=None) -> dict:
+    """全量溯源:run_hash(config+code+data)+ 全 config + 代码/数据指纹 + git SHA + 模型 id + seed。"""
+    from dataclasses import asdict
+
+    from scripts.rag_eval import provenance
+    ch = cfg.config_hash()
+    code_fp = provenance.code_fingerprint()
+    ds_fp = provenance.dataset_fingerprint(golden_path)
+    meta = {"run_hash": provenance.run_hash(ch, code_fp, ds_fp), "config_hash": ch,
+            "config": asdict(cfg), "code_fingerprint": code_fp, "dataset_fingerprint": ds_fp,
+            "git_sha": provenance.git_sha(), "label": cfg.label, "seed": 0}
+    if judge_model:
+        meta["judge_model"] = judge_model
+    if gen_model:
+        meta["gen_model"] = gen_model
+    return meta
+
+
+def _active_model_name():
+    """被测生成器(DeepSeek)的活动 profile 模型名;读不到 → None(不挡归档)。"""
+    try:
+        from epictrace.config import AppConfig
+        from epictrace.services.settings import SettingsService
+        return (SettingsService(AppConfig()).get_active_profile() or {}).get("model")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _cmd_report(ns) -> int:
     print(format_report(_load_summary(ns.summary), metrics=ns.metrics))
     return 0
@@ -69,7 +97,7 @@ def _cmd_retrieve(ns) -> int:
     cfg = EvalConfig(k=ns.k, dense_n=ns.dense_n, fuse_m=ns.fuse_m, label=ns.label or "")
     retr = build_retriever(ns.project_id)
     res = run_retrieve(golden, retr, project_id=ns.project_id, config=cfg)
-    out = write_run(res, _RUNS)
+    out = write_run(res, _RUNS, meta=_build_meta(cfg, ns.golden))
     print(format_report({k: res[k] for k in ("config_hash", "n", "by_slice", "overall")}))
     print(f"\n[rag-eval] run written to {out}", file=sys.stderr)
     return 0
@@ -85,10 +113,13 @@ def _cmd_run(ns) -> int:
     golden = load_golden(ns.golden)
     cfg = EvalConfig(k=ns.k, dense_n=ns.dense_n, fuse_m=ns.fuse_m, label=ns.label or "")
     cache = JudgeCache(_RUNS / "judge_cache.jsonl")
+    judge = wiring.build_judge()
     res = _run_generation(golden, build_chat_model=wiring.build_chat_model_factory(),
                          llm=wiring.build_llm(), retriever=wiring.build_retriever(ns.project_id),
-                         judge=wiring.build_judge(), cache=cache, project_id=ns.project_id, config=cfg)
-    out = write_run(res, _RUNS)
+                         judge=judge, cache=cache, project_id=ns.project_id, config=cfg)
+    judge_model = getattr(getattr(judge, "_cfg", None), "model", None)
+    out = write_run(res, _RUNS, meta=_build_meta(cfg, ns.golden, judge_model=judge_model,
+                                                 gen_model=_active_model_name()))
     print(format_report({k: res[k] for k in ("config_hash", "n", "by_slice", "overall")}, metrics=GEN_CORE))
     print(f"\n[rag-eval] run written to {out}", file=sys.stderr)
     return 0
