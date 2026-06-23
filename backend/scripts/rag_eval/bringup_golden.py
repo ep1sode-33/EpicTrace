@@ -33,6 +33,8 @@ def main(argv=None) -> int:
     p.add_argument("--eval-data", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--limit", type=int, default=0, help="只处理前 N 个 chunk(0=全部),试水用")
+    p.add_argument("--min-rid", dest="min_rid", type=int, default=0,
+                   help="只对 ingest_record_id >= min_rid 的 chunk 合成(增量:只出新记录的题)")
     ns = p.parse_args(argv if argv is not None else sys.argv[1:])
 
     cfg = AppConfig()
@@ -49,6 +51,8 @@ def main(argv=None) -> int:
     store = MilvusLiteStore(db_path=cfg.milvus_path)
     gen = build_judge()  # Claude Opus,off-family,不让被测 DeepSeek 自己出题
     chunks = store.list_by_project(ns.project_id)
+    if ns.min_rid:
+        chunks = [c for c in chunks if c["ingest_record_id"] >= ns.min_rid]
     if ns.limit:
         chunks = chunks[:ns.limit]
 
