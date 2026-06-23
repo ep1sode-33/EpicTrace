@@ -39,6 +39,30 @@ def _cmd_diff(ns) -> int:
     return 0
 
 
+def _load_per_q(run_dir: str) -> list[dict]:
+    p = Path(run_dir) / "per_question.jsonl"
+    return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _cmd_report_ci(ns) -> int:
+    from scripts.rag_eval.report import format_report_ci
+    print(format_report_ci(_load_per_q(ns.run), metrics=ns.metrics))
+    return 0
+
+
+def _cmd_diff_paired(ns) -> int:
+    from scripts.rag_eval.report import diff_runs_paired
+    print(diff_runs_paired(_load_per_q(ns.a), _load_per_q(ns.b), metrics=ns.metrics))
+    return 0
+
+
+def _cmd_agg(ns) -> int:
+    from scripts.rag_eval.report import format_multirun
+    sums = [_load_summary(str(Path(d) / "summary.json")) for d in ns.runs]
+    print(format_multirun(sums, metrics=ns.metrics))
+    return 0
+
+
 def _cmd_retrieve(ns) -> int:
     from scripts.rag_eval.wiring import build_retriever
     golden = load_golden(ns.golden)
@@ -116,6 +140,15 @@ def main(argv: list[str] | None = None) -> int:
 
     d = sub.add_parser("diff"); d.set_defaults(fn=_cmd_diff)
     d.add_argument("--a", required=True); d.add_argument("--b", required=True); d.add_argument("--metrics", nargs="*", default=None)
+
+    rci = sub.add_parser("report-ci"); rci.set_defaults(fn=_cmd_report_ci)
+    rci.add_argument("--run", required=True); rci.add_argument("--metrics", nargs="*", default=None)
+
+    dp = sub.add_parser("diff-paired"); dp.set_defaults(fn=_cmd_diff_paired)
+    dp.add_argument("--a", required=True); dp.add_argument("--b", required=True); dp.add_argument("--metrics", nargs="*", default=None)
+
+    ag = sub.add_parser("agg"); ag.set_defaults(fn=_cmd_agg)
+    ag.add_argument("--runs", nargs="+", required=True); ag.add_argument("--metrics", nargs="*", default=None)
 
     idx = sub.add_parser("index"); idx.set_defaults(fn=_cmd_index)
     idx.add_argument("--eval-data", dest="eval_data", required=True); idx.add_argument("--project-name", dest="project_name", default="rag-eval")

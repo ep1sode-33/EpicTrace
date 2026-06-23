@@ -61,3 +61,12 @@ def test_context_precision_plain_and_ordered():
     assert math.isclose(
         context_precision_ordered_at_k(ranked, gold, k=3), (1.0 + 2 / 3) / 2, rel_tol=1e-9)
     assert context_precision_ordered_at_k([C(9, 0, 1)], gold, k=3) == 0.0
+
+
+def test_empty_gold_returns_nan():
+    """否定/不可答题(gold_spans 空)→ 所有检索指标 nan(无定义),交给 nan-aware 聚合跳过。"""
+    ranked = [C(1, 0, 5), C(2, 0, 5)]
+    for fn in (recall_any_at_k, recall_coverage_at_k, ndcg_at_k,
+               context_precision_at_k, context_precision_ordered_at_k):
+        assert math.isnan(fn(ranked, (), 5))
+    assert math.isnan(mrr(ranked, ()))

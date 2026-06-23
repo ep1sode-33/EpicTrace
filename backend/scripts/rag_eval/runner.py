@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from scripts.rag_eval.config import EvalConfig
@@ -23,7 +24,9 @@ def _per_question_metrics(ranked, gold_spans, k_values) -> dict:
 
 
 def _mean(vals: list[float]) -> float:
-    return sum(vals) / len(vals) if vals else 0.0
+    """nan-aware:跳过 nan(否定/不可答题的检索指标为 nan,不该被算成 0 拉低均值);全 nan/空 → nan。"""
+    good = [v for v in vals if not (isinstance(v, float) and math.isnan(v))]
+    return sum(good) / len(good) if good else math.nan
 
 
 def _aggregate(per_q: list[dict]) -> dict:

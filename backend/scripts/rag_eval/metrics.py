@@ -18,14 +18,17 @@ def chunk_hits(chunk, gold_spans) -> bool:
 
 
 def recall_any_at_k(ranked, gold_spans, k: int) -> float:
-    """top-k 内有任一命中 = 1.0 否则 0.0。"""
+    """top-k 内有任一命中 = 1.0 否则 0.0;无 gold 跨度(如否定/不可答题)→ nan(检索 recall 无定义,
+    交给 nan-aware 聚合跳过,避免空-gold 题把 recall 拉成 0)。"""
+    if not gold_spans:
+        return math.nan
     return 1.0 if any(chunk_hits(c, gold_spans) for c in ranked[:k]) else 0.0
 
 
 def recall_coverage_at_k(ranked, gold_spans, k: int) -> float:
-    """多跳:top-k 命中的 gold 跨度数 / 总 gold 跨度数。"""
+    """多跳:top-k 命中的 gold 跨度数 / 总 gold 跨度数。无 gold → nan。"""
     if not gold_spans:
-        return 0.0
+        return math.nan
     top = ranked[:k]
     covered = sum(
         1 for g in gold_spans
@@ -37,7 +40,9 @@ def recall_coverage_at_k(ranked, gold_spans, k: int) -> float:
 
 
 def mrr(ranked, gold_spans) -> float:
-    """第一个命中 chunk 名次的倒数(rank 从 1 起);无命中 = 0.0。"""
+    """第一个命中 chunk 名次的倒数(rank 从 1 起);无命中 = 0.0;无 gold → nan。"""
+    if not gold_spans:
+        return math.nan
     for i, c in enumerate(ranked, start=1):
         if chunk_hits(c, gold_spans):
             return 1.0 / i
@@ -45,7 +50,9 @@ def mrr(ranked, gold_spans) -> float:
 
 
 def ndcg_at_k(ranked, gold_spans, k: int) -> float:
-    """二值相关性的 nDCG@k:rel_i = 命中=1 否则 0;IDCG = 把命中全排前面的理想排序。"""
+    """二值相关性的 nDCG@k:rel_i = 命中=1 否则 0;IDCG = 把命中全排前面的理想排序。无 gold → nan。"""
+    if not gold_spans:
+        return math.nan
     rels = [1.0 if chunk_hits(c, gold_spans) else 0.0 for c in ranked[:k]]
     dcg = sum(rel / math.log2(i + 2) for i, rel in enumerate(rels))
     ideal = sorted(rels, reverse=True)
@@ -54,7 +61,9 @@ def ndcg_at_k(ranked, gold_spans, k: int) -> float:
 
 
 def context_precision_at_k(ranked, gold_spans, k: int) -> float:
-    """信噪比:top-k 内命中数 / 实际考察数(min(k, 返回数))。"""
+    """信噪比:top-k 内命中数 / 实际考察数(min(k, 返回数))。无 gold → nan。"""
+    if not gold_spans:
+        return math.nan
     top = ranked[:k]
     if not top:
         return 0.0
@@ -63,7 +72,9 @@ def context_precision_at_k(ranked, gold_spans, k: int) -> float:
 
 
 def context_precision_ordered_at_k(ranked, gold_spans, k: int) -> float:
-    """RAGAS 式有序版:命中越靠前得分越高。Σ(precision@i · 命中_i) / 命中总数。"""
+    """RAGAS 式有序版:命中越靠前得分越高。Σ(precision@i · 命中_i) / 命中总数。无 gold → nan。"""
+    if not gold_spans:
+        return math.nan
     top = ranked[:k]
     hits_so_far = 0
     acc = 0.0
