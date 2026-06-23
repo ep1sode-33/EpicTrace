@@ -30,9 +30,15 @@ def test_mcnemar():
 def test_permutation():
     assert paired_permutation_p([0.1] * 12, [0.9] * 12, seed=1) < 0.01   # 一致大涨 → 显著
     assert paired_permutation_p([0.5] * 8, [0.5] * 8) == 1.0             # 无差异
+    # add-one 下界:强效应也绝不返回 p=0(统计上不可能);p ∈ (0, 1/(n_perm+1)]
+    p = paired_permutation_p([0.0] * 30, [1.0] * 30)
+    assert 0.0 < p <= 1.0 / (5000 + 1) + 1e-12
 
 
 def test_auto_select():
     assert is_binary([0.0, 1.0, math.nan, 1.0]) is True
     assert is_binary([0.5, 1.0]) is False
+    assert is_binary([]) is False                                       # 空 → 不再 vacuous-true
+    assert is_binary([math.nan, math.nan]) is False
     assert paired_significance([1, 1, 0, 0], [1, 1, 0, 0]) == 1.0        # 二值→McNemar
+    assert math.isnan(paired_significance([math.nan] * 4, [math.nan] * 4))  # 无有效配对 → nan

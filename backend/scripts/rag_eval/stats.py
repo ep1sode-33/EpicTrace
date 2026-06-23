@@ -52,8 +52,10 @@ def _paired(a, b) -> list[tuple[float, float]]:
 
 
 def is_binary(values) -> bool:
-    """非 nan 值是否全 ∈ {0,1}(决定用 McNemar 还是置换检验)。"""
-    return all(v in (0.0, 1.0) for v in _clean(values))
+    """非 nan 值**非空且**全 ∈ {0,1}(决定用 McNemar 还是置换检验)。空/全-nan → False(避免
+    vacuous-true 把空输入误路由到 McNemar 而静默返回 p=1.0)。"""
+    vals = _clean(values)
+    return bool(vals) and all(v in (0.0, 1.0) for v in vals)
 
 
 def mcnemar_p(a, b) -> float:
@@ -83,11 +85,18 @@ def paired_permutation_p(a, b, *, n_perm: int = 5000, seed: int = 0) -> float:
         s = abs(sum(d if rng.random() < 0.5 else -d for d in diffs) / len(diffs))
         if s >= obs - 1e-12:
             cnt += 1
-    return cnt / n_perm
+    # add-one 估计量:观测排列(全 + 号)本身就是一个合法排列,必须计入 → p 永不为 0(下界 1/(n_perm+1))。
+    return (cnt + 1) / (n_perm + 1)
 
 
 def paired_significance(a, b) -> float:
-    """自动选检验:两组逐项值全 ∈{0,1} → McNemar;否则配对置换。返回 p 值。"""
-    if is_binary(a) and is_binary(b):
-        return mcnemar_p(a, b)
-    return paired_permutation_p(a, b)
+    """自动选检验:配对后两侧值全 ∈{0,1} → McNemar;否则配对置换。无有效配对 → nan(无法检验,
+    别报成"不显著 p=1.0")。"""
+    pairs = _paired(a, b)
+    if not pairs:
+        return math.nan
+    pa = [x for x, _ in pairs]
+    pb = [y for _, y in pairs]
+    if is_binary(pa) and is_binary(pb):
+        return mcnemar_p(pa, pb)
+    return paired_permutation_p(pa, pb)
