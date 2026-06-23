@@ -2,12 +2,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# 不引入 tokenizer 依赖:用字符数近似 token(~4 字符/token)。
-DEFAULT_TARGET = 1800   # ~约 450-512 token
+# target/overlap 是"英文等效字符数":英文 ~4 字符/token,1800 字 ≈ 450-512 token。
+# 但中文 ~1.3 字/token,同样 1800 字是 2-3 倍 token、块过大、检索粒度/引用跨度粗。
+# chunk_text 按文本实际语言组成把字符目标**缩放到统一 token 预算**(见 _chars_per_token),
+# 不引 tokenizer 依赖;纯英文缩放比≈1、行为不变。
+DEFAULT_TARGET = 1800   # 英文 ~450-512 token
 DEFAULT_OVERLAP = 200
+_REF_CPT = 4.0          # 英文基线:每 token ~4 字符(缩放参照)
 
 # 优先级从高到低的断句点(在窗口尾部就近找一个,避免把句子切碎)。
 _BOUNDARIES = ["\n\n", "\n", "。", "! ", "? ", ". ", "!", "?", ";", ";"]
+
+
+def _is_cjk(ch: str) -> bool:
+    o = ord(ch)
+    return (0x4E00 <= o <= 0x9FFF      # CJK 统一表意
+            or 0x3400 <= o <= 0x4DBF   # 扩展 A
+            or 0xF900 <= o <= 0xFAFF   # 兼容表意
+            or 0x3000 <= o <= 0x303F   # CJK 标点
+            or 0xFF00 <= o <= 0xFFEF)  # 全角符号
+
+
+def _chars_per_token(text: str) -> float:
+    """估每 token 字符数(不引 tokenizer):CJK 约 1.3 字/token,其余(拉丁/数字/空白)约 4。
+    按文本组成加权 → 纯英文≈4、纯中文≈1.3、混合居中。"""
+    if not text:
+        return _REF_CPT
+    cjk = sum(1 for ch in text if _is_cjk(ch))
+    est_tokens = cjk / 1.3 + (len(text) - cjk) / _REF_CPT
+    return len(text) / est_tokens if est_tokens > 0 else _REF_CPT
 
 
 @dataclass(frozen=True)
@@ -32,6 +55,10 @@ def chunk_text(
 ) -> list[Chunk]:
     if not text.strip():  # 空 / 仅空白:无可索引内容
         return []
+    # 按文本语言把字符目标缩放到统一 token 预算:中文块不再是英文的 2-3 倍大。
+    scale = _chars_per_token(text) / _REF_CPT
+    overlap = max(round(overlap * scale), 30)
+    target = max(round(target * scale), 3 * overlap)
     n = len(text)
     chunks: list[Chunk] = []
     start = 0
