@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import logging
+import os
 
-from pymilvus import DataType, MilvusClient
+# Milvus 用 gRPC。在 embedder/reranker(多进程)fork 之后再构造 gRPC client,会在 macOS 段错误
+# (crash 在 cygrpc pollset_work)。gRPC 官方 fork 支持开关必须在 import pymilvus(→gRPC 初始化)
+# 之前设;setdefault 保留外部覆盖。修本会话 eval retrieve 的稳定段错误(见 macos-embedding-milvus-fork)。
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "1")
 
-from epictrace.interfaces.vector_store import VectorStore
+from pymilvus import DataType, MilvusClient  # noqa: E402 — 须在上面设完 env 后再导入
+
+from epictrace.interfaces.vector_store import VectorStore  # noqa: E402
 
 _log = logging.getLogger("epictrace")
 
