@@ -58,6 +58,33 @@ def test_supported_profile_uses_agent_path_and_cites(tmp_path: Path):
     assert tokens == "据资料[1]。"
 
 
+def test_greeting_routes_to_direct_without_forced_retrieval(tmp_path: Path):
+    """寒暄路由:agent 不调工具(池空)+ 分类器判 chitchat → 不强制检索 → 走 direct 直答,
+    无引用、CHAT_SYS(即便检索器有内容也不硬据资料)。修 force_seed 对寒暄的回归。"""
+    db, cid = _setup(tmp_path)
+    chat_model = FakeChatModel(script=[AIMessage(content="不需要搜索"), AIMessage(content="chitchat")])
+    gen_llm = FakeLLM(answer="你好,有什么可以帮你?")
+    svc = ChatService(db, gen_llm, _ProjRetriever(), references=_Refs(db),
+                      chat_model_factory=lambda: chat_model, supports_tools=lambda: True)
+    events = list(svc.stream_answer(cid, "夜里好"))
+    cites = json.loads(next(e for e in events if e["event"] == "citations")["data"])
+    assert cites == []                                            # 寒暄→不检索→无引用
+    assert gen_llm.stream_messages[-1][0]["content"] == "你是有帮助的助手,用中文简洁作答。"
+
+
+def test_content_skip_is_force_seeded_and_grounded(tmp_path: Path):
+    """内容题被 agent 漏检(凭记忆跳检索,池空)+ 分类器判 content → 强制补种原始问题 →
+    池有 gold → 接地 + 引用。"""
+    db, cid = _setup(tmp_path)
+    chat_model = FakeChatModel(script=[AIMessage(content="我知道答案"), AIMessage(content="content")])
+    gen_llm = FakeLLM(answer="据资料[1]。")
+    svc = ChatService(db, gen_llm, _ProjRetriever(), references=_Refs(db),
+                      chat_model_factory=lambda: chat_model, supports_tools=lambda: True)
+    events = list(svc.stream_answer(cid, "TLB 的页表怎么算?"))
+    cites = json.loads(next(e for e in events if e["event"] == "citations")["data"])
+    assert cites and cites[0]["ingest_record_id"] == 7           # 漏检被强制补种 → 接地
+
+
 def test_unsupported_profile_matches_plan5_behavior(tmp_path: Path):
     db, cid = _setup(tmp_path)
     # supports_tools False → existing Plan 5 pipeline (route/grade via FakeLLM, project RAG).

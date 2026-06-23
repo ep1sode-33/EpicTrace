@@ -59,6 +59,22 @@ def test_force_seed_off_restores_skip_to_direct():
     assert status == "direct"        # 无工具调用 + 池空 → direct
 
 
+def test_is_chitchat_classifies_and_is_conservative():
+    from epictrace.agent.react import is_chitchat
+
+    class _M:
+        def __init__(self, reply): self._r = reply
+        def invoke(self, msgs): return AIMessage(content=self._r)
+
+    assert is_chitchat(_M("chitchat"), "你好") is True
+    assert is_chitchat(_M("CHITCHAT"), "晚上好") is True            # 大小写宽松
+    assert is_chitchat(_M("content"), "TLB 是什么") is False
+
+    class _Boom:
+        def invoke(self, msgs): raise RuntimeError("x")
+    assert is_chitchat(_Boom(), "q") is False                      # 异常 → 保守判 content
+
+
 def test_multi_round_accumulates_across_rounds():
     retr = _Retr([_proj_chunk("片段A", cs=0, ce=3)])
     model = FakeChatModel(script=[

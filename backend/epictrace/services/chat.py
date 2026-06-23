@@ -9,7 +9,7 @@ from epictrace.agent.answer import stream_final_answer
 from epictrace.agent.citations import build_citations
 from epictrace.agent.graph import build_rag_graph
 from epictrace.agent.prompts import GENERATE_SYS, format_chunks
-from epictrace.agent.react import FALLBACK, run_react_loop
+from epictrace.agent.react import FALLBACK, is_chitchat, run_react_loop, seed_first_retrieval
 from epictrace.agent.tools import ChunkAccumulator, build_tools
 from epictrace.db import Database
 from epictrace.models import Conversation, Message, _utcnow
@@ -233,8 +233,18 @@ class ChatService:
         # ---- COLLECT 段(未流式;抛错可向上冒泡 → _run_turn 安全带回退 Plan 5)----
         yield {"event": "status", "data": "检索中"}
         chat_model = self._chat_model_factory()
+        # agent 先自决跑一轮(force_seed=False:寒暄它能正确不检索)。
         status = run_react_loop(chat_model, tools, accumulator, question, history=history,
-                                attachment_manifest=manifest)
+                                attachment_manifest=manifest, force_seed=False)
+        # 意图路由(Adaptive-RAG):池空且判为纯寒暄 → 不强制检索,保持空池走 direct 自然直答
+        # (修「你好/夜里好」被硬据资料的回归);其余(被漏检的内容题、agent 已检索的轮)→ 用
+        # 原始问题强制补种,兜「凭记忆跳检索」与「query 重写丢召回」。is_chitchat 只在池空时调(短路,
+        # 常见内容题零额外分类延迟)。
+        is_greeting = not accumulator.chunks and is_chitchat(chat_model, question)
+        if not is_greeting:
+            seed_first_retrieval(tools, accumulator, question)
+            if accumulator.chunks:
+                status = "ok"
         if status == FALLBACK:
             return False  # noqa: B901 — 回退信号:调用方走 Plan 5
 

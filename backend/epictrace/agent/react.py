@@ -18,9 +18,30 @@ LOOP_SYS = (
 )
 
 
-def _seed_first_retrieval(tools, accumulator: ChunkAccumulator, question: str) -> None:
-    """强制首轮检索:进 agent 循环前,用**原始问题**直接跑一次主检索(search_project_library),
-    把命中的 chunk 塞进池。治两类失败(eval 实测,二者点①用原始问题都能命中 gold):
+def is_chitchat(chat_model, question: str) -> bool:
+    """意图路由(Adaptive-RAG):判断用户这句是否**纯寒暄/问候/闲聊/感谢/告别**(无需查阅任何
+    资料就能回应)。产品聊天路径用它决定要不要强制检索:寒暄→直答不检索(避免对"你好"硬据资料),
+    内容题→强制检索取证。**保守**:拿不准或分类失败一律返回 False(当 content 去检索)——漏检内容题
+    (凭记忆瞎答、违反可追溯铁律)比给寒暄多检一次代价大得多。"""
+    from langchain_core.messages import HumanMessage as _HM
+    from langchain_core.messages import SystemMessage as _SM
+    try:
+        msg = chat_model.invoke([
+            _SM(content="你是意图分类器,只输出一个英文词,不要任何解释。"),
+            _HM(content=(
+                "下面这句是【纯寒暄/问候/闲聊/感谢/告别】(无需任何资料就能回应),"
+                "还是【需要查阅资料才能回答的问题】?\n"
+                "只回一个词:chitchat 或 content。拿不准就回 content。\n\n"
+                f"用户:{question}")),
+        ])
+        return "chitchat" in (getattr(msg, "content", "") or "").strip().lower()
+    except Exception:  # noqa: BLE001 — 分类失败 → 当 content(去检索),安全侧
+        return False
+
+
+def seed_first_retrieval(tools, accumulator: ChunkAccumulator, question: str) -> None:
+    """强制首轮检索:用**原始问题**直接跑一次主检索(search_project_library),把命中的 chunk 塞进池。
+    治两类失败(eval 实测,二者点①用原始问题都能命中 gold):
       ① agent 自认为知道答案 → 整轮跳检索(池空、凭记忆答、无引用);
       ② agent 把问题重写成更差的 query → 丢了召回。
     最终答由 pool 生成,故预检索即保证接地 + 可追溯。无分数门(reranker 分不可阈值化:实测低分但
@@ -47,7 +68,7 @@ def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: s
     force_seed=True:进循环前强制用原始问题预检索一次(见 _seed_first_retrieval)。
     鲁棒:撞 max_rounds → 停搜 force-answer;某轮 invoke 抛错 → 重试 1 次,再坏则按池空/非空收尾。"""
     if force_seed:
-        _seed_first_retrieval(tools, accumulator, question)
+        seed_first_retrieval(tools, accumulator, question)
     bound = chat_model.bind_tools(tools)
     tool_node = ToolNode(tools)
 
