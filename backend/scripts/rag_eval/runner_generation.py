@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import math
+import sys
+import time
 
 from epictrace.agent.answer import stream_final_answer
 from epictrace.agent.react import FALLBACK, run_react_loop
@@ -82,9 +84,27 @@ def _run_one(it, *, build_chat_model, llm, retriever, judge, cache, judge_model,
 def run_generation(golden, *, build_chat_model, llm, retriever, judge, cache,
                    project_id: int, config) -> dict:
     judge_model = getattr(getattr(judge, "_cfg", None), "model", "judge")
-    per_q = [_run_one(it, build_chat_model=build_chat_model, llm=llm, retriever=retriever,
-                      judge=judge, cache=cache, judge_model=judge_model,
-                      project_id=project_id, config=config) for it in golden]
+    total = len(golden)
+
+    def _f(x):  # nan 安全的紧凑分数格式
+        return "  nan" if (isinstance(x, float) and math.isnan(x)) else f"{x:5.2f}"
+
+    per_q = []
+    t0 = time.perf_counter()
+    for i, it in enumerate(golden, 1):
+        ts = time.perf_counter()
+        rec = _run_one(it, build_chat_model=build_chat_model, llm=llm, retriever=retriever,
+                       judge=judge, cache=cache, judge_model=judge_model,
+                       project_id=project_id, config=config)
+        per_q.append(rec)
+        m, dt = rec["metrics"], time.perf_counter() - ts
+        eta = (time.perf_counter() - t0) / i * (total - i)
+        # 逐题进度 → stderr:序号、id、关键分数、单题耗时、实时 ETA(治"盲跑")
+        print(f"[{i:>3}/{total}] {it.id:<10} "
+              f"faith={_f(m.get('faithfulness'))} corr={_f(m.get('answer_correctness'))} "
+              f"relev={_f(m.get('answer_relevancy'))} citeF={_f(m.get('citation_faithfulness'))} "
+              f"rec@5={_f(m.get('agent_recall_any@5', math.nan))} fb={_f(m.get('agent_fallback'))}"
+              f" | {dt:4.0f}s  ETA {eta / 60:5.1f}m", file=sys.stderr, flush=True)
     agg = aggregate(per_q)
     return {"config_hash": config.config_hash(), "n": len(per_q), "per_question": per_q,
             "by_slice": agg["by_slice"], "overall": agg["overall"]}
