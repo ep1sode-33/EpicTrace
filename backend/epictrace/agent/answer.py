@@ -43,10 +43,22 @@ def _is_answerable(llm, question: str, pool: list[RetrievedChunk]) -> bool:
     return first not in ("no", "否", "不")
 
 
+def _iter_llm_events(llm, messages):
+    """逐块产出 {"type": "reasoning"|"content", "text": str}。llm 支持 stream_events(真端点)
+    → 分离推理/正文;不支持(测试 fake / 老 provider)→ 退化为仅 content,行为不变。"""
+    se = getattr(llm, "stream_events", None)
+    if callable(se):
+        yield from se(messages)
+    else:
+        for tok in llm.stream(messages):
+            yield {"type": "content", "text": tok}
+
+
 def stream_final_answer(llm, question: str, pool: list[RetrievedChunk], *,
                         history: list[dict], attached_names: list[str]) -> Iterator[dict]:
     """循环结束后的唯一一次作答(丢弃工具对话历史):有池→GENERATE_SYS+编号【资料】带 [n];
-    池空→CHAT_SYS 直答。流式吐 token,收尾用 build_citations(answer, 池) 复用引用命门。
+    池空→CHAT_SYS 直答。推理 token 走 thinking 事件(前端折叠「思考过程」)、正文走 token;
+    收尾用 build_citations(answer, 池) 复用引用命门。
     有池但接地闸门判【资料】不含答案 → 直接拒答(不调生成、不编造、不带引用)。"""
     if pool and not _is_answerable(llm, question, pool):
         # 资料不含答案 → 让模型生成自然、接地的拒答(不编造、不引用),而非冷模板。
@@ -77,9 +89,12 @@ def stream_final_answer(llm, question: str, pool: list[RetrievedChunk], *,
         messages.append({"role": "user", "content": question})
 
     parts: list[str] = []
-    for tok in llm.stream(messages):
-        parts.append(tok)
-        yield {"event": "token", "data": tok}
+    for ev in _iter_llm_events(llm, messages):
+        if ev["type"] == "reasoning":
+            yield {"event": "thinking", "data": ev["text"]}      # 推理过程(前端折叠块)
+        else:
+            parts.append(ev["text"])
+            yield {"event": "token", "data": ev["text"]}
 
     answer = "".join(parts)
     citations = build_citations(answer, pool) if pool else []

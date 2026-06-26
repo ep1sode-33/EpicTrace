@@ -33,10 +33,24 @@ class OpenAICompatLLM(LLMProvider):
         return resp.choices[0].message.content or ""
 
     def stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
+        # 仅正文 token(向后兼容:多数调用方只要答案文本)。
+        for ev in self.stream_events(messages, **kwargs):
+            if ev["type"] == "content":
+                yield ev["text"]
+
+    def stream_events(self, messages: list[dict], **kwargs) -> Iterator[dict]:
+        """分离推理与正文:逐块 yield {"type": "reasoning"|"content", "text": str}。
+        推理(DeepSeek `reasoning_content` / 部分端点 `reasoning`)给前端做「思考过程」折叠块;
+        不返回推理的端点只会有 content,行为与 stream() 一致。"""
         stream = self._client.chat.completions.create(
             model=self._model, messages=messages, stream=True, **kwargs
         )
         for chunk in stream:
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta
+            rc = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+            if rc:
+                yield {"type": "reasoning", "text": rc}
             if getattr(delta, "content", None):
-                yield delta.content
+                yield {"type": "content", "text": delta.content}
