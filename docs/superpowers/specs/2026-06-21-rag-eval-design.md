@@ -242,6 +242,6 @@ dataclass/YAML:**retrieval**(`k/dense_n/fuse_m/top_k/RRF-k0/dense-sparse 权重/
 6. **无 CI 回归门**:eval 数据本地 + gitignored(隐私),GitHub Actions 无数据可跑 → 要上需先造一份可提交的小 fixture。
 7. **context_relevance 未补**:与已有 `context_precision` 高度重叠,信息增量低;RAG triad 实质已由 recall/precision + faithfulness + answer_relevancy 覆盖。
 8. **gv2_0017 真·检索难项**:reranker 对高度转述的中文叙事(回滚事故)打超低分,把 fused@1 的 gold 挤出 top-6(详见 §11.4 MMR/去冗 + 潜在 reranker-融合集成解);未改 reranker——为 1 个真受益者不冒全管线回归险。
-9. **否定题拒答弱(refusal≈0.60)**:实测 reranker 分**不可阈值化**(否定题反高分、低分内容题被误杀),故不能用分数门做拒答;需 LLM 可答性判断,留后。
+9. **否定题拒答(#144 已做,2026-06)**:分数门证伪(reranker 分不可阈值化)→ 改用 **LLM 可答性闸门** `_is_answerable`(`stream_final_answer` 内,检索后判【资料】是否真含答案;判不可答 → 拒答不编造;**保守偏可答**,判失败/拿不准→放行)。子集实测:8 道可答题 **0 误拒**,3 道真 negation(gh0006/7/9)干净拒答。**更大发现**:原 5 道 negation 里 **gh0008(DeepSeek 价格)、gh0010(Gemini 规格)gold 标错** —— 答案其实在语料模型性能矩阵表里(出题漏看表行),模型正确接地作答反被判"幻觉"。已改为可答(single_hop/multi_hop,补正确 gold_spans/reference);refusal≈0.60 大半是此**gold 数据 bug**。闸门作野外兜底保留(代价 +1 LLM 调用/题;多跳 over-refusal 风险未测)。工具:`analyze_gate.py`。
 10. **引用显示跳号**:按 pool 位置编号、非连续(如 [5][9],忠实但观感),未做显示层重编号。
 11. **删源**:Review.pdf(题目清单,非内容,两级 recall 均 0)已从语料/索引剔除,连带剔除据其合成的低质题 g0000;golden 64 题。
