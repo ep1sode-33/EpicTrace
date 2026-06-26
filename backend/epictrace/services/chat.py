@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from collections.abc import Iterator
 
 from sqlalchemy import select
@@ -230,27 +232,43 @@ class ChatService:
             conversation_id=conversation_id, indexed_ext_ids=indexed_ext_ids,
             reference_texts=reference_texts, fulltext_ids=fulltext_ids)
 
-        # ---- COLLECT 段(未流式;抛错可向上冒泡 → _run_turn 安全带回退 Plan 5)----
+        # ---- COLLECT 段(检索在后台线程跑,检索步骤经队列**实时**流给前端「活动时间线」)----
+        # 同步跑会让前端在整段检索里只看到「检索中…」;这里把 agent 检索循环放线程,on_step 把每步
+        # 推进队列,主线程边收边 yield tool_step → 步骤随检索逐条出现。抛错/FALLBACK 仍按原语义回退。
         yield {"event": "status", "data": "检索中"}
         chat_model = self._chat_model_factory()
-        steps: list[dict] = []   # 本轮检索步骤(工具/查询/命中数),收集后批量透明化给前端
-        # agent 先自决跑一轮(force_seed=False:寒暄它能正确不检索)。
-        status = run_react_loop(chat_model, tools, accumulator, question, history=history,
-                                attachment_manifest=manifest, force_seed=False, on_step=steps.append)
-        # 意图路由(Adaptive-RAG):池空且判为纯寒暄 → 不强制检索,保持空池走 direct 自然直答
-        # (修「你好/夜里好」被硬据资料的回归);其余(被漏检的内容题、agent 已检索的轮)→ 用
-        # 原始问题强制补种,兜「凭记忆跳检索」与「query 重写丢召回」。is_chitchat 只在池空时调(短路,
-        # 常见内容题零额外分类延迟)。
-        is_greeting = not accumulator.chunks and is_chitchat(chat_model, question)
-        if not is_greeting:
-            seed_first_retrieval(tools, accumulator, question, on_step=steps.append)
-            if accumulator.chunks:
-                status = "ok"
-        if status == FALLBACK:
+        q: queue.Queue = queue.Queue()
+        outcome: dict = {}
+
+        def _collect() -> None:
+            try:
+                # agent 先自决跑一轮(force_seed=False:寒暄它能正确不检索)。
+                st = run_react_loop(chat_model, tools, accumulator, question, history=history,
+                                    attachment_manifest=manifest, force_seed=False,
+                                    on_step=lambda s: q.put(("step", s)))
+                # 意图路由(Adaptive-RAG):池空且纯寒暄 → 不强制检索(保持空池走 direct 自然直答);
+                # 否则用原始问题强制补种(兜跳检索 / query 重写丢召回),这步也实时报。
+                if not (not accumulator.chunks and is_chitchat(chat_model, question)):
+                    seed_first_retrieval(tools, accumulator, question,
+                                         on_step=lambda s: q.put(("step", s)))
+                    if accumulator.chunks:
+                        st = "ok"
+                outcome["status"] = st
+            except Exception as exc:  # noqa: BLE001 — 交主线程按 COLLECT 失败处理(回退 Plan 5)
+                outcome["exc"] = exc
+            finally:
+                q.put(("done", None))
+
+        threading.Thread(target=_collect, daemon=True).start()
+        while True:
+            kind, payload = q.get()
+            if kind == "done":
+                break
+            yield {"event": "tool_step", "data": json.dumps(payload, ensure_ascii=False)}
+        if "exc" in outcome:
+            raise outcome["exc"]          # 与原同步抛错同义:冒泡到 _run_turn 安全带 → Plan 5
+        if outcome.get("status") == FALLBACK:
             return False  # noqa: B901 — 回退信号:调用方走 Plan 5
-        # 透明化:把检索步骤(知识库查询 + 命中段数)发给前端做「活动时间线」,在答案前呈现。
-        for s in steps:
-            yield {"event": "tool_step", "data": json.dumps(s, ensure_ascii=False)}
 
         # ---- ANSWER 段(流式 + 落库;一旦吐 token 失败必须内部吞掉,绝不外泄回退)----
         yield {"event": "status", "data": "生成中"}
