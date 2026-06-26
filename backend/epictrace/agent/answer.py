@@ -11,7 +11,13 @@ from epictrace.retrieval.types import RetrievedChunk
 CHAT_SYS = "你是有帮助的助手,用中文简洁作答。"
 # 接地闸门(#144):检索后判【资料】是否真含答案。判失败/拿不准 → 放行(保守偏可答)。
 ANSWERABLE_SYS = "你是接地判断器,只输出一个英文词 yes 或 no,不要解释。"
-_REFUSAL = "根据已检索到的资料,没有找到能够回答这个问题的信息,因此无法作答。"
+# 判不可答时,让模型生成自然、接地的拒答(而非僵硬模板)——顺带点出资料大致范围,帮用户判断。
+REFUSAL_SYS = (
+    "用户的问题无法由下面提供的【资料】回答。请自然、口语化地用一两句话告诉用户:现有资料里没有"
+    "涉及这个问题,因此无法据此作答;可顺带简短说明这些资料大致是关于什么的,帮用户判断方向。"
+    "严禁编造答案、严禁标注引用编号 [n]、严禁凭常识硬答。用中文,语气友好不机械。"
+)
+_REFUSAL = "现有资料里没有涉及这个问题的内容,没法据此回答你。"  # 生成为空时的兜底句
 
 
 def _is_answerable(llm, question: str, pool: list[RetrievedChunk]) -> bool:
@@ -38,9 +44,18 @@ def stream_final_answer(llm, question: str, pool: list[RetrievedChunk], *,
     池空→CHAT_SYS 直答。流式吐 token,收尾用 build_citations(answer, 池) 复用引用命门。
     有池但接地闸门判【资料】不含答案 → 直接拒答(不调生成、不编造、不带引用)。"""
     if pool and not _is_answerable(llm, question, pool):
-        yield {"event": "token", "data": _REFUSAL}
-        yield {"event": "citations", "data": "[]"}
-        yield {"event": "_answer", "data": _REFUSAL}  # 内部:供落库
+        # 资料不含答案 → 让模型生成自然、接地的拒答(不编造、不引用),而非冷模板。
+        messages = [{"role": "system", "content": REFUSAL_SYS}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": f"问题:{question}\n\n【资料】\n{format_chunks(pool)}"})
+        parts: list[str] = []
+        for tok in llm.stream(messages):
+            parts.append(tok)
+            yield {"event": "token", "data": tok}
+        if not parts:  # 极端:模型空回 → 兜底句,保证有拒答输出
+            yield {"event": "token", "data": _REFUSAL}
+        yield {"event": "citations", "data": "[]"}      # 拒答不带引用
+        yield {"event": "_answer", "data": "".join(parts) or _REFUSAL}
         return
     if pool:
         note = ""

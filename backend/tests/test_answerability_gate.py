@@ -1,16 +1,19 @@
-"""#144 接地闸门:检索后、生成前判【资料】是否真含答案;不含 → 拒答(防『资料没有却照编』)。
+"""#144 接地闸门:检索后、生成前判【资料】是否真含答案;不含 → 生成自然接地的拒答(不编造)。
 保守偏可答:只有明确 no 才拒;判失败/池空 → 放行正常生成。"""
 import json
 
-from epictrace.agent.answer import stream_final_answer
+from epictrace.agent.answer import REFUSAL_SYS, stream_final_answer
 from epictrace.retrieval.types import RetrievedChunk
 
 
 class _GateLLM:
-    """fake:complete() 返回可编排的可答判定(yes/no);stream() 流式吐固定答案。"""
-    def __init__(self, answerable="yes", answer="正常答案[1]"):
+    """fake:complete() 返回可编排的可答判定(yes/no);stream() 按系统提示分流——
+    REFUSAL_SYS → 吐拒答串,否则吐普通答案串。"""
+    def __init__(self, answerable="yes", answer="正常答案[1]",
+                 refusal="资料里没有涉及这个,无法据此回答。"):
         self._answerable = answerable
         self._answer = answer
+        self._refusal = refusal
         self.completed: list = []
         self.streamed: list = []
 
@@ -20,7 +23,8 @@ class _GateLLM:
 
     def stream(self, messages, **kw):
         self.streamed.append(list(messages))
-        for ch in self._answer:
+        text = self._refusal if messages[0]["content"] == REFUSAL_SYS else self._answer
+        for ch in text:
             yield ch
 
 
@@ -43,15 +47,15 @@ def _run(llm, pool, question="问题"):
     return "".join(toks), cites, ans
 
 
-def test_unanswerable_pool_forces_refusal_not_fabrication():
-    # 池里是"相似但不含答案"的 chunk,gate 判 no → 拒答:不调生成、不编造、无引用。
+def test_unanswerable_pool_generates_natural_refusal_not_fabrication():
+    # gate 判 no → 走 REFUSAL_SYS 生成自然拒答:不编造、无引用,且不是僵硬模板(是生成的)。
     llm = _GateLLM(answerable="no", answer="瞎编的价格是 $0.28[1]")
     answer, cites, ans = _run(llm, [_chunk()])
     assert ("无法" in answer) or ("没有" in answer)   # 是拒答
     assert "0.28" not in answer                        # 没走生成、没编造
     assert cites == []                                  # 拒答不带引用
     assert ans == answer
-    assert llm.streamed == []                           # 判 no 时根本没调生成 stream
+    assert any(m[0]["content"] == REFUSAL_SYS for m in llm.streamed)   # 走的是拒答生成,非模板
 
 
 def test_answerable_pool_generates_normally():
@@ -59,14 +63,15 @@ def test_answerable_pool_generates_normally():
     answer, cites, _ = _run(llm, [_chunk()])
     assert answer == "正常答案[1]"
     assert [c["n"] for c in cites] == [1]
-    assert len(llm.streamed) == 1
+    assert all(m[0]["content"] != REFUSAL_SYS for m in llm.streamed)   # 走正常生成
 
 
 def test_gate_no_with_trailing_text_still_refuses():
-    # 模型多嘴回 "No, 资料里没有" → 仍判不可答。
+    # 模型多嘴回 "No, 资料里没有" → 仍判不可答 → 生成拒答。
     llm = _GateLLM(answerable="No, 资料里没有相关信息", answer="瞎编[1]")
     answer, _, _ = _run(llm, [_chunk()])
     assert ("无法" in answer) or ("没有" in answer)
+    assert "瞎编" not in answer
 
 
 def test_gate_failure_is_conservative_answers():
