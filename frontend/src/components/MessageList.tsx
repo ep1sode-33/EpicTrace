@@ -161,7 +161,7 @@ function MessageRow({
           hasContent={hasContent}
         />
       )}
-      {hasSteps && <ActivityTimeline steps={message.toolSteps ?? []} />}
+      {hasSteps && <ActivityTimeline steps={message.toolSteps ?? []} hasContent={hasContent} />}
       {hasContent && (
         <div className="text-sm leading-relaxed break-words text-foreground">
           <AssistantMarkdown
