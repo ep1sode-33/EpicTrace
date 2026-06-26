@@ -12,14 +12,16 @@ from scripts.rag_eval.calibration import calibrate
 
 
 def parse_sheet(md_path: str) -> dict[str, bool]:
-    """返回 {tag: 人工判为"有问题"(勾了 [x])}。"""
+    """返回 {tag: 人工判为"有问题"(在「我判」那行勾了 [x])}。
+    健壮性(Codex review):tag 只认已知前缀(C/CF/F/FP + 数字),防内容里的 `### 单词` 造假节;
+    勾选只认含"我判"的标注行,防答案/上下文里混入的 [x] 被误计。"""
     txt = Path(md_path).read_text(encoding="utf-8")
-    heads = list(re.finditer(r"^### (\w+)\b", txt, re.M))
+    heads = list(re.finditer(r"^### (C\d+|CF\d+|FP\d+|F\d+)\b", txt, re.M))
     out: dict[str, bool] = {}
     for i, m in enumerate(heads):
         seg_end = heads[i + 1].start() if i + 1 < len(heads) else len(txt)
         seg = txt[m.end():seg_end]
-        out[m.group(1)] = bool(re.search(r"- \[[xX]\]", seg))
+        out[m.group(1)] = any("我判" in ln and re.search(r"\[[xX]\]", ln) for ln in seg.splitlines())
     return out
 
 
@@ -29,7 +31,9 @@ def _judge_bad(metric: str, judge) -> bool | None:
         return None
     if metric == "answer_correctness":
         return judge < 0.5
-    return judge < 1.0
+    if metric in ("citation_faithfulness", "faithfulness"):
+        return judge < 1.0
+    raise ValueError(f"未知 metric:{metric}")   # 不静默走 <1.0(Codex review)
 
 
 def score(sheet: str = "eval-data/calib_sheet.md",

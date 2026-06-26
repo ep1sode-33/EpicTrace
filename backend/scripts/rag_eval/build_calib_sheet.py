@@ -52,6 +52,9 @@ def build_round2():
         if k1["metric"] == "faithfulness" and k1.get("gt_unfaithful"):
             key.append({"tag": k1["tag"] + "_r1", "id": k1["id"], "metric": "faithfulness",
                         "judge": k1["judge"], "gt_unfaithful": True, "human": r1h.get(k1["tag"])})
+    missing = [k["tag"] for k in key if k.get("human") is None and "human" in k]
+    if missing:  # round1 负例标没解析到 → 别静默丢(Codex review)
+        print(f"[warn] round1 负例人工标缺失,kappa 将少算这些:{missing}", file=sys.stderr)
     Path("eval-data/calib_sheet2.md").write_text("\n".join(out), encoding="utf-8")
     (R / "calib_key2.json").write_text(json.dumps(key, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[calib round2] → eval-data/calib_sheet2.md  ({len([k for k in key if k['metric']=='citation_faithfulness'])} cite + {len(_FAITH_POS)} faith正例,全文未截断)")
