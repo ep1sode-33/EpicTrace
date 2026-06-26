@@ -106,10 +106,21 @@ export type CaptureSessionDetail = CaptureSession & {
   retranscribing?: boolean;
 };
 
+/** 一次知识库检索步骤(透明对话「活动时间线」用):工具名 + 查询词 + 命中段数。 */
+export interface ToolStep {
+  tool: string;
+  query: string;
+  count: number;
+}
+
 /** sendMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
 export interface StreamHandlers {
   onStatus?: (status: string) => void;
   onToken?: (token: string) => void;
+  /** 推理模型的思考过程 token(逐块累积,前端折叠展示)。 */
+  onThinking?: (token: string) => void;
+  /** 一次知识库检索步骤(工具/查询/命中数)。 */
+  onToolStep?: (step: ToolStep) => void;
   onCitations?: (citations: Citation[]) => void;
   onDone?: () => void;
   onError?: (error: Error) => void;
@@ -374,6 +385,11 @@ function streamSSE(url: string, h: StreamHandlers, init: RequestInit): () => voi
     switch (event) {
       case "status": h.onStatus?.(data); break;
       case "token": h.onToken?.(data); break;
+      case "thinking": h.onThinking?.(data); break;
+      case "tool_step":
+        try { h.onToolStep?.(JSON.parse(data) as ToolStep); }
+        catch { /* 步骤解析失败不致命:不影响答案与引用 */ }
+        break;
       case "citations":
         try { h.onCitations?.(JSON.parse(data) as Citation[]); }
         catch { /* 引用解析失败不致命:答案正文已经流式呈现 */ }

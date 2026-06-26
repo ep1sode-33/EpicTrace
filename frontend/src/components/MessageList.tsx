@@ -1,8 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AlertCircle, Check, Copy, Loader2, Pencil, RotateCcw, X } from "lucide-react";
 
-import { type Citation } from "@/lib/api";
+import { type Citation, type ToolStep } from "@/lib/api";
+import { ActivityTimeline } from "@/components/ActivityTimeline";
 import { AssistantMarkdown } from "@/components/AssistantMarkdown";
+import { ThinkingBlock } from "@/components/ThinkingBlock";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -16,6 +18,10 @@ export interface ViewMessage {
   streaming?: boolean;
   /** 流式出错时的提示文案;有值则该条助手消息以安静的错误通知呈现(替代/附在正文之后)。 */
   error?: string;
+  /** 推理模型的思考过程(累积;透明对话折叠展示);不入库,仅当轮可见。 */
+  thinking?: string;
+  /** 本轮知识库检索步骤(透明对话活动时间线);不入库,仅当轮可见。 */
+  toolSteps?: ToolStep[];
 }
 
 export function MessageList({
@@ -127,10 +133,14 @@ function MessageRow({
 
   // 助手消息:左对齐纯文本流,无气泡(Codex/ChatGPT 式),内联引用 chip。
   // 出错时不再显示「检索中/生成中」状态(否则与错误并存读作仍在进行)。
-  const showStatus = message.streaming && status && !message.error;
-  const showCursor = message.streaming && message.content.length > 0;
-  // 工具条仅在不再流式后出现(避免与「生成中」状态/光标并存读作仍在进行)。
   const hasContent = message.content.length > 0;
+  const hasThinking = Boolean(message.thinking);
+  const hasSteps = Boolean(message.toolSteps?.length);
+  // 状态药丸只在「还没出现思考块/正文」时显示(检索中/思考前的最初阶段);
+  // 思考块 / 活动时间线 / 正文一出现就由它们指示进度,药丸退场。
+  const showStatus = message.streaming && status && !message.error && !hasContent && !hasThinking;
+  const showCursor = message.streaming && hasContent;
+  // 工具条仅在不再流式后出现(避免与「生成中」状态/光标并存读作仍在进行)。
   const showToolbar = !message.streaming && (hasContent || Boolean(message.error));
   return (
     <div className="group/msg flex flex-col gap-2">
@@ -144,6 +154,14 @@ function MessageRow({
           {status}…
         </div>
       )}
+      {hasThinking && (
+        <ThinkingBlock
+          thinking={message.thinking ?? ""}
+          streaming={Boolean(message.streaming)}
+          hasContent={hasContent}
+        />
+      )}
+      {hasSteps && <ActivityTimeline steps={message.toolSteps ?? []} />}
       {hasContent && (
         <div className="text-sm leading-relaxed break-words text-foreground">
           <AssistantMarkdown

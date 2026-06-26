@@ -17,6 +17,7 @@ import {
   type ConversationReference,
   type Project,
   type StreamHandlers,
+  type ToolStep,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -628,6 +629,9 @@ function Conversation({
   const [dropOverlay, setDropOverlay] = useState(false);
   // 当前流的 abort 句柄(切换会话 / 停止 / 卸载时调用)。
   const abortRef = useRef<(() => void) | null>(null);
+  // 当轮的思考过程 / 检索步骤(不入库,仅当轮可见):流结束刷新消息时挂回最后一条 assistant。
+  const thinkingRef = useRef("");
+  const stepsRef = useRef<ToolStep[]>([]);
   // 草稿首次落库的在途去重:并发调用 ensureConversation 时共用同一个创建 promise,避免重复建会话。
   const creatingRef = useRef<Promise<number> | null>(null);
   // 在途 attachExternal 计数:并发附加(拖一批 + 紧接着再拖一个)时,只有全部归零才解除
@@ -701,9 +705,19 @@ function Conversation({
       const patch = (fn: (m: ViewMessage) => ViewMessage) =>
         setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
 
+      thinkingRef.current = "";
+      stepsRef.current = [];
       abortRef.current = start({
         onStatus: (s) => setStatus(s),
         onToken: (t) => patch((m) => ({ ...m, content: m.content + t })),
+        onThinking: (t) => {
+          thinkingRef.current += t;
+          patch((m) => ({ ...m, thinking: thinkingRef.current }));
+        },
+        onToolStep: (s) => {
+          stepsRef.current = [...stepsRef.current, s];
+          patch((m) => ({ ...m, toolSteps: stepsRef.current }));
+        },
         onCitations: (c) => patch((m) => ({ ...m, citations: c })),
         onDone: () => {
           patch((m) => ({ ...m, streaming: false }));
@@ -714,11 +728,21 @@ function Conversation({
           onConversationActivity();
           // 用真实(数字)消息 id 替换乐观字符串 id → 本轮立即可编辑/重试。
           api.listMessages(cid)
-            .then((rows) =>
-              setMessages(rows.map((m) => ({
+            .then((rows) => {
+              const mapped: ViewMessage[] = rows.map((m) => ({
                 id: m.id, role: m.role, content: m.content,
                 citations: parseCitations(m.citations_json),
-              }))))
+              }));
+              // 思考/检索步骤不入库 → 把本轮的挂回最后一条 assistant,刷新后当轮仍可见。
+              for (let i = mapped.length - 1; i >= 0; i--) {
+                if (mapped[i].role === "assistant") {
+                  if (thinkingRef.current) mapped[i].thinking = thinkingRef.current;
+                  if (stepsRef.current.length) mapped[i].toolSteps = stepsRef.current;
+                  break;
+                }
+              }
+              setMessages(mapped);
+            })
             .catch(() => { /* 刷新失败不致命:乐观消息仍在,切换会话后会校正 */ });
         },
         onError: (e) => {
@@ -915,7 +939,8 @@ function Conversation({
         targetId = prev[lastAssistantIdx].id;
         return prev.map((m, i) =>
           i === lastAssistantIdx
-            ? { ...m, content: "", citations: [], error: undefined, streaming: true }
+            ? { ...m, content: "", citations: [], error: undefined, streaming: true,
+                thinking: undefined, toolSteps: undefined }   // 清旧思考/检索步骤,避免重生成残留
             : m,
         );
       }
