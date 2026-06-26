@@ -726,6 +726,10 @@ function Conversation({
           abortRef.current = null;
           // 后端在首轮按 LLM 自动命名:刷新当前项目对话列表,让已命名的会话出现在侧栏。
           onConversationActivity();
+          // 快照本轮思考/步骤:ref 会被下一条流重置,而 listMessages 是异步的——若刷新未回
+          // 之前又发了一条,回调读到的会是新流的 ref(挂错消息)。先存值再异步。
+          const keptThinking = thinkingRef.current;
+          const keptSteps = stepsRef.current;
           // 用真实(数字)消息 id 替换乐观字符串 id → 本轮立即可编辑/重试。
           api.listMessages(cid)
             .then((rows) => {
@@ -736,8 +740,8 @@ function Conversation({
               // 思考/检索步骤不入库 → 把本轮的挂回最后一条 assistant,刷新后当轮仍可见。
               for (let i = mapped.length - 1; i >= 0; i--) {
                 if (mapped[i].role === "assistant") {
-                  if (thinkingRef.current) mapped[i].thinking = thinkingRef.current;
-                  if (stepsRef.current.length) mapped[i].toolSteps = stepsRef.current;
+                  if (keptThinking) mapped[i].thinking = keptThinking;
+                  if (keptSteps.length) mapped[i].toolSteps = keptSteps;
                   break;
                 }
               }

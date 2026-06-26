@@ -138,7 +138,7 @@ function MessageRow({
   const hasSteps = Boolean(message.toolSteps?.length);
   // 状态药丸只在「还没出现思考块/正文」时显示(检索中/思考前的最初阶段);
   // 思考块 / 活动时间线 / 正文一出现就由它们指示进度,药丸退场。
-  const showStatus = message.streaming && status && !message.error && !hasContent && !hasThinking;
+  const showStatus = message.streaming && status && !message.error && !hasContent && !hasThinking && !hasSteps;
   const showCursor = message.streaming && hasContent;
   // 工具条仅在不再流式后出现(避免与「生成中」状态/光标并存读作仍在进行)。
   const showToolbar = !message.streaming && (hasContent || Boolean(message.error));

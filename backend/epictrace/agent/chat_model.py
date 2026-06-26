@@ -21,7 +21,7 @@ def _reasoning_chat_openai():
             if gen is not None:
                 try:
                     delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
-                    rc = delta.get("reasoning_content")
+                    rc = delta.get("reasoning_content") or delta.get("reasoning")  # 部分端点用 reasoning
                     if rc:
                         gen.message.additional_kwargs["reasoning_content"] = rc
                 except Exception:  # noqa: BLE001 — 提取推理失败绝不影响主流(正文/工具调用)
