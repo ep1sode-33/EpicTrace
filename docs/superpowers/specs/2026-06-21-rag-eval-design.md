@@ -234,7 +234,7 @@ dataclass/YAML:**retrieval**(`k/dense_n/fuse_m/top_k/RRF-k0/dense-sparse 权重/
 
 诚实记录:本 harness 已落地核心价值(找+修了 LOOP_SYS / 强制首轮检索 / 意图路由 三个真问题,具统计严谨 + 可复现 + 平衡可信基线 + off-family 判官 + reranker 假阴性洞见)。以下为**有意推后或不适用于本个人项目**的项,记为已知局限而非假装做完——清晰划界本身是工程成熟度的一部分。
 
-1. **判官校准不全**:correctness 判官曾在 22 题上人工校准(二值 kappa=1.0),但判官后来由 krill 代理换成 Claude Code 子代理(off-family Opus),**该校准已过期**;`faithfulness` / `citation_faithfulness` **从未校准** → 这几项分数是"判官说了算",未经人工验证。要对外强断言需重标 30–50 条(含 ≥30% 负例)。
+1. **判官校准(#140 已做,2026-06)**:William 手标盲表 vs 子代理判官,Cohen's kappa —— **citation_faithfulness kappa 0.81 ✅采信**、**faithfulness kappa 0.88 ✅采信**(含 8 个 off-family 子代理构造的注入负例,judge 抓 7/8、人工 8/8);**answer_correctness kappa 0.47 偏严**(claim-F1 罚比简短参考更详尽的答案、错罚正确拒答 → 报告的 correctness 是**保守下限**,真实更高)。可改 correctness rubric(别罚详尽/拒答),但"保守=安全",低优先。工具:`build_calib_sheet.py`(round2 不截断)+ `calib_score.py`。教训:校准表截断 context/引用片段会让标注者信息<判官 → 制造假分歧。
 2. **单标注者,无 IAA**:golden = 合成 + 单人精修,无多标注者一致性(kappa)。单人项目无法凑多标注者;如实声明"单标注者"优于造假 IAA。
 3. **无 held-out 划分**:64 题单一集,既调参又评测;反复 hill-climb 有过拟合风险(目前仅三处改动,风险低)。继续大改前应划 dev/test。
 4. **小片统计力弱**:py/md/multi_hop/negation 等片 n 小;CI 已**诚实**摊出不确定性(如 `multi_hop@5`=[0.40,1.00]),不支持细分片强断言。诚实宽 CI 优于补量造假精度。
