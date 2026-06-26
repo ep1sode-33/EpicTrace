@@ -38,7 +38,7 @@ def score(sheet: str = "eval-data/calib_sheet.md",
     keys = json.loads(Path(key).read_text(encoding="utf-8"))
     agg: dict[str, dict] = {}
     for k in keys:
-        h = human.get(k["tag"])
+        h = k["human"] if "human" in k else human.get(k["tag"])  # 预填(如 round2 烤入的 round1 负例)优先
         jb = _judge_bad(k["metric"], k["judge"])
         if h is None or jb is None:
             continue
@@ -58,4 +58,8 @@ def score(sheet: str = "eval-data/calib_sheet.md",
 
 
 if __name__ == "__main__":
-    score()
+    import sys
+    if "--round2" in sys.argv:
+        score("eval-data/calib_sheet2.md", "scripts/rag_eval/runs/calib_key2.json")
+    else:
+        score()
