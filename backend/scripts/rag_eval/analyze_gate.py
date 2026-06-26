@@ -33,16 +33,17 @@ def main() -> None:
         flag = "✅修复" if (ra and not rb) else ("持平" if ra == rb else "⚠️回退")
         print(f"  {it.id}: BEFORE={'拒' if rb else '编'} → AFTER={'拒' if ra else '编'} {flag}  | {a[:50]}")
     n = sum(1 for it in neg if it.id in after)
-    print(f"  refusal: BEFORE {b_ref}/{n} ({b_ref/n:.0%}) → AFTER {a_ref}/{n} ({a_ref/n:.0%})")
+    pct = lambda x, d: f"{x/d:.0%}" if d else "—"
+    print(f"  refusal: BEFORE {b_ref}/{n} ({pct(b_ref,n)}) → AFTER {a_ref}/{n} ({pct(a_ref,n)})")
 
     print("\n=== single_hop(可答题,不该被误拒)===")
     over = 0
     for iid in sh:
         a = after.get(iid, "")
-        is_ref = a.strip() == _REFUSAL
+        is_ref = _refused(a)   # 生成式拒答也算(不止固定模板 _REFUSAL)
         over += is_ref
         print(f"  {iid}: {'⚠️误拒!' if is_ref else '正常答✓'}  | {a[:50]}")
-    print(f"  误拒(over-refusal): {over}/{len(sh)} —— 0 才算闸门没伤可答题")
+    print(f"  误拒(over-refusal): {over}/{len(sh)} —— 0 才算闸门没伤可答题" if sh else "  (无 single_hop 子集)")
 
 
 if __name__ == "__main__":

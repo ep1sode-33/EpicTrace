@@ -26,16 +26,21 @@ def _is_answerable(llm, question: str, pool: list[RetrievedChunk]) -> bool:
     **保守偏可答**:只有资料明显不含答案(明确回 no)才判不可答 → 避免误杀可答题;
     拿不准/judge 失败 → True(放行让生成,模型仍可自行 hedge)。"""
     try:
+        # 判可答性用每块前缀即可(控 token);非全文。
+        ctx = "\n\n".join(f"[{i + 1}] {c.text[:600]}" for i, c in enumerate(pool))
         verdict = llm.complete([
             {"role": "system", "content": ANSWERABLE_SYS},
             {"role": "user", "content": (
                 "下面【资料】是否包含可以**直接回答**该问题的信息?\n"
                 "只回一个词:yes(资料里能找到答案)或 no(资料完全没有该问题的答案)。拿不准回 yes。\n\n"
-                f"问题:{question}\n\n【资料】\n{format_chunks(pool)}")},
+                f"问题:{question}\n\n【资料】\n{ctx}")},
         ])
+        toks = str(verdict or "").strip().lower().split()        # 解析在 try 内(防非字符串 verdict 抛错)
+        first = toks[0].strip(".,。!!??、 ") if toks else ""
     except Exception:  # noqa: BLE001 — 判失败 → 放行(保守偏可答)
         return True
-    return not (verdict or "").strip().lower().startswith("no")
+    # 仅当判定**首词**明确否定(no/否/不)才判不可答;nope/none/拿不准/空 → 放行(保守偏可答)。
+    return first not in ("no", "否", "不")
 
 
 def stream_final_answer(llm, question: str, pool: list[RetrievedChunk], *,
