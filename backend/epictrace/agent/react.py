@@ -39,28 +39,33 @@ def is_chitchat(chat_model, question: str) -> bool:
         return False
 
 
-def seed_first_retrieval(tools, accumulator: ChunkAccumulator, question: str) -> None:
+def seed_first_retrieval(tools, accumulator: ChunkAccumulator, question: str,
+                         *, on_step=None) -> None:
     """强制首轮检索:用**原始问题**直接跑一次主检索(search_project_library),把命中的 chunk 塞进池。
     治两类失败(eval 实测,二者点①用原始问题都能命中 gold):
       ① agent 自认为知道答案 → 整轮跳检索(池空、凭记忆答、无引用);
       ② agent 把问题重写成更差的 query → 丢了召回。
     最终答由 pool 生成,故预检索即保证接地 + 可追溯。无分数门(reranker 分不可阈值化:实测低分但
-    排名正确的内容题会被误杀)。预检索失败不致命——循环里 agent 仍会自行检索。"""
+    排名正确的内容题会被误杀)。预检索失败不致命——循环里 agent 仍会自行检索。
+    on_step(可选):回调 {"tool","query","count"},用于把这次强制检索作为一步透明化给前端。"""
     seed = next((t for t in tools if getattr(t, "name", "") == "search_project_library"), None)
     if seed is None:
         return
     try:
         tm = seed.invoke({"name": seed.name, "args": {"query": question},
                           "id": "seed", "type": "tool_call"})
-        if getattr(tm, "artifact", None):
-            accumulator.extend(list(tm.artifact))
+        art = list(getattr(tm, "artifact", None) or [])
+        if art:
+            accumulator.extend(art)
+        if on_step:
+            on_step({"tool": "search_project_library", "query": question, "count": len(art)})
     except Exception:  # noqa: BLE001
         pass
 
 
 def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: str,
                    *, history: list[dict], max_rounds: int = 8,
-                   attachment_manifest: str = "", force_seed: bool = True) -> str:
+                   attachment_manifest: str = "", force_seed: bool = True, on_step=None) -> str:
     """跑 agent↔tools 循环,只攒池(chunk 从 ToolMessage.artifact 收割)。返回状态:
       "ok"      → 池里有 chunk(或正常停手),交给 GENERATE 作答;
       "direct"  → 全程未调工具且池空(寒暄)→ ChatService 走 direct 直答;
@@ -68,7 +73,7 @@ def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: s
     force_seed=True:进循环前强制用原始问题预检索一次(见 _seed_first_retrieval)。
     鲁棒:撞 max_rounds → 停搜 force-answer;某轮 invoke 抛错 → 重试 1 次,再坏则按池空/非空收尾。"""
     if force_seed:
-        seed_first_retrieval(tools, accumulator, question)
+        seed_first_retrieval(tools, accumulator, question, on_step=on_step)
     bound = chat_model.bind_tools(tools)
     tool_node = ToolNode(tools)
 
@@ -128,15 +133,29 @@ def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: s
     init.append(HumanMessage(content=question))
 
     used_tools = False
+    seen_tc: dict = {}      # tool_call_id → (tool 名, query),用于把结果关联回它的查询
+    emitted: set = set()    # 已透明化的 tool_call_id(stream_mode=values 会重复给全量消息,去重)
+
+    def _scan(messages) -> None:
+        nonlocal used_tools
+        for m in messages:
+            if isinstance(m, AIMessage):
+                for tc in (getattr(m, "tool_calls", None) or []):
+                    seen_tc[tc["id"]] = (tc.get("name", ""), (tc.get("args") or {}).get("query", ""))
+            elif isinstance(m, ToolMessage):
+                used_tools = True
+                if on_step and m.tool_call_id not in emitted:
+                    emitted.add(m.tool_call_id)
+                    name, query = seen_tc.get(m.tool_call_id, (getattr(m, "name", ""), ""))
+                    on_step({"tool": name, "query": query, "count": len(getattr(m, "artifact", None) or [])})
+
     try:
         for ev in graph.stream({"messages": init, "rounds": 0}, stream_mode="values"):
-            if any(isinstance(m, ToolMessage) for m in ev["messages"]):
-                used_tools = True
+            _scan(ev["messages"])
     except Exception:  # noqa: BLE001 — invoke 抛错(坏 tool_call 等):重试 1 次
         try:
             for ev in graph.stream({"messages": init, "rounds": 0}, stream_mode="values"):
-                if any(isinstance(m, ToolMessage) for m in ev["messages"]):
-                    used_tools = True
+                _scan(ev["messages"])
         except Exception:  # noqa: BLE001 — 再坏:池非空 force-answer,池空回退
             return "ok" if accumulator.chunks else FALLBACK
 
