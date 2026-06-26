@@ -157,3 +157,8 @@ class FakeChatModel:
         if self._script:
             return self._script.pop(0)
         return self._default
+
+    def stream(self, messages, **kwargs):
+        # agent 节点改用 stream:把脚本里的下一条消息当作单个 chunk 吐出(累积即还原)。
+        self.invocations.append(list(messages))
+        yield self._script.pop(0) if self._script else self._default

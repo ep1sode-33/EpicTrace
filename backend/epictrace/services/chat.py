@@ -245,7 +245,8 @@ class ChatService:
                 # agent 先自决跑一轮(force_seed=False:寒暄它能正确不检索)。
                 st = run_react_loop(chat_model, tools, accumulator, question, history=history,
                                     attachment_manifest=manifest, force_seed=False,
-                                    on_step=lambda s: q.put(("step", s)))
+                                    on_step=lambda s: q.put(("step", s)),
+                                    on_think=lambda t: q.put(("think", t)))
                 # 意图路由(Adaptive-RAG):池空且纯寒暄 → 不强制检索(保持空池走 direct 自然直答);
                 # 否则用原始问题强制补种(兜跳检索 / query 重写丢召回),这步也实时报。
                 if not (not accumulator.chunks and is_chitchat(chat_model, question)):
@@ -264,7 +265,10 @@ class ChatService:
             kind, payload = q.get()
             if kind == "done":
                 break
-            yield {"event": "tool_step", "data": json.dumps(payload, ensure_ascii=False)}
+            if kind == "think":
+                yield {"event": "thinking", "data": payload}     # agent 决策推理(实时填空窗)
+            else:
+                yield {"event": "tool_step", "data": json.dumps(payload, ensure_ascii=False)}
         if "exc" in outcome:
             raise outcome["exc"]          # 与原同步抛错同义:冒泡到 _run_turn 安全带 → Plan 5
         if outcome.get("status") == FALLBACK:

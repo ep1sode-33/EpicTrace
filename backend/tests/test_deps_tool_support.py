@@ -17,7 +17,7 @@ def test_factory_builds_chat_model_from_active_profile(tmp_path):
     req = _request_with_profile(tmp_path)
     factory = get_chat_model_factory(req)
     model = factory()
-    assert model.__class__.__name__ == "ChatOpenAI"
+    assert model.__class__.__name__.endswith("ChatOpenAI")   # ReasoningChatOpenAI 子类
 
 
 def test_factory_none_when_no_active_profile(tmp_path):

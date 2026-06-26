@@ -40,6 +40,22 @@ def test_seed_first_retrieval_on_step_standalone():
     assert steps == [{"tool": "search_project_library", "query": "问题", "count": 1}]
 
 
+def test_on_think_emits_agent_decision_reasoning():
+    # agent 决策时的推理(reasoning_content 在 additional_kwargs)经 on_think 实时报出。
+    retr = _Retr([_proj_chunk("x")])
+    model = FakeChatModel(script=[
+        AIMessage(content="", additional_kwargs={"reasoning_content": "我先想想该搜什么词"},
+                  tool_calls=[_call("search_project_library", {"query": "X"})]),
+        AIMessage(content="结束"),
+    ])
+    acc = ChunkAccumulator()
+    thinks: list[str] = []
+    run_react_loop(model, _tools(retr), acc, "X是什么", history=[],
+                   force_seed=False, on_think=thinks.append)
+    assert "我先想想该搜什么词" in "".join(thinks)
+    assert [c.text for c in acc.chunks] == ["x"]   # tool_calls 仍正确执行(流式累积没丢)
+
+
 def test_no_on_step_is_noop_backward_compat():
     # 不传 on_step(eval / 老调用点)→ 行为不变,不崩。
     retr = _Retr([_proj_chunk("z")])

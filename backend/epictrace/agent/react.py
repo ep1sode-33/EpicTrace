@@ -65,7 +65,8 @@ def seed_first_retrieval(tools, accumulator: ChunkAccumulator, question: str,
 
 def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: str,
                    *, history: list[dict], max_rounds: int = 8,
-                   attachment_manifest: str = "", force_seed: bool = True, on_step=None) -> str:
+                   attachment_manifest: str = "", force_seed: bool = True,
+                   on_step=None, on_think=None) -> str:
     """跑 agent↔tools 循环,只攒池(chunk 从 ToolMessage.artifact 收割)。返回状态:
       "ok"      → 池里有 chunk(或正常停手),交给 GENERATE 作答;
       "direct"  → 全程未调工具且池空(寒暄)→ ChatService 走 direct 直答;
@@ -82,7 +83,17 @@ def run_react_loop(chat_model, tools, accumulator: ChunkAccumulator, question: s
         # 撞轮数上限:不再给工具,逼模型停手(它的文本被丢弃,只用已攒池)。
         if rounds >= max_rounds:
             return {"messages": [AIMessage(content="")], "rounds": rounds}
-        msg = bound.invoke(state["messages"])
+        # 流式取模型决策:把推理(reasoning_content,经 ReasoningChatOpenAI 入 additional_kwargs)
+        # 实时报给 on_think —— 透明化 agent「在想搜什么」的那段空窗;同时累出带 tool_calls 的完整消息。
+        msg = None
+        for ch in bound.stream(state["messages"]):
+            if on_think:
+                rc = (getattr(ch, "additional_kwargs", None) or {}).get("reasoning_content")
+                if rc:
+                    on_think(rc)
+            msg = ch if msg is None else msg + ch
+        if msg is None:
+            msg = AIMessage(content="")
         # 模型想调工具但 JSON 坏了(langchain 塞进 invalid_tool_calls 而非 tool_calls)且
         # 没有任何合法 tool_call → 抛错,流入"重试 1 次 → force-answer / FALLBACK"路;
         # 绝不当成"干净停手/direct"。
