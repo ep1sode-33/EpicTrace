@@ -21,6 +21,8 @@ def build_citations(answer: str, chunks: list[RetrievedChunk]) -> list[dict]:
                 "source_type": c.source_type,
                 "source_kind": c.source_kind,
                 "reference_id": c.reference_id,
+                "capture_session_id": c.capture_session_id,
+                "ts": c.ts,
                 "snippet": c.text[:_SNIPPET],
             })
     return out
