@@ -79,9 +79,12 @@ interface Props {
   /** 「跳回会话时刻」导航(镜像 App 的 processFocus):展开该 session 并把时间线滚动/高亮到 ts
    *  对应的转写段。key 自增支持对同一引用反复跳转。null/缺省 = 无跳转,行为零变化。 */
   focus?: { sessionId: number; ts: string; key: number } | null;
+  /** 焦点被消费(getSession 成功、pendingFocus 已交接)后回调 App 清空 sessionFocus。
+   *  本视图是条件渲染,会随切页卸载;若不在重挂载边界之上清掉焦点,每次切回都会重放跳转。 */
+  onFocusConsumed?: () => void;
 }
 
-export function CaptureStagingView({ onOrganized, focus }: Props) {
+export function CaptureStagingView({ onOrganized, focus, onFocusConsumed }: Props) {
   const [sessions, setSessions] = useState<CaptureSession[]>([]);
   const [selected, setSelected] = useState<CaptureSessionDetail | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -150,6 +153,9 @@ export function CaptureStagingView({ onOrganized, focus }: Props) {
         setSelectedProjectId("");
         setError(null);
         setPendingFocus({ sessionId: focus.sessionId, ts: focus.ts });
+        // 消费即清:通知 App 清空 sessionFocus,使本视图重挂载时 focus 为 null、不再重放本次跳转。
+        // 定位所需的时刻已存进 pendingFocus(组件内 state),清 App 焦点不影响后续滚动/高亮。
+        onFocusConsumed?.();
       })
       .catch(() => {
         if (!cancelled) setError("会话不存在或已删除");
@@ -157,7 +163,7 @@ export function CaptureStagingView({ onOrganized, focus }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [focus]);
+  }, [focus, onFocusConsumed]);
 
   // selected 就位(DOM 已提交,时间线已渲染)后,定位并滚动/高亮目标转写段。
   // !loading 门:从对话页跳来会重新挂载本组件,初始 loading=true 时渲染的是加载态、时间线尚不在 DOM;
