@@ -18,8 +18,10 @@ _COLLECTION = "chunks"
 # Milvus query 的硬上限:单次 query 最多返回这么多行。list_by 用它一次性拉全(如全项目的 chunk
 # 喂给 BM25 稀疏检索语料)。超过此数会被静默截断 → 语料不全、稀疏召回有缺口。
 _LIST_LIMIT = 16384
-# 默认(folder_scan)collection 的 schema:仅含文件用得到的字段。session/timestamp/audio 等
-# 留给 Plan 4(届时重建 collection + 重索引;向量可重建,代价可接受)。
+# 默认(folder_scan)collection 的 schema,v2:capture_session_id/ts 让 chunk 可回溯到
+# 会话时刻(哨兵 0/"" = 非会话来源;ts 为 naive-UTC ISO 秒级,与 timealign marker 同源)。
+# 升级后旧 collection 由 __init__ 的字段集比对自愈重建;记录侧的一次性重置见
+# services.index.reset_index_if_schema_upgraded(把全库翻回待索引,用户手动重建)。
 _SCALARS = {
     "text": (DataType.VARCHAR, {"max_length": 65535}),
     "ingest_record_id": (DataType.INT64, {}),
@@ -28,6 +30,8 @@ _SCALARS = {
     "char_end": (DataType.INT64, {}),
     "source_type": (DataType.VARCHAR, {"max_length": 64}),
     "embed_model_id": (DataType.VARCHAR, {"max_length": 128}),
+    "capture_session_id": (DataType.INT64, {}),
+    "ts": (DataType.VARCHAR, {"max_length": 64}),
 }
 # 临时附件(chat attachment)collection 的 schema:用 conversation_id/reference_id 取代
 # project_id/ingest_record_id —— 这是会话级临时 RAG,随会话清理,不进用户的 Project 文件夹。
@@ -49,6 +53,25 @@ class MilvusLiteStore(VectorStore):
         self._dim = dim
         self._collection = collection
         self._scalars = scalars if scalars is not None else _SCALARS
+        # schema 自愈:已存在的 collection 若字段集与当前 schema 不一致(如 v1 库缺
+        # capture_session_id/ts),drop 后落入下面的 create 分支按新 schema 重建。
+        # 向量是派生索引,可由重索引恢复;scalars 未变的 collection(如 attachment)
+        # 字段集一致,天然 no-op。
+        if self._client.has_collection(collection):
+            existing = {f["name"] for f in self._client.describe_collection(collection)["fields"]}
+            expected = {"id", "vector", *self._scalars}
+            if existing != expected:
+                _log.warning(
+                    "collection %s 字段集 %s 与当前 schema %s 不一致,drop 后重建(向量可由重索引恢复)",
+                    collection, sorted(existing), sorted(expected),
+                )
+                # 必须先 release 再 drop:drop 内部的 close 会把 WAL 回放的 memtable
+                # flush 成新 segment 并排队构建 faiss 索引 —— 本进程若已加载 torch
+                # (app 的 warmup-first 顺序与 pytest 都如此),faiss 首次并行 add 会撞
+                # 双 libomp(OMP Error #15)直接 abort 整个进程。released 状态让排队的
+                # 索引构建自然跳过:不为一个马上要删掉的 collection 冒进程级风险。
+                self._client.release_collection(collection)
+                self._client.drop_collection(collection)
         if not self._client.has_collection(collection):
             schema = self._client.create_schema(auto_id=True, enable_dynamic_field=False)
             schema.add_field("id", DataType.INT64, is_primary=True)

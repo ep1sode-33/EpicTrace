@@ -8,7 +8,7 @@ DIM = 1024
 def _rec(rid: int, ing: int, text: str) -> dict:
     return {"vector": [0.1] * DIM, "text": text, "ingest_record_id": ing, "project_id": 1,
             "char_start": 0, "char_end": len(text), "source_type": "folder_scan",
-            "embed_model_id": "fake"}
+            "embed_model_id": "fake", "capture_session_id": 0, "ts": ""}
 
 
 def test_query_filters_by_ingest_record_id_in_list(tmp_path: Path):

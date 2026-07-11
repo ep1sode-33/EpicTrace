@@ -228,6 +228,70 @@ def test_index_text_files_skip_model_ensure(tmp_path, monkeypatch):
     assert job.done == 1
 
 
+def test_index_transcript_chunks_carry_session_and_ts(tmp_path):
+    """会话来源(source_session_id=5)的带 marker transcript:每个 chunk 的向量行
+    须带 capture_session_id==5,且 ts 命中该 chunk 起点所属段落的时间锚。"""
+    from epictrace.models import IngestRecord, Project
+
+    db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
+    t1, t2 = "2026-07-11 08:00:00", "2026-07-11 09:15:30"
+    para1 = "虚拟内存的页表机制值得讨论。" * 90   # 足够长:两段各产多块,两个锚都被覆盖
+    para2 = "缓存一致性协议与写回策略。" * 90
+    text = ("# 会话转录:讨论\n\n"
+            f"## [{t1}] 麦克风\n{para1}\n\n"
+            f"## [{t2}] 系统声音\n{para2}\n")
+    src = tmp_path / "transcript.md"
+    src.write_text(text, encoding="utf-8")
+    with db.session() as s:
+        proj = Project(title="P", folder_path=str(tmp_path)); s.add(proj); s.flush()
+        s.add(IngestRecord(project_id=proj.id, original_filename="transcript.md",
+                           stored_path=str(src), content_hash="h", size_bytes=len(text),
+                           mtime=0.0, ingest_method="session", description="",
+                           indexed=False, source_session_id=5))
+        s.flush(); pid = proj.id
+
+    store = FakeVectorStore()
+    svc = IndexService(db, embedder=FakeEmbedder(), vector_store=store)
+    job = svc.index_project(pid)
+    svc._run(job)
+    assert job.status == "done" and job.done == 1
+
+    rows = store.records
+    assert len(rows) >= 2                                   # 真的切了多块
+    assert all(r["capture_session_id"] == 5 for r in rows)
+    # 期望值从第一性推导:chunk 起点落在第二个 marker 之前 → 第一段锚,否则第二段锚。
+    m2_off = text.index(f"## [{t2}]")
+    iso1, iso2 = "2026-07-11T08:00:00", "2026-07-11T09:15:30"
+    for r in rows:
+        assert r["ts"] == (iso2 if r["char_start"] >= m2_off else iso1)
+    assert {r["ts"] for r in rows} == {iso1, iso2}          # 两个锚都被真实覆盖
+
+
+def test_index_note_without_session_gets_sentinel_fields(tmp_path):
+    """无 session 的普通 note(即使内容撞上 marker 格式):session_id 门关着,
+    不解析锚,行落哨兵 capture_session_id==0、ts==""。"""
+    db, proj, folder, store, svc = _setup_fake(tmp_path)
+    (folder / "note.md").write_text(
+        "## [2026-07-11 08:00:00] 伪 marker 的会议纪要\n" + "page table " * 60,
+        encoding="utf-8",
+    )
+    ScanService(db).scan_and_register(proj.id)
+    job = svc.index_project(proj.id)
+    svc._run(job)
+    assert job.status == "done" and job.done == 1
+    rows = store.records
+    assert rows
+    assert all(r["capture_session_id"] == 0 and r["ts"] == "" for r in rows)
+
+
+def test_targets_need_mineru_accepts_triples(tmp_path):
+    """targets 变三元组后 _targets_need_mineru 的解包不炸(.md → Text 处理器 → False)。"""
+    db, proj, folder, store, svc = _setup_fake(tmp_path)
+    md = folder / "a.md"
+    md.write_text("x", encoding="utf-8")
+    assert svc._targets_need_mineru([(1, str(md), 0)]) is False
+
+
 def test_index_uses_blocking_ensure_models_ready(tmp_path, monkeypatch):
     """FIX 1:索引富文档时走 ensure_models_ready(阻塞门),且其失败记进 job.errors(不静默)。"""
     from epictrace.config import AppConfig

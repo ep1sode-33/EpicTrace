@@ -4,10 +4,11 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from epictrace.db import Database
 from epictrace.indexing.chunker import chunk_text
+from epictrace.indexing.timealign import parse_time_anchors, ts_for_offset
 from epictrace.interfaces.embedding import EmbeddingProvider
 from epictrace.interfaces.vector_store import VectorStore
 from epictrace.media import get_processor
@@ -57,7 +58,13 @@ class IndexService:
                     )
                 ).scalars()
             )
-            targets = [(r.id, r.stored_path) for r in recs if get_processor(Path(r.stored_path), self._db.config) is not None]
+            # 三元组的第三位是来源会话(source_session_id;0 = 非会话来源),
+            # _run 据它决定是否解析时间锚并落 capture_session_id/ts。
+            targets = [
+                (r.id, r.stored_path, r.source_session_id or 0)
+                for r in recs
+                if get_processor(Path(r.stored_path), self._db.config) is not None
+            ]
 
         job = IndexJob(project_id=project_id, total=len(targets))
         job._targets = targets  # type: ignore[attr-defined]  # 交给 _run 消费
@@ -132,7 +139,7 @@ class IndexService:
 
     def _targets_need_mineru(self, targets: list) -> bool:
         """本轮目标里是否有任一文件由 MinerU 处理(富文档)——只有它需要模型下载。"""
-        for _rec_id, path_str in targets:
+        for _rec_id, path_str, _sid in targets:
             proc = get_processor(Path(path_str), self._db.config)
             if isinstance(proc, MinerUMediaProcessor):
                 return True
@@ -149,11 +156,14 @@ class IndexService:
         if targets and self._targets_need_mineru(targets):
             self._ensure_models_ready(job)
         store = self._resolve_store()
-        for rec_id, path_str in targets:
+        for rec_id, path_str, session_id in targets:
             try:
                 path = Path(path_str)
                 proc = get_processor(path, self._db.config)
                 text = proc.process(path).text
+                # 时间锚只对会话来源解析(session_id 为门):普通 .md 内容撞上
+                # marker 格式时不得被当成转写时刻。
+                anchors = parse_time_anchors(text) if session_id else []
                 chunks = chunk_text(text)
                 # 幂等:提取成功后、入库前无条件清旧块,
                 # 这样「现在提取为空」的文件也能清掉历史向量。
@@ -167,6 +177,9 @@ class IndexService:
                             "char_start": c.char_start, "char_end": c.char_end,
                             "source_type": "folder_scan",
                             "embed_model_id": self._embedder.model_id,
+                            # v2 标量:会话回跳的根。哨兵 0/"" = 非会话来源/无锚。
+                            "capture_session_id": session_id,
+                            "ts": ts_for_offset(anchors, c.char_start) or "",
                         }
                         for c, vec in zip(chunks, vectors)
                     ])
@@ -182,3 +195,36 @@ class IndexService:
                     job.errors.append(f"{path_str}: {e}")
         with job._lock:
             job.status = "done"
+
+
+# 向量行 schema 的版本号,与 vectorstore.milvus_lite._SCALARS 同步演进
+# (v2:增 capture_session_id/ts)。升级后旧库里的向量缺新字段、collection 会被
+# MilvusLiteStore 自愈重建,故记录侧也须整体翻回待索引,由用户手动重建索引。
+INDEX_SCHEMA_VERSION = "2"
+
+
+def reset_index_if_schema_upgraded(db: Database) -> bool:
+    """启动时的一次性 schema 版本重置:data_dir/vector_schema_version 标记
+    不是当前版本(缺失或旧值)→ 全库 IngestRecord.indexed=False + 写入标记,
+    返回 True;标记已一致 → no-op 返回 False。幂等(重置后标记即一致)。
+
+    只碰 SQLite 与标记文件:不 import pymilvus、不建任何 gRPC 连接 —— 启动路径
+    必须保持「先 warmup 模型再碰 Milvus」的 fork 顺序护栏(macOS 段错误)。
+    向量本体的重建由 MilvusLiteStore.__init__ 的 schema 自愈负责。
+    """
+    marker = Path(db.config.data_dir) / "vector_schema_version"
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == INDEX_SCHEMA_VERSION:
+        return False
+    with db.session() as s:
+        flipped = s.execute(
+            update(IngestRecord).where(IngestRecord.indexed.is_(True)).values(indexed=False)
+        ).rowcount
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(INDEX_SCHEMA_VERSION, encoding="utf-8")
+    import logging
+
+    logging.getLogger("epictrace").info(
+        "向量 schema 升级到 v%s:%d 条已索引记录翻回待索引(在「信息处理和入库」手动重建)",
+        INDEX_SCHEMA_VERSION, flipped,
+    )
+    return True

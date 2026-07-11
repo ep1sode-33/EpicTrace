@@ -13,22 +13,40 @@ def test_upsert_query_roundtrip(tmp_path: Path):
     store = MilvusLiteStore(db_path=str(tmp_path / "v.db"), dim=DIM)
     store.upsert([
         {"vector": _vec(0.1), "text": "alpha", "ingest_record_id": 1, "project_id": 7,
-         "char_start": 0, "char_end": 5, "source_type": "folder_scan", "embed_model_id": "fake"},
+         "char_start": 0, "char_end": 5, "source_type": "folder_scan", "embed_model_id": "fake", "capture_session_id": 0, "ts": ""},
         {"vector": _vec(0.9), "text": "omega", "ingest_record_id": 2, "project_id": 7,
-         "char_start": 0, "char_end": 5, "source_type": "folder_scan", "embed_model_id": "fake"},
+         "char_start": 0, "char_end": 5, "source_type": "folder_scan", "embed_model_id": "fake", "capture_session_id": 0, "ts": ""},
     ])
     hits = store.query(_vec(0.1), filter={"project_id": 7}, k=1)
     assert len(hits) == 1
     assert hits[0]["text"] == "alpha"
 
 
+def test_new_scalar_fields_roundtrip(tmp_path: Path):
+    """v2 新标量 capture_session_id/ts:upsert → query/list_by 原样带回(含哨兵 0/"")。"""
+    store = MilvusLiteStore(db_path=str(tmp_path / "v.db"), dim=DIM)
+    store.upsert([
+        {"vector": _vec(0.1), "text": "转写段", "ingest_record_id": 1, "project_id": 7,
+         "char_start": 0, "char_end": 3, "source_type": "folder_scan", "embed_model_id": "fake",
+         "capture_session_id": 5, "ts": "2026-07-11T08:00:00"},
+        {"vector": _vec(0.9), "text": "普通块", "ingest_record_id": 2, "project_id": 7,
+         "char_start": 0, "char_end": 3, "source_type": "folder_scan", "embed_model_id": "fake",
+         "capture_session_id": 0, "ts": ""},
+    ])
+    hits = store.query(_vec(0.1), filter={"project_id": 7}, k=1)
+    assert hits[0]["capture_session_id"] == 5 and hits[0]["ts"] == "2026-07-11T08:00:00"
+    rows = {r["text"]: r for r in store.list_by_project(7)}
+    assert rows["转写段"]["capture_session_id"] == 5 and rows["转写段"]["ts"] == "2026-07-11T08:00:00"
+    assert rows["普通块"]["capture_session_id"] == 0 and rows["普通块"]["ts"] == ""
+
+
 def test_filter_by_project(tmp_path: Path):
     store = MilvusLiteStore(db_path=str(tmp_path / "v.db"), dim=DIM)
     store.upsert([
         {"vector": _vec(0.5), "text": "p7", "ingest_record_id": 1, "project_id": 7,
-         "char_start": 0, "char_end": 2, "source_type": "folder_scan", "embed_model_id": "fake"},
+         "char_start": 0, "char_end": 2, "source_type": "folder_scan", "embed_model_id": "fake", "capture_session_id": 0, "ts": ""},
         {"vector": _vec(0.5), "text": "p8", "ingest_record_id": 2, "project_id": 8,
-         "char_start": 0, "char_end": 2, "source_type": "folder_scan", "embed_model_id": "fake"},
+         "char_start": 0, "char_end": 2, "source_type": "folder_scan", "embed_model_id": "fake", "capture_session_id": 0, "ts": ""},
     ])
     hits = store.query(_vec(0.5), filter={"project_id": 8}, k=5)
     assert {h["text"] for h in hits} == {"p8"}
@@ -38,9 +56,9 @@ def test_delete_by_record(tmp_path: Path):
     store = MilvusLiteStore(db_path=str(tmp_path / "v.db"), dim=DIM)
     store.upsert([
         {"vector": _vec(0.3), "text": "keep", "ingest_record_id": 1, "project_id": 7,
-         "char_start": 0, "char_end": 4, "source_type": "folder_scan", "embed_model_id": "fake"},
+         "char_start": 0, "char_end": 4, "source_type": "folder_scan", "embed_model_id": "fake", "capture_session_id": 0, "ts": ""},
         {"vector": _vec(0.3), "text": "gone", "ingest_record_id": 2, "project_id": 7,
-         "char_start": 0, "char_end": 4, "source_type": "folder_scan", "embed_model_id": "fake"},
+         "char_start": 0, "char_end": 4, "source_type": "folder_scan", "embed_model_id": "fake", "capture_session_id": 0, "ts": ""},
     ])
     store.delete_by_record(2)
     hits = store.query(_vec(0.3), filter={"project_id": 7}, k=10)
@@ -51,11 +69,11 @@ def test_delete_by_project(tmp_path: Path):
     store = MilvusLiteStore(db_path=str(tmp_path / "v.db"), dim=DIM)
     store.upsert([
         {"vector": _vec(0.4), "text": "p7a", "ingest_record_id": 1, "project_id": 7,
-         "char_start": 0, "char_end": 3, "source_type": "folder_scan", "embed_model_id": "fake"},
+         "char_start": 0, "char_end": 3, "source_type": "folder_scan", "embed_model_id": "fake", "capture_session_id": 0, "ts": ""},
         {"vector": _vec(0.4), "text": "p7b", "ingest_record_id": 2, "project_id": 7,
-         "char_start": 0, "char_end": 3, "source_type": "folder_scan", "embed_model_id": "fake"},
+         "char_start": 0, "char_end": 3, "source_type": "folder_scan", "embed_model_id": "fake", "capture_session_id": 0, "ts": ""},
         {"vector": _vec(0.4), "text": "p8", "ingest_record_id": 3, "project_id": 8,
-         "char_start": 0, "char_end": 2, "source_type": "folder_scan", "embed_model_id": "fake"},
+         "char_start": 0, "char_end": 2, "source_type": "folder_scan", "embed_model_id": "fake", "capture_session_id": 0, "ts": ""},
     ])
     store.delete_by_project(7)
     # 项目 7 的全部块被删,项目 8 不受影响。

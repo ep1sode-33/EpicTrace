@@ -8,7 +8,8 @@ DIM = 1024
 
 def _rec(pid, rid, text):
     return {"vector": [0.1] * DIM, "text": text, "ingest_record_id": rid, "project_id": pid,
-            "char_start": 0, "char_end": len(text), "source_type": "folder_scan", "embed_model_id": "fake"}
+            "char_start": 0, "char_end": len(text), "source_type": "folder_scan", "embed_model_id": "fake",
+            "capture_session_id": 0, "ts": ""}
 
 
 def test_list_by_project_returns_only_that_project(tmp_path: Path):
