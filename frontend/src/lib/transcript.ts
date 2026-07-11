@@ -23,6 +23,10 @@ export type TimelineItem =
       event: CaptureEvent;
     };
 
+// 后端 backend/epictrace/interfaces/organizer.py 的 _group_paragraphs / _join_segments
+// 物化 transcript.md 时**逐条镜像**本文件的 groupTimelineItems / joinSegments 与下面的
+// PARAGRAPH_GAP_SECS、CJK 规则。改动分组/拼接语义须两侧同步。
+
 /** 同一段落内相邻转写的最大时间间隔(秒);超过则断段(不同话题/长停顿单独成段)。 */
 const PARAGRAPH_GAP_SECS = 30;
 
