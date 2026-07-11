@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileText, FolderOpen, Loader2 } from "lucide-react";
+import { FileText, FolderOpen, History, Loader2 } from "lucide-react";
 
 import { api, type Citation, type SourceText } from "@/lib/api";
 import { revealInFinder } from "@/lib/pickers";
@@ -18,10 +18,14 @@ import {
 export function SourceViewer({
   citation,
   onClose,
+  onJumpToSession,
 }: {
   /** 当前要查看的引用;为 null 时关闭。 */
   citation: Citation | null;
   onClose: () => void;
+  /** 引用来自采集 session 时:关闭查看器并跳回暂存区,定位到该时刻的转写段(App 提升的导航)。
+   *  旧消息 citation 无 session 键 → 不传/条件不满足 → 不显示按钮(向后兼容)。 */
+  onJumpToSession?: (sessionId: number, ts: string) => void;
 }) {
   const [source, setSource] = useState<SourceText | null>(null);
   const [loading, setLoading] = useState(false);
@@ -102,6 +106,24 @@ export function SourceViewer({
               </p>
             )}
           </div>
+          {citation?.capture_session_id != null && citation.ts && onJumpToSession && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() => {
+                // 先关 modal 再回调导航,保证查看器已收起(与父级 onClose 语义一致)。
+                const sid = citation.capture_session_id as number;
+                const ts = citation.ts as string;
+                onClose();
+                onJumpToSession(sid, ts);
+              }}
+            >
+              <History className="size-3.5" />
+              跳回会话时刻
+            </Button>
+          )}
           {source?.path && (
             <Button
               type="button"

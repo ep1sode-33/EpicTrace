@@ -14,6 +14,10 @@ export interface Citation {
   n: number; ingest_record_id: number; char_start: number; char_end: number; snippet: string; source_type: string;
   source_kind?: "project" | "attachment";
   reference_id?: number | null;
+  /** 该引用来自某次采集 session 的 transcript(可跳回时间线时刻);null/缺省=非会话来源。旧消息无此键。 */
+  capture_session_id?: number | null;
+  /** 引用对应的墙钟时刻(naive-UTC ISO 秒级,无时区后缀);与 capture_session_id 配对用于跳回。 */
+  ts?: string | null;
 }
 export interface ChatMessage {
   id: number; role: "user" | "assistant"; content: string; citations_json: string | null; created_at: string;
