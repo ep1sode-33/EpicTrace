@@ -59,6 +59,28 @@ def parse_time_anchors(text: str) -> list[tuple[int, str]]:
     return anchors
 
 
+def split_at_anchors(text: str, anchors: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """按锚偏移把全文切成段,返回 `[(base_offset, segment), ...]`(base 升序)。
+
+    边界 = `[0, a1, a2, …, len(text))`(a_i = 各锚的码点偏移);每段落在**恰好一个** marker
+    区间内。index 侧对每段独立 chunk_text、再把 base_offset 加回段内 chunk 的 char_start/
+    char_end(回到全局码点坐标,SourceViewer 高亮的根),从而保证**任何 chunk 不跨 marker**,
+    ts_for_offset 因而精确。
+
+    `anchors` 为空 → 返回单段 `[(0, text)]`(index 侧行为与直接 chunk_text(text) 完全一致)。
+    仅空白/为空的段跳过(不产 chunk)。
+    """
+    if not anchors:
+        return [(0, text)]
+    bounds = [0, *(off for off, _ in anchors), len(text)]
+    segments: list[tuple[int, str]] = []
+    for base, end in zip(bounds, bounds[1:]):
+        seg = text[base:end]
+        if seg.strip():
+            segments.append((base, seg))
+    return segments
+
+
 def ts_for_offset(anchors: list[tuple[int, str]], char_start: int) -> str | None:
     """给定 chunk 的起始码点偏移,返回它所属段落的 ISO 时间串。
 

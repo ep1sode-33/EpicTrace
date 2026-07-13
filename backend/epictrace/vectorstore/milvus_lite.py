@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Callable
 
 # Milvus 用 gRPC。在 embedder/reranker(多进程)fork 之后再构造 gRPC client,会在 macOS 段错误
 # (crash 在 cygrpc pollset_work)。gRPC 官方 fork 支持开关必须在 import pymilvus(→gRPC 初始化)
@@ -48,7 +49,11 @@ _ATTACHMENT_SCALARS = {
 
 class MilvusLiteStore(VectorStore):
     def __init__(self, db_path: str, dim: int = 1024, collection: str = _COLLECTION,
-                 scalars: dict | None = None) -> None:
+                 scalars: dict | None = None,
+                 on_schema_heal: Callable[[], None] | None = None) -> None:
+        # on_schema_heal:仅在下面「字段集不一致 → drop 重建」的自愈分支发生后调用,
+        # 让宿主把 SQLite 里的 IngestRecord.indexed 翻回 False —— 否则 collection 被 drop
+        # 后向量为空、而记录仍 indexed=True,常规索引零目标、检索静默变空(F3)。
         self._client = MilvusClient(db_path)
         self._dim = dim
         self._collection = collection
@@ -72,6 +77,12 @@ class MilvusLiteStore(VectorStore):
                 # 索引构建自然跳过:不为一个马上要删掉的 collection 冒进程级风险。
                 self._client.release_collection(collection)
                 self._client.drop_collection(collection)
+                # 自愈 drop 后回调宿主(重置 indexed);回调失败只记 warning,不挡 store 构造。
+                if on_schema_heal is not None:
+                    try:
+                        on_schema_heal()
+                    except Exception as e:  # noqa: BLE001 — 回调是宿主职责,失败不该炸掉 store 构造
+                        _log.warning("schema 自愈回调失败(不阻断 store 构造): %s", e)
         if not self._client.has_collection(collection):
             schema = self._client.create_schema(auto_id=True, enable_dynamic_field=False)
             schema.add_field("id", DataType.INT64, is_primary=True)

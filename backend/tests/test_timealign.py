@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from epictrace.indexing.timealign import (
     format_marker,
     parse_time_anchors,
+    split_at_anchors,
     ts_for_offset,
 )
 
@@ -90,3 +91,38 @@ def test_ts_for_offset_before_first_anchor_returns_first():
 def test_ts_for_offset_empty_anchors_returns_none():
     assert ts_for_offset([], 0) is None
     assert ts_for_offset([], 999) is None
+
+
+# --- split_at_anchors(F1:按锚偏移把全文切成段,任何 chunk 不得跨 marker)---------
+
+def test_split_at_anchors_empty_returns_whole_text():
+    # 无锚:单段 (0, 全文) —— index 侧据此对整段 chunk_text,与原行为完全一致。
+    text = "没有 marker 的普通正文\n第二行内容\n"
+    assert split_at_anchors(text, []) == [(0, text)]
+
+
+def test_split_at_anchors_segments_bounded_by_each_anchor():
+    a1 = format_marker(datetime(2026, 1, 1, 0, 0, 0), "麦克风")
+    a2 = format_marker(datetime(2026, 1, 1, 0, 5, 0), "系统声音")
+    text = "前言\n\n" + a1 + "\n内容一\n\n" + a2 + "\n内容二\n"
+    anchors = parse_time_anchors(text)
+    segs = split_at_anchors(text, anchors)
+    # 前言段 + 两个锚段 = 3 段;base 升序;段无缝拼回原文(此例无空段)。
+    assert len(segs) == 3
+    bases = [b for b, _ in segs]
+    assert bases == sorted(bases)
+    assert "".join(seg for _, seg in segs) == text
+    # 锚段以其 marker 开头,且不含下一个 marker(不跨界)。
+    assert segs[1][1].startswith("## [2026-01-01 00:00:00]")
+    assert "## [2026-01-01 00:05:00]" not in segs[1][1]
+    assert segs[2][1].startswith("## [2026-01-01 00:05:00]")
+
+
+def test_split_at_anchors_skips_empty_leading_segment_when_anchor_at_zero():
+    # 首锚在偏移 0(无前言):不产空前导段,首段即锚段。
+    text = format_marker(datetime(2026, 1, 1, 0, 0, 0), "麦克风") + "\n内容\n"
+    anchors = parse_time_anchors(text)
+    segs = split_at_anchors(text, anchors)
+    assert len(segs) == 1
+    assert segs[0][0] == 0
+    assert segs[0][1] == text

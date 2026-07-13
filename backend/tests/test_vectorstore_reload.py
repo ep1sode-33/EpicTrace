@@ -78,3 +78,67 @@ def test_reopen_attachment_collection_schema_unchanged_keeps_rows(tmp_path: Path
     rows = s2.list_by({"conversation_id": 1})
     assert len(rows) == 1 and rows[0]["reference_id"] == 10
     s2.close()
+
+
+# --- F3:自愈 drop 后回调宿主(重置 indexed),否则 collection 空但记录仍 indexed=True ----
+
+def test_schema_heal_invokes_callback_on_drop(tmp_path: Path):
+    """v1 字段集重开触发 mismatch drop → on_schema_heal 回调被调恰一次
+    (宿主据此把 IngestRecord.indexed 翻回 False,否则常规索引零目标、检索静默变空)。"""
+    db = str(tmp_path / "v.db")
+    s1 = MilvusLiteStore(db_path=db, dim=DIM, scalars=_OLD_SCALARS)
+    s1.upsert([_old_rec(1, "旧格式行")])
+    s1.close()
+
+    called = []
+    s2 = MilvusLiteStore(db_path=db, dim=DIM, on_schema_heal=lambda: called.append(True))
+    assert called == [True]
+    s2.close()
+
+
+def test_schema_heal_callback_not_called_when_fields_match(tmp_path: Path):
+    """字段集一致(同 _SCALARS)重开 → 不 drop、不回调。"""
+    db = str(tmp_path / "v.db")
+    s1 = MilvusLiteStore(db_path=db, dim=DIM)
+    s1.upsert([_rec(1, "行")])
+    s1.close()
+
+    called = []
+    s2 = MilvusLiteStore(db_path=db, dim=DIM, on_schema_heal=lambda: called.append(True))
+    assert called == []
+    s2.close()
+
+
+def test_schema_heal_callback_failure_does_not_block_construction(tmp_path: Path, caplog):
+    """回调抛错 → 记 warning,不挡 store 构造(store 仍可写可查)。"""
+    db = str(tmp_path / "v.db")
+    s1 = MilvusLiteStore(db_path=db, dim=DIM, scalars=_OLD_SCALARS)
+    s1.upsert([_old_rec(1, "旧格式行")])
+    s1.close()
+
+    def boom():
+        raise RuntimeError("db down")
+
+    with caplog.at_level("WARNING", logger="epictrace"):
+        s2 = MilvusLiteStore(db_path=db, dim=DIM, on_schema_heal=boom)
+    s2.upsert([_rec(2, "新格式行")])          # 构造成功、可用
+    assert len(s2.list_by_project(7)) == 1
+    s2.close()
+
+
+def test_schema_heal_callback_not_called_for_attachment_collection(tmp_path: Path):
+    """attachment collection scalars 未变 → 不触发自愈、回调不调。"""
+    db = str(tmp_path / "v.db")
+    arec = {"vector": [0.1] * DIM, "text": "附件块", "conversation_id": 1, "reference_id": 10,
+            "char_start": 0, "char_end": 3, "source_type": "attachment", "embed_model_id": "fake"}
+    s1 = MilvusLiteStore(db_path=db, dim=DIM, collection="attachment_chunks",
+                         scalars=_ATTACHMENT_SCALARS)
+    s1.upsert([arec])
+    s1.close()
+
+    called = []
+    s2 = MilvusLiteStore(db_path=db, dim=DIM, collection="attachment_chunks",
+                         scalars=_ATTACHMENT_SCALARS,
+                         on_schema_heal=lambda: called.append(True))
+    assert called == []
+    s2.close()

@@ -55,9 +55,32 @@ def get_vector_store(request: Request):
             from epictrace.config import AppConfig
             from epictrace.vectorstore.milvus_lite import MilvusLiteStore
 
-            store = MilvusLiteStore(db_path=AppConfig().milvus_path, dim=1024)
+            # 用注入的 app.state.config(测试为 tmp data_dir),同 get_attachment_store 的模式;
+            # 无注入才回退新建 AppConfig()(smoke 测试的 SimpleNamespace 无 config 属性,靠 getattr 回退)。
+            config = getattr(request.app.state, "config", None) or AppConfig()
+            store = MilvusLiteStore(db_path=config.milvus_path, dim=1024,
+                                    on_schema_heal=_make_reset_indexed_on_heal(request))
             request.app.state.vector_store = store
     return store
+
+
+def _make_reset_indexed_on_heal(request: Request):
+    """构造 MilvusLiteStore 的自愈回调:当 chunks collection 因 schema 不一致被 drop 重建后,
+    把**全部** IngestRecord.indexed 翻回 False —— 否则向量被清空而记录仍 indexed=True,
+    常规索引零目标、检索静默变空(F3)。参照 services.index.reset_index_if_schema_upgraded 的
+    update 写法,直接写一条 update,避免 import 循环。db 缺失(如 smoke 测试的 SimpleNamespace)→ no-op。"""
+    def _reset() -> None:
+        db = getattr(request.app.state, "db", None)
+        if db is None:
+            return
+        from sqlalchemy import update
+
+        from epictrace.models import IngestRecord
+
+        with db.session() as s:
+            s.execute(update(IngestRecord).values(indexed=False))
+
+    return _reset
 
 
 def get_attachment_store(request: Request):

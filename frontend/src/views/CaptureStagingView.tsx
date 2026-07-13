@@ -158,7 +158,11 @@ export function CaptureStagingView({ onOrganized, focus, onFocusConsumed }: Prop
         onFocusConsumed?.();
       })
       .catch(() => {
-        if (!cancelled) setError("会话不存在或已删除");
+        if (cancelled) return;
+        setError("会话不存在或已删除");
+        // 失败路径也要消费焦点:否则这条死 focus 会跨本视图重挂载存活,每次切回都重放
+        // 同一失败请求(且 App 侧 sessionFocus 永不清空)。
+        onFocusConsumed?.();
       });
     return () => {
       cancelled = true;

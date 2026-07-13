@@ -117,8 +117,9 @@ export function groupTimelineItems(events: CaptureEvent[]): TimelineItem[] {
  * 在时间线条目里定位与墙钟时刻 tsIso 对应的转写段,返回它在 items 数组中的下标
  * (供「跳回会话时刻」滚动定位/高亮用;下标含 passthrough,故直接对应渲染顺序)。
  * 规则:只看 transcription 条目——
- *  1. 首选:某段满足 start_ts−1s ≤ ts ≤ end_ts+1s(1s 容差:marker 秒级截断 vs 事件 ts 带微秒),
- *     命中多段取第一段;
+ *  1. 首选:段首 start_ts ∈ [ts, ts+1s) 的**第一段**。marker 语义 = floor(段首秒),
+ *     故真正的段首落在 [ts, ts+1s)(不再用 end_ts 窗口——相邻短段 <1s 时会互相重叠、
+ *     先到先得地误高亮到前一段);
  *  2. 否则:取 |start_ts−ts| 最近的一段;
  *  3. 无转写段 / ts 不可解析 → -1。
  *
@@ -135,23 +136,16 @@ export function findTimelineTargetIndex(items: TimelineItem[], tsIso: string): n
     const item = items[i];
     if (item.kind !== "transcription") continue;
     const start = new Date(item.start_ts).getTime();
-    const end = new Date(item.end_ts).getTime();
-    // 首选:落在 [start−1s, end+1s] 容差区间内的第一段,直接命中。
-    if (
-      !Number.isNaN(start) &&
-      !Number.isNaN(end) &&
-      target >= start - 1000 &&
-      target <= end + 1000
-    ) {
+    if (Number.isNaN(start)) continue;
+    // 首选:段首落在 [ts, ts+1s) 的第一段,直接命中(marker 截到秒 → 真段首在这 1s 内)。
+    if (target <= start && start < target + 1000) {
       return i;
     }
-    // 兜底:记录 |start−ts| 最近的一段(区间未命中时用)。
-    if (!Number.isNaN(start)) {
-      const dist = Math.abs(start - target);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestIdx = i;
-      }
+    // 兜底:记录 |start−ts| 最近的一段(无窗口命中时用)。
+    const dist = Math.abs(start - target);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIdx = i;
     }
   }
   return bestIdx;
