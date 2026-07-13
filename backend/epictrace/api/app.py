@@ -49,6 +49,18 @@ def create_app(
     # settings / get_llm 都读 app.state.config(而非新建 AppConfig()),保证 tmp data_dir
     # 测试隔离:优先用显式 config 参数,否则取构造 db 时的 AppConfig。
     app.state.config = config or getattr(db, "config", None) or AppConfig()
+    # 向量 schema 版本升级的一次性重置:标记文件落后于当前版本 → 全库翻回待索引
+    # (向量 collection 由 MilvusLiteStore 自愈重建,用户手动点重建索引)。
+    # 失败只记日志、不挡启动;此调用只碰 SQLite/标记文件,不触 pymilvus/gRPC
+    # (fork 顺序护栏,见 services.index.reset_index_if_schema_upgraded)。
+    try:
+        from epictrace.services.index import reset_index_if_schema_upgraded
+
+        reset_index_if_schema_upgraded(db)
+    except Exception:  # noqa: BLE001 — 重置失败不应阻止 app 启动
+        import logging
+
+        logging.getLogger("epictrace").exception("向量 schema 版本重置失败(不挡启动)")
     # embedder/vector_store 可注入(测试注入假件)。默认延迟构造:不在 create_app 里
     # 急切起 BGE-M3 / Milvus(那样会拖慢/污染 health/projects/files 等无关用例),
     # 而是首次用到索引路由时再建真件(见 deps.get_embedder / get_vector_store)。

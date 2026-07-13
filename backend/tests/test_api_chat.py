@@ -30,7 +30,7 @@ def test_chat_flow_creates_conversation_streams_and_cites(chat_client, tmp_path)
     pid = client.post("/api/projects", json={"title": "P", "folder_path": str(folder)}).json()["id"]
     store.upsert([{ "vector": emb.embed(["页表映射地址"])[0], "text": "页表映射地址", "ingest_record_id": 1,
                     "project_id": pid, "char_start": 0, "char_end": 6, "source_type": "folder_scan",
-                    "embed_model_id": "fake" }])
+                    "embed_model_id": "fake", "capture_session_id": 0, "ts": ""}])
     cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
 
     with client.stream("POST", f"/api/conversations/{cid}/messages", json={"content": "页表是什么"}) as r:
@@ -49,7 +49,7 @@ def test_delete_conversation_removes_it_and_its_messages(chat_client, tmp_path):
     pid = client.post("/api/projects", json={"title": "P", "folder_path": str(folder)}).json()["id"]
     store.upsert([{ "vector": emb.embed(["页表映射地址"])[0], "text": "页表映射地址", "ingest_record_id": 1,
                     "project_id": pid, "char_start": 0, "char_end": 6, "source_type": "folder_scan",
-                    "embed_model_id": "fake" }])
+                    "embed_model_id": "fake", "capture_session_id": 0, "ts": ""}])
     cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
     # 跑一轮,落 user + assistant 两条消息。
     with client.stream("POST", f"/api/conversations/{cid}/messages", json={"content": "页表是什么"}) as r:
@@ -87,7 +87,7 @@ def test_regenerate_replaces_last_assistant(chat_client, tmp_path):
     pid = client.post("/api/projects", json={"title": "P", "folder_path": str(folder)}).json()["id"]
     store.upsert([{ "vector": emb.embed(["页表映射地址"])[0], "text": "页表映射地址", "ingest_record_id": 1,
                     "project_id": pid, "char_start": 0, "char_end": 6, "source_type": "folder_scan",
-                    "embed_model_id": "fake" }])
+                    "embed_model_id": "fake", "capture_session_id": 0, "ts": ""}])
     cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
     with client.stream("POST", f"/api/conversations/{cid}/messages", json={"content": "页表是什么"}) as r:
         assert r.status_code == 200
@@ -126,7 +126,7 @@ def _seed_one_turn(client, tmp_path, store, emb):
     pid = client.post("/api/projects", json={"title": "P", "folder_path": str(folder)}).json()["id"]
     store.upsert([{ "vector": emb.embed(["页表映射地址"])[0], "text": "页表映射地址", "ingest_record_id": 1,
                     "project_id": pid, "char_start": 0, "char_end": 6, "source_type": "folder_scan",
-                    "embed_model_id": "fake" }])
+                    "embed_model_id": "fake", "capture_session_id": 0, "ts": ""}])
     cid = client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
     with client.stream("POST", f"/api/conversations/{cid}/messages", json={"content": "页表是什么"}) as r:
         assert r.status_code == 200

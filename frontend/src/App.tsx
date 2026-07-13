@@ -21,6 +21,12 @@ export default function App() {
   );
   // 采集 tab 内部子视图切换:「采集」或「暂存区」
   const [captureSubTab, setCaptureSubTab] = useState<"capture" | "staging">("capture");
+  // 「跳回会话时刻」跨页签跳转用(镜像 processFocus):点引用里的跳回按钮后,记下要在暂存区
+  // 展开/定位的 session 与墙钟时刻;自增 key 让 CaptureStagingView 即便已挂载也能重复响应
+  //(含对同一 citation 反复跳转)。
+  const [sessionFocus, setSessionFocus] = useState<
+    { sessionId: number; ts: string; key: number } | null
+  >(null);
 
   const refreshSettings = useCallback(() => {
     api
@@ -30,6 +36,13 @@ export default function App() {
         /* 设置拉取失败时保持未配置态:Composer 禁用并提示去设置,仍可重试。 */
       });
   }, []);
+
+  // sessionFocus 被 CaptureStagingView 消费后即清空:该视图是条件渲染(切走会卸载),
+  // 若焦点长驻 App,每次切回暂存区都会重挂载并重放整个跳转(强展开旧 session/滚动/高亮),
+  // 覆盖用户当前选择。清成 null 后重挂载不再重放;而回调每次跳转都造新对象(key 自增),
+  // 清 null 与再次跳转不冲突——同一 citation 再点仍生成新对象、照常触发定位。
+  // 稳定引用(useCallback)让子组件可安全放进 effect deps,不引入无谓重跑。
+  const clearSessionFocus = useCallback(() => setSessionFocus(null), []);
 
   useEffect(() => {
     refreshSettings();
@@ -88,6 +101,8 @@ export default function App() {
                 )}
                 {captureSubTab === "staging" && (
                   <CaptureStagingView
+                    focus={sessionFocus}
+                    onFocusConsumed={clearSessionFocus}
                     onOrganized={(pid) => {
                       // 归类后跳到「信息处理和入库」并聚焦该项目
                       setProcessFocus((prev) => ({
@@ -111,6 +126,18 @@ export default function App() {
               <ProjectsConversationView
                 llmConfigured={llmConfigured}
                 onOpenSettings={() => setInSettings(true)}
+                onJumpToSession={(sessionId, ts) => {
+                  // 引用「跳回会话时刻」:切到采集/暂存区并聚焦目标 session 时刻。
+                  // 自增 key 让同一 citation 反复点也能重新触发定位。
+                  setSessionFocus((prev) => ({
+                    sessionId,
+                    ts,
+                    key: (prev?.key ?? 0) + 1,
+                  }));
+                  setInSettings(false);
+                  setActiveTab("capture");
+                  setCaptureSubTab("staging");
+                }}
                 onReindexStarted={(projectId) => {
                   // 触发重建后切到「信息处理和入库」并聚焦该项目,在那儿看完整索引进度。
                   setProcessFocus((prev) => ({

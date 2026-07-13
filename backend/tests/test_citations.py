@@ -20,3 +20,20 @@ def test_build_citations_keeps_only_referenced_numbers():
 def test_build_citations_ignores_out_of_range_numbers():
     cites = build_citations("乱标[9]", [_c(1, "x")])
     assert cites == []
+
+
+def test_build_citations_passes_through_capture_session_and_ts():
+    # 带会话溯源的 chunk → citation 透传两键,供前端跳回会话时刻
+    chunk = RetrievedChunk(text="会话里说过页表", ingest_record_id=1, project_id=7,
+                           char_start=0, char_end=7, source_type="folder_scan",
+                           capture_session_id=12, ts="2026-07-11T03:00:00")
+    out = build_citations("引用[1]", [chunk])
+    assert out[0]["capture_session_id"] == 12
+    assert out[0]["ts"] == "2026-07-11T03:00:00"
+
+
+def test_build_citations_capture_fields_default_none():
+    # 普通 chunk(未带会话字段)→ 两键恒出现,值为 None(JSON null)
+    out = build_citations("引用[1]", [_c(1, "普通片段")])
+    assert "capture_session_id" in out[0] and out[0]["capture_session_id"] is None
+    assert "ts" in out[0] and out[0]["ts"] is None

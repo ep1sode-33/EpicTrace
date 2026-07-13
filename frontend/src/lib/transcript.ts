@@ -23,6 +23,10 @@ export type TimelineItem =
       event: CaptureEvent;
     };
 
+// 后端 backend/epictrace/interfaces/organizer.py 的 _group_paragraphs / _join_segments
+// 物化 transcript.md 时**逐条镜像**本文件的 groupTimelineItems / joinSegments 与下面的
+// PARAGRAPH_GAP_SECS、CJK 规则。改动分组/拼接语义须两侧同步。
+
 /** 同一段落内相邻转写的最大时间间隔(秒);超过则断段(不同话题/长停顿单独成段)。 */
 const PARAGRAPH_GAP_SECS = 30;
 
@@ -107,4 +111,42 @@ export function groupTimelineItems(events: CaptureEvent[]): TimelineItem[] {
   }
   flush();
   return items;
+}
+
+/**
+ * 在时间线条目里定位与墙钟时刻 tsIso 对应的转写段,返回它在 items 数组中的下标
+ * (供「跳回会话时刻」滚动定位/高亮用;下标含 passthrough,故直接对应渲染顺序)。
+ * 规则:只看 transcription 条目——
+ *  1. 首选:段首 start_ts ∈ [ts, ts+1s) 的**第一段**。marker 语义 = floor(段首秒),
+ *     故真正的段首落在 [ts, ts+1s)(不再用 end_ts 窗口——相邻短段 <1s 时会互相重叠、
+ *     先到先得地误高亮到前一段);
+ *  2. 否则:取 |start_ts−ts| 最近的一段;
+ *  3. 无转写段 / ts 不可解析 → -1。
+ *
+ * 纯函数,不改入参。tsIso 与事件 ts 同为无时区后缀 naive ISO,两侧都用 new Date() 解析、差值一致
+ * (勿引入时区转换)。
+ */
+export function findTimelineTargetIndex(items: TimelineItem[], tsIso: string): number {
+  const target = new Date(tsIso).getTime();
+  if (Number.isNaN(target)) return -1;
+
+  let bestIdx = -1;
+  let bestDist = Infinity;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind !== "transcription") continue;
+    const start = new Date(item.start_ts).getTime();
+    if (Number.isNaN(start)) continue;
+    // 首选:段首落在 [ts, ts+1s) 的第一段,直接命中(marker 截到秒 → 真段首在这 1s 内)。
+    if (target <= start && start < target + 1000) {
+      return i;
+    }
+    // 兜底:记录 |start−ts| 最近的一段(无窗口命中时用)。
+    const dist = Math.abs(start - target);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
 }

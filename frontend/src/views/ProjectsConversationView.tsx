@@ -41,11 +41,14 @@ export function ProjectsConversationView({
   llmConfigured,
   onOpenSettings,
   onReindexStarted,
+  onJumpToSession,
 }: {
   llmConfigured: boolean;
   onOpenSettings: () => void;
   /** 重建索引已触发:由 App 切到「信息处理和入库」并聚焦该项目,在那儿看完整索引进度。 */
   onReindexStarted: (projectId: number) => void;
+  /** 引用「跳回会话时刻」:由 App 切到采集/暂存区并定位该 session 时刻(透传给 SourceViewer)。 */
+  onJumpToSession: (sessionId: number, ts: string) => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Project | null>(null);
@@ -398,6 +401,7 @@ export function ProjectsConversationView({
             onCreateConversation={handleCreateConversation}
             onConversationCreated={handleConversationCreated}
             onConversationActivity={refreshConversations}
+            onJumpToSession={onJumpToSession}
           />
         ) : (
           <EmptyState onCreate={() => setCreateOpen(true)} />
@@ -516,6 +520,7 @@ function Workspace({
   onCreateConversation,
   onConversationCreated,
   onConversationActivity,
+  onJumpToSession,
 }: {
   project: Project;
   llmConfigured: boolean;
@@ -530,6 +535,8 @@ function Workspace({
   /** 草稿已落库为真实会话后通知父级(入缓存、清草稿、设为选中)。 */
   onConversationCreated: (conversation: Conversation) => void;
   onConversationActivity: () => void;
+  /** 引用「跳回会话时刻」:透传给 Conversation 内的 SourceViewer。 */
+  onJumpToSession: (sessionId: number, ts: string) => void;
 }) {
   return (
     <div className="relative flex h-full min-w-0 flex-1">
@@ -562,6 +569,7 @@ function Workspace({
           onCreateConversation={onCreateConversation}
           onConversationCreated={onConversationCreated}
           onConversationActivity={onConversationActivity}
+          onJumpToSession={onJumpToSession}
         />
       </div>
     </div>
@@ -593,6 +601,7 @@ function Conversation({
   onCreateConversation,
   onConversationCreated,
   onConversationActivity,
+  onJumpToSession,
 }: {
   projectId: number;
   projectTitle: string;
@@ -604,6 +613,8 @@ function Conversation({
   onCreateConversation: (projectId: number) => Promise<Conversation>;
   onConversationCreated: (conversation: Conversation) => void;
   onConversationActivity: () => void;
+  /** 引用「跳回会话时刻」:透传给 SourceViewer 的 header 按钮。 */
+  onJumpToSession: (sessionId: number, ts: string) => void;
 }) {
   const [messages, setMessages] = useState<ViewMessage[]>([]);
   const [loading, setLoading] = useState(false);
@@ -1190,7 +1201,11 @@ function Conversation({
         </aside>
       )}
 
-      <SourceViewer citation={viewing} onClose={() => setViewing(null)} />
+      <SourceViewer
+        citation={viewing}
+        onClose={() => setViewing(null)}
+        onJumpToSession={onJumpToSession}
+      />
     </div>
   );
 }

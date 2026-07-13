@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Clock, FolderOpen, Loader2, Trash2 } from "lucide-react";
 import { api, type CaptureSession, type CaptureSessionDetail, type Project } from "@/lib/api";
-import { groupTimelineItems } from "@/lib/transcript";
+import { findTimelineTargetIndex, groupTimelineItems } from "@/lib/transcript";
 import { Button } from "@/components/ui/button";
 
 /** 状态徽标样式 */
@@ -76,9 +76,15 @@ function kindLabel(kind: string, meta?: Record<string, unknown>): string {
 
 interface Props {
   onOrganized: (projectId: number) => void;
+  /** 「跳回会话时刻」导航(镜像 App 的 processFocus):展开该 session 并把时间线滚动/高亮到 ts
+   *  对应的转写段。key 自增支持对同一引用反复跳转。null/缺省 = 无跳转,行为零变化。 */
+  focus?: { sessionId: number; ts: string; key: number } | null;
+  /** 焦点被消费(getSession 成功、pendingFocus 已交接)后回调 App 清空 sessionFocus。
+   *  本视图是条件渲染,会随切页卸载;若不在重挂载边界之上清掉焦点,每次切回都会重放跳转。 */
+  onFocusConsumed?: () => void;
 }
 
-export function CaptureStagingView({ onOrganized }: Props) {
+export function CaptureStagingView({ onOrganized, focus, onFocusConsumed }: Props) {
   const [sessions, setSessions] = useState<CaptureSession[]>([]);
   const [selected, setSelected] = useState<CaptureSessionDetail | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -87,6 +93,17 @@ export function CaptureStagingView({ onOrganized }: Props) {
   const [organizing, setOrganizing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<number | null>(null);
+  // 「跳回」待定位的时刻:focus 拉到 session 详情、setSelected 后暂存于此,待 selected 就位(DOM 已提交)
+  // 的 effect 消费——用它定位时间线段并滚动/高亮。
+  const [pendingFocus, setPendingFocus] = useState<
+    { sessionId: number; ts: string } | null
+  >(null);
+  // 临时高亮的时间线条目({会话 id, 段下标});~2.5s 后清。带会话 id 防切换 session 后错高亮。
+  const [highlight, setHighlight] = useState<{ sessionId: number; index: number } | null>(
+    null,
+  );
+  // 高亮清除定时器句柄:新高亮/卸载时清,防泄漏。
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -117,6 +134,71 @@ export function CaptureStagingView({ onOrganized }: Props) {
     }, 2000);
     return () => clearInterval(t);
   }, [selected?.id, selected?.retranscribing]);
+
+  // 「跳回会话时刻」:focus 变(每次跳转都是新对象,含 key 自增 → 反复跳同一引用也重触发)时,
+  // 拉取目标 session 详情并展开为 selected;记下待定位时刻交给下面的 effect。
+  // 404(会话已删)→ 复用现有错误展示,不崩。焦点为 null 时不做任何事。
+  useEffect(() => {
+    if (!focus) return;
+    let cancelled = false;
+    api
+      .getSession(focus.sessionId)
+      .then((detail) => {
+        if (cancelled) return;
+        // 会话可能不在已加载列表里(列表陈旧/组件早已挂载):补进去,保证其展开详情能渲染。
+        setSessions((prev) =>
+          prev.some((s) => s.id === detail.id) ? prev : [detail, ...prev],
+        );
+        setSelected(detail);
+        setSelectedProjectId("");
+        setError(null);
+        setPendingFocus({ sessionId: focus.sessionId, ts: focus.ts });
+        // 消费即清:通知 App 清空 sessionFocus,使本视图重挂载时 focus 为 null、不再重放本次跳转。
+        // 定位所需的时刻已存进 pendingFocus(组件内 state),清 App 焦点不影响后续滚动/高亮。
+        onFocusConsumed?.();
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setError("会话不存在或已删除");
+        // 失败路径也要消费焦点:否则这条死 focus 会跨本视图重挂载存活,每次切回都重放
+        // 同一失败请求(且 App 侧 sessionFocus 永不清空)。
+        onFocusConsumed?.();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [focus, onFocusConsumed]);
+
+  // selected 就位(DOM 已提交,时间线已渲染)后,定位并滚动/高亮目标转写段。
+  // !loading 门:从对话页跳来会重新挂载本组件,初始 loading=true 时渲染的是加载态、时间线尚不在 DOM;
+  // 待列表加载完(loading→false,时间线渲染)effect 重跑再定位。
+  // 所有 setState 都在 rAF 回调里(非 effect 体内同步调用),避免 set-state-in-effect 级联渲染。
+  useEffect(() => {
+    if (loading || !pendingFocus || !selected || selected.id !== pendingFocus.sessionId) return;
+    const sid = selected.id;
+    const events = selected.events;
+    const ts = pendingFocus.ts;
+    const raf = requestAnimationFrame(() => {
+      setPendingFocus(null); // 消费掉本次待定位。
+      const idx = findTimelineTargetIndex(groupTimelineItems(events), ts);
+      if (idx < 0) return; // 无匹配转写段:仅展开会话,不滚动/高亮(优雅降级)。
+      document
+        .getElementById(`tl-${sid}-${idx}`)
+        ?.scrollIntoView({ block: "center" });
+      setHighlight({ sessionId: sid, index: idx });
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = setTimeout(() => setHighlight(null), 2500);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [pendingFocus, selected, loading]);
+
+  // 卸载时清高亮定时器,防泄漏。
+  useEffect(
+    () => () => {
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    },
+    [],
+  );
 
   async function handleSelect(sess: CaptureSession) {
     if (selected?.id === sess.id) {
@@ -245,13 +327,20 @@ export function CaptureStagingView({ onOrganized }: Props) {
                           <div className="absolute left-[5.5rem] top-0 h-full w-px bg-border/50" aria-hidden />
                           {/* 连续同源转写合并成段落(FIX 2):一段只显示一次来源标签 + 一个时间/区间,
                               整段文本换行展示,不再逐句一行一时间戳。 */}
-                          {groupTimelineItems(selected.events).map((item) => {
+                          {groupTimelineItems(selected.events).map((item, index) => {
+                            // 稳定 DOM id(含会话 id + 段下标)供「跳回」滚动定位;命中段临时加高亮环。
+                            const domId = `tl-${selected.id}-${index}`;
+                            const hit =
+                              highlight?.sessionId === selected.id && highlight.index === index;
+                            const rowCls = `flex items-start gap-3 rounded-lg transition ${
+                              hit ? "ring-2 ring-primary/50 bg-primary/5" : ""
+                            }`;
                             if (item.kind === "transcription") {
                               const startRel = fmtRel(relSec(selected.started_at, item.start_ts));
                               const endRel = fmtRel(relSec(selected.started_at, item.end_ts));
                               const timeLabel = startRel === endRel ? startRel : `${startRel}–${endRel}`;
                               return (
-                                <div key={`tr-${item.ids[0]}`} className="flex items-start gap-3">
+                                <div key={`tr-${item.ids[0]}`} id={domId} className={rowCls}>
                                   <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground pt-0.5">
                                     {timeLabel}
                                   </span>
@@ -273,7 +362,7 @@ export function CaptureStagingView({ onOrganized }: Props) {
                             }
                             const ev = item.event;
                             return (
-                              <div key={ev.id} className="flex items-start gap-3">
+                              <div key={ev.id} id={domId} className={rowCls}>
                                 {/* 相对时间刻度 */}
                                 <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground pt-0.5">
                                   {fmtRel(relSec(selected.started_at, ev.ts))}

@@ -30,6 +30,6 @@ def test_attachment_collection_roundtrip_filter_and_cleanup(tmp_path: Path):
 def test_default_chunks_collection_still_works(tmp_path: Path):
     s = MilvusLiteStore(db_path=str(tmp_path / "c.db"), dim=DIM)
     s.upsert([{"vector": [0.1] * DIM, "text": "x", "ingest_record_id": 1, "project_id": 7,
-               "char_start": 0, "char_end": 1, "source_type": "folder_scan", "embed_model_id": "f"}])
+               "char_start": 0, "char_end": 1, "source_type": "folder_scan", "embed_model_id": "f", "capture_session_id": 0, "ts": ""}])
     assert len(s.list_by_project(7)) == 1
     s.close()

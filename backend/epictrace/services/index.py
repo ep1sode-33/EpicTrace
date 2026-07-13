@@ -4,10 +4,11 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from epictrace.db import Database
-from epictrace.indexing.chunker import chunk_text
+from epictrace.indexing.chunker import Chunk, chunk_text
+from epictrace.indexing.timealign import parse_time_anchors, split_at_anchors, ts_for_offset
 from epictrace.interfaces.embedding import EmbeddingProvider
 from epictrace.interfaces.vector_store import VectorStore
 from epictrace.media import get_processor
@@ -57,7 +58,14 @@ class IndexService:
                     )
                 ).scalars()
             )
-            targets = [(r.id, r.stored_path) for r in recs if get_processor(Path(r.stored_path), self._db.config) is not None]
+            # 四元组:(记录 id, 落盘路径, source_session_id[0=非会话来源], original_filename)。
+            # _run 据 source_session_id 决定是否落 capture_session_id;据 original_filename
+            # 判定是否为 transcript.md(只有它才解析时间锚,F5:notes/clipboard 的伪 marker 不铸假 ts)。
+            targets = [
+                (r.id, r.stored_path, r.source_session_id or 0, r.original_filename)
+                for r in recs
+                if get_processor(Path(r.stored_path), self._db.config) is not None
+            ]
 
         job = IndexJob(project_id=project_id, total=len(targets))
         job._targets = targets  # type: ignore[attr-defined]  # 交给 _run 消费
@@ -132,7 +140,7 @@ class IndexService:
 
     def _targets_need_mineru(self, targets: list) -> bool:
         """本轮目标里是否有任一文件由 MinerU 处理(富文档)——只有它需要模型下载。"""
-        for _rec_id, path_str in targets:
+        for _rec_id, path_str, _sid, _fn in targets:
             proc = get_processor(Path(path_str), self._db.config)
             if isinstance(proc, MinerUMediaProcessor):
                 return True
@@ -149,12 +157,31 @@ class IndexService:
         if targets and self._targets_need_mineru(targets):
             self._ensure_models_ready(job)
         store = self._resolve_store()
-        for rec_id, path_str in targets:
+        for rec_id, path_str, session_id, original_filename in targets:
             try:
                 path = Path(path_str)
                 proc = get_processor(path, self._db.config)
                 text = proc.process(path).text
-                chunks = chunk_text(text)
+                # 时间锚只对**会话来源的 transcript.md** 解析(双门):
+                #  - session_id 门:非会话来源不带段级时刻;
+                #  - 文件名门:同 session 的 notes.md / clipboard.md 里 marker 形状的用户文字
+                #    不得被铸成假 ts(F5)。物化端 interfaces/organizer.py 的 staging 文件名
+                #    恒为 "transcript.md";ingest_file 的 original_filename=src.name,
+                #    不受项目夹 _unique_dest 改名影响,故此处只信 original_filename。
+                anchors = (
+                    parse_time_anchors(text)
+                    if session_id and original_filename == "transcript.md"
+                    else []
+                )
+                # F1:按锚把全文切成段再逐段 chunk,base 加回全局码点坐标 —— 任何 chunk 不跨
+                # marker,ts_for_offset 因而精确。anchors 为空时 split 返回单段 (0, text),
+                # 与直接 chunk_text(text) 完全一致。
+                chunks = [
+                    Chunk(text=c.text,
+                          char_start=base + c.char_start, char_end=base + c.char_end)
+                    for base, segment in split_at_anchors(text, anchors)
+                    for c in chunk_text(segment)
+                ]
                 # 幂等:提取成功后、入库前无条件清旧块,
                 # 这样「现在提取为空」的文件也能清掉历史向量。
                 store.delete_by_record(rec_id)
@@ -167,14 +194,21 @@ class IndexService:
                             "char_start": c.char_start, "char_end": c.char_end,
                             "source_type": "folder_scan",
                             "embed_model_id": self._embedder.model_id,
+                            # v2 标量:会话回跳的根。哨兵 0/"" = 非会话来源/无锚。
+                            "capture_session_id": session_id,
+                            "ts": ts_for_offset(anchors, c.char_start) or "",
                         }
                         for c, vec in zip(chunks, vectors)
                     ])
-                # 标记已索引
+                # 标记已索引;同步 extracted_text 到本轮提取快照(F4):索引用的文本与
+                # SourceViewer 展示的文本必须同一快照,否则文件改过再 reindex 时引用偏移
+                # 对新文本、查看器却还显示旧缓存,高亮错位。
                 with self._db.session() as s:
                     r = s.get(IngestRecord, rec_id)
                     if r is not None:
                         r.indexed = True
+                        if r.extracted_text != text:
+                            r.extracted_text = text
                 with job._lock:
                     job.done += 1
             except Exception as e:  # 单文件失败:记录并继续
@@ -182,3 +216,36 @@ class IndexService:
                     job.errors.append(f"{path_str}: {e}")
         with job._lock:
             job.status = "done"
+
+
+# 向量行 schema 的版本号,与 vectorstore.milvus_lite._SCALARS 同步演进
+# (v2:增 capture_session_id/ts)。升级后旧库里的向量缺新字段、collection 会被
+# MilvusLiteStore 自愈重建,故记录侧也须整体翻回待索引,由用户手动重建索引。
+INDEX_SCHEMA_VERSION = "2"
+
+
+def reset_index_if_schema_upgraded(db: Database) -> bool:
+    """启动时的一次性 schema 版本重置:data_dir/vector_schema_version 标记
+    不是当前版本(缺失或旧值)→ 全库 IngestRecord.indexed=False + 写入标记,
+    返回 True;标记已一致 → no-op 返回 False。幂等(重置后标记即一致)。
+
+    只碰 SQLite 与标记文件:不 import pymilvus、不建任何 gRPC 连接 —— 启动路径
+    必须保持「先 warmup 模型再碰 Milvus」的 fork 顺序护栏(macOS 段错误)。
+    向量本体的重建由 MilvusLiteStore.__init__ 的 schema 自愈负责。
+    """
+    marker = Path(db.config.data_dir) / "vector_schema_version"
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == INDEX_SCHEMA_VERSION:
+        return False
+    with db.session() as s:
+        flipped = s.execute(
+            update(IngestRecord).where(IngestRecord.indexed.is_(True)).values(indexed=False)
+        ).rowcount
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(INDEX_SCHEMA_VERSION, encoding="utf-8")
+    import logging
+
+    logging.getLogger("epictrace").info(
+        "向量 schema 升级到 v%s:%d 条已索引记录翻回待索引(在「信息处理和入库」手动重建)",
+        INDEX_SCHEMA_VERSION, flipped,
+    )
+    return True

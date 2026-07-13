@@ -76,6 +76,37 @@ def test_organize_ingests_audio_wav_from_staging(tmp_path: Path):
     assert Path(mic_rec.stored_path).parent == Path(proj.folder_path)
 
 
+def test_organize_materializes_transcript_md(tmp_path: Path):
+    """transcription 事件 → transcript.md 落项目文件夹并入库:extracted_text 含话语与内嵌
+    时间 marker,source_session_id 正确,文件落在 Project 文件夹(organize.py 零改动)。"""
+    db = Database(AppConfig(data_dir=tmp_path))
+    db.create_all()
+    proj = ProjectService(db).create(title="P", folder_path=str(tmp_path / "P"))
+    staging = tmp_path / "sessions" / "1"
+    staging.mkdir(parents=True)
+    with db.session() as s:
+        s.add(CaptureSession(id=1, title="录音会话", status="staged",
+                             staging_dir=str(staging), sources=["mic"],
+                             started_at=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)))
+        s.add(CaptureEvent(session_id=1, kind="transcription", payload="今天讨论架构设计",
+                           ts=datetime(2026, 6, 15, 12, 0, 1, tzinfo=timezone.utc),
+                           meta={"source": "mic"}))
+        s.add(CaptureEvent(session_id=1, kind="transcription", payload="重点是缓存",
+                           ts=datetime(2026, 6, 15, 12, 0, 5, tzinfo=timezone.utc),
+                           meta={"source": "mic"}))
+
+    recs = OrganizeService(db).organize(session_id=1, project_id=proj.id)
+    by_name = {Path(r.stored_path).name: r for r in recs}
+    assert "transcript.md" in by_name
+    rec = by_name["transcript.md"]
+    assert "今天讨论架构设计" in rec.extracted_text
+    assert "重点是缓存" in rec.extracted_text
+    assert "## [2026-06-15 12:00:01] 麦克风" in rec.extracted_text
+    assert rec.ingest_method == "session"
+    assert rec.source_session_id == 1
+    assert Path(rec.stored_path).parent == Path(proj.folder_path)
+
+
 def test_organize_twice_raises(tmp_path: Path):
     db, proj = _setup(tmp_path)
     OrganizeService(db).organize(session_id=1, project_id=proj.id)
