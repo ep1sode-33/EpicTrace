@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 
 def _default_data_dir() -> Path:
-    d = Path.home() / ".epictrace"
+    # 打包版启动器/干净账户测试可用 EPICTRACE_DATA_DIR 重定向;默认 ~/.epictrace,与 dev 共用
+    # (设计决策 1:数据与模型零迁移)。
+    override = os.environ.get("EPICTRACE_DATA_DIR")
+    d = Path(override).expanduser() if override else Path.home() / ".epictrace"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _env_path(name: str) -> Path | None:
+    v = os.environ.get(name)
+    return Path(v).expanduser() if v else None
 
 
 @dataclass(frozen=True)
@@ -29,6 +38,11 @@ class AppConfig:
     model_source: str = "modelscope"
     extraction_timeout: int = 600
     extraction_effort: str = "medium"
+    # 打包(.app)注入通道:启动器设 EPICTRACE_* 环境变量 → 这里读入。dev 形态三者皆空:
+    # 前端 dist 走仓库相对路径回退,uv 走 PATH,系统内录 helper 走 swiftc 懒编译。
+    frontend_dist: Path | None = field(default_factory=lambda: _env_path("EPICTRACE_FRONTEND_DIST"))
+    uv_bin: str | None = field(default_factory=lambda: os.environ.get("EPICTRACE_UV_BIN") or None)
+    packaged: bool = field(default_factory=lambda: os.environ.get("EPICTRACE_PACKAGED") == "1")
 
     @property
     def db_path(self) -> Path:
