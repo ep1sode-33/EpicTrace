@@ -253,7 +253,9 @@ class SettingsService:
 
     def extraction_status(self) -> dict:
         """高质量提取引擎(MinerU)的 provisioning 状态。"""
-        prov = MinerUProvisioner(self._config.mineru_venv_dir)
+        prov = MinerUProvisioner(
+            self._config.mineru_venv_dir, uv_bin=getattr(self._config, "uv_bin", None)
+        )
         return {
             "state": prov.state,
             "ready": prov.is_ready(),

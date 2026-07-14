@@ -138,7 +138,7 @@ def get_provisioner(request: Request):
     from epictrace.media.mineru_provisioner import MinerUProvisioner
 
     config = getattr(request.app.state, "config", None) or AppConfig()
-    prov = MinerUProvisioner(config.mineru_venv_dir)
+    prov = MinerUProvisioner(config.mineru_venv_dir, uv_bin=getattr(config, "uv_bin", None))
     request.app.state.provisioner = prov
     return prov
 
