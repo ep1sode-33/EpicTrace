@@ -139,20 +139,41 @@ final class ProvisionEngine {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
-        var tail: [String] = []
-        pipe.fileHandleForReading.readabilityHandler = { [log] h in
-            guard let s = String(data: h.availableData, encoding: .utf8), !s.isEmpty else { return }
-            for line in s.split(separator: "\n") {
-                log(String(line))
-                tail.append(String(line))
-                if tail.count > 30 { tail.removeFirst() }
-            }
-        }
         do { try p.run() } catch {
             throw ProvisionError(stage: stage, message: "无法启动 \(argv[0]): \(error.localizedDescription)")
         }
+        // 后台线程同步读到 EOF,替代 readabilityHandler:
+        // 1) 子进程退出瞬间滞留在管道缓冲、尚未派发的最后几行不会丢(失败时最有
+        //    诊断价值的恰是这几行),读干 EOF 后才取 tail;
+        // 2) 子进程存活期间始终有人在读,管道写满不会反压阻塞子进程(经典死锁坑)。
+        var tail: [String] = []
+        let drained = DispatchSemaphore(value: 0)
+        let reading = pipe.fileHandleForReading
+        DispatchQueue.global(qos: .utility).async { [log] in
+            // 字节域按 \n 分行 + 有损解码:read 边界切在多字节 UTF-8 字符中间时,
+            // 残缺尾部留在 buf 等下一个 chunk 拼合,绝不整块丢弃。
+            var buf = Data()
+            func emit(_ data: Data) {
+                guard !data.isEmpty else { return }  // 与旧 split 行为一致:跳过空行
+                let line = String(decoding: data, as: UTF8.self)
+                log(line)
+                tail.append(line)
+                if tail.count > 30 { tail.removeFirst() }
+            }
+            while true {
+                let chunk = reading.availableData  // 阻塞读;空 Data = EOF
+                if chunk.isEmpty { break }
+                buf.append(chunk)
+                while let nl = buf.firstIndex(of: 0x0A) {
+                    emit(buf.subdata(in: buf.startIndex ..< nl))
+                    buf.removeSubrange(buf.startIndex ... nl)
+                }
+            }
+            emit(buf)  // 无换行结尾的最后一段
+            drained.signal()
+        }
         p.waitUntilExit()
-        pipe.fileHandleForReading.readabilityHandler = nil
+        drained.wait()  // 等读线程见到 EOF,tail 才完整
         guard p.terminationStatus == 0 else {
             throw ProvisionError(stage: stage,
                                  message: "退出码 \(p.terminationStatus)\n" + tail.suffix(12).joined(separator: "\n"))
