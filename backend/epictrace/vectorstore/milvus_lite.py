@@ -113,24 +113,33 @@ class MilvusLiteStore(VectorStore):
         self._client.load_collection(collection)
 
     def _heal_index_type(self) -> None:
-        """向量索引类型自愈:已存在的 collection 若索引不是 FLAT(旧版建的 HNSW),
-        release → drop_index → create_index(FLAT)。见 _INDEX_TYPE 注释:HNSW 在 milvus-lite
-        下 filter 是全局候选后过滤,project 隔离失效。swap 后旧 .idx 文件因命名含索引类型
-        不再被挂载,查询立即走 brute-force 精确路径;新 FLAT 索引由引擎在下次 flush 后台重建。
-        不触发 on_schema_heal:数据一行未动,无需把记录翻回待索引。"""
+        """向量索引类型自愈:已存在的 collection 若 vector 字段索引不是 FLAT(旧版建的
+        HNSW),release → drop_index → create_index(FLAT)。见 _INDEX_TYPE 注释:HNSW 在
+        milvus-lite 下 filter 是全局候选后过滤,project 隔离失效。
+
+        引擎实际行为(源码核实,注意 create_index 的引擎 docstring 是过时的):
+        - drop_index **当场删除**旧 .hnsw.idx 文件,并在无剩余索引时把 load-state
+          自动翻回 loaded;
+        - create_index 在 loaded 状态下**同步内联**为现有 segment 构建 FLAT 索引并写
+          .idx sidecar —— 本方法返回时检索即已可用、即已精确,不依赖下次 flush。
+        数据(parquet)与向量原样保留,不需重新 embedding;不触发 on_schema_heal:
+        数据一行未动,无需把记录翻回待索引。"""
         names = self._client.list_indexes(self._collection)
-        stale = [n for n in names
-                 if self._client.describe_index(self._collection, n).get("index_type") != _INDEX_TYPE]
-        if names and not stale:
+        # 只看/只动 vector 字段的索引:当前引擎每 collection 只有单索引,这里是防御 ——
+        # 万一未来加了 scalar/sparse 索引,不许被这条自愈连带删掉。
+        infos = {n: self._client.describe_index(self._collection, n) for n in names}
+        vector_idx = {n: i for n, i in infos.items() if i.get("field_name") == "vector"}
+        stale = [n for n, i in vector_idx.items() if i.get("index_type") != _INDEX_TYPE]
+        if vector_idx and not stale:
             return
         _log.warning(
-            "collection %s 向量索引 %s 非 %s,就地换索引(数据/向量保留,无需重索引)",
-            self._collection, names, _INDEX_TYPE,
+            "collection %s vector 索引 %s 非 %s,就地换索引(数据/向量保留,无需重索引)",
+            self._collection, stale or "缺失", _INDEX_TYPE,
         )
         # 与 schema 自愈同理先 release:drop_index 拒绝在 loaded collection 上执行,
         # 且此时尚未 load,release 对未加载的 collection 是安全的 no-op。
         self._client.release_collection(self._collection)
-        for n in names:
+        for n in stale:
             self._client.drop_index(self._collection, n)
         index_params = self._client.prepare_index_params()
         index_params.add_index(field_name="vector", index_type=_INDEX_TYPE, metric_type="COSINE")

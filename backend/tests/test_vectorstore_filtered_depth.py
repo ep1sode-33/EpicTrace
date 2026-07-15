@@ -84,6 +84,12 @@ def test_focus_filter_ingest_record_ids_gets_full_depth(adversarial_store):
     assert [h["text"] for h in hits] == ["GOLD"]
 
 
+def test_filter_matching_zero_rows_returns_empty(adversarial_store):
+    """filter 命中 0 行:必须返回空列表,绝不能漏放其他 project 的行
+    (引擎 valid_indices 为空的早退路径,此前只有源码级保证、没有直测)。"""
+    assert adversarial_store.query(QUERY, filter={"project_id": 999}, k=30) == []
+
+
 def test_attachment_filter_gets_full_depth(tmp_path):
     """attachment collection(Plan 5)同引擎同病:conversation/reference 过滤也要真 filtered KNN。"""
     db = str(tmp_path / "a.db")
