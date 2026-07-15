@@ -1,23 +1,15 @@
-"""shell/run.py 的 reveal_in_finder 路径守卫:不存在的路径不触发 `open -R`,存在才触发。
-shell 不在 epictrace 包内,按文件路径加载;monkeypatch subprocess.run 以免真的弹 Finder。"""
-import importlib.util
-from pathlib import Path
-
+"""epictrace.shell 的 reveal_in_finder 路径守卫:不存在的路径不触发 `open -R`,存在才触发。
+monkeypatch subprocess.run 以免真的弹 Finder。"""
 import pytest
 
-_RUN_PY = Path(__file__).resolve().parents[2] / "shell" / "run.py"
-
-
-def _load_shell():
-    spec = importlib.util.spec_from_file_location("et_shell_run", _RUN_PY)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+pytest.importorskip("webview")
 
 
 @pytest.fixture()
 def api():
-    return _load_shell().Api()
+    from epictrace.shell import Api
+
+    return Api()
 
 
 def test_reveal_skips_nonexistent_path(api, monkeypatch):

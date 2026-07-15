@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 构建 macOS 系统内录 helper 到 $1(输出目录),产物名 epictrace-sysaudio。
-# 用法:shell/native/build.sh <output_dir>
+# 用法:backend/epictrace/shell/native/build.sh <output_dir>
 #   <output_dir> 通常是 data_dir/bin;Python 侧 SystemAudioSource 用该路径 Popen。
 set -euo pipefail
 
