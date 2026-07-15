@@ -1304,12 +1304,13 @@ for a in "$@"; do case "$a" in
   --skip-frontend) frontend=0 ;;
   *) echo "未知参数:$a" >&2; exit 2 ;;
 esac; done
+[ "$sign" = 0 ] && [ "$notarize" = 1 ] && { echo "✗ --no-sign 与 --notarize 冲突:公证要求已签名的 .app" >&2; exit 2; }
 [ "$sign" = 1 ] && : "${SIGN_IDENTITY:?需要 SIGN_IDENTITY(或用 --no-sign)}"
 [ "$notarize" = 1 ] && : "${NOTARY_PROFILE:?--notarize 需要 NOTARY_PROFILE}"
 [ -x "$PY" ] || { echo "✗ backend/.venv 缺失" >&2; exit 1; }
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/backend/pyproject.toml" | head -1)"
-echo "▶ EpicTrace $VERSION(uv $UV_VERSION,python $(cat "$ROOT/packaging/python-version"))"
+echo "▶ EpicTrace ${VERSION}(uv ${UV_VERSION},python $(cat "$ROOT/packaging/python-version"))"
 rm -rf "$BUILD" "$APP"; mkdir -p "$BUILD"
 
 # [1] 前端
@@ -1322,7 +1323,7 @@ fi
 # [2] vendor uv(缓存;下载校验 .sha256)
 VENDOR="$ROOT/packaging/vendor/uv-$UV_VERSION"
 if [ ! -x "$VENDOR/uv" ]; then
-  echo "▶ 下载 uv $UV_VERSION…"
+  echo "▶ 下载 uv ${UV_VERSION}…"
   mkdir -p "$VENDOR"; cd "$VENDOR"
   base="https://github.com/astral-sh/uv/releases/download/$UV_VERSION"
   curl -fsSL -o uv.tar.gz "$base/uv-aarch64-apple-darwin.tar.gz"
@@ -1347,7 +1348,7 @@ swiftc -O -target "$SWIFT_TARGET" "$ROOT/backend/epictrace/shell/native/SystemAu
 swiftc -O -target "$SWIFT_TARGET" "$ROOT/packaging/launcher/main.swift" "$ROOT/packaging/launcher/Provisioner.swift" -o "$BUILD/EpicTrace"
 
 # [5] 组装 .app
-echo "▶ 组装 $APP…"
+echo "▶ 组装 ${APP}…"
 RES="$APP/Contents/Resources"
 mkdir -p "$APP/Contents/MacOS" "$RES"
 cp "$BUILD/EpicTrace" "$APP/Contents/MacOS/EpicTrace"
@@ -1381,7 +1382,7 @@ if [ "$notarize" = 1 ]; then
   codesign --force --timestamp -s "$SIGN_IDENTITY" "$DMG"
   xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
   xcrun stapler staple "$DMG"
-  echo "✓ $DMG(已公证 + staple)"
+  echo "✓ ${DMG}(已公证 + staple)"
   # 可选增强(设计 §6):先单独公证并 staple .app 再打 dmg,离线首启不查在线票据;MVP 不做。
 fi
 echo "✓ 完成:$APP"
@@ -1506,9 +1507,12 @@ Run: `cd backend && .venv/bin/pytest -q`,然后 William 跑 `./run.sh --no-build
 - [ ] 断网首启(spec §9.2):关 Wi-Fi 双击 → 进度窗报**断网人话错误**(非原始 uv 输出)→ 恢复网络后「重试」可完成供给
 - [ ] 麦克风首用弹窗:归因显示 **EpicTrace** 与 Info.plist 中文文案;录音转写正常(ASR 三层链)
 - [ ] 系统内录首用:「仅系统录音」授权项出现并可用(设置 > 隐私与安全性 > 录屏与系统录音)
+  - 排查:签名版 helper 带 hardened runtime 但无 entitlements(dev 从未跑过 hardened);若 dev 能录系统声而签名版不能,第一嫌疑 = 给 helper 签名行加 `--entitlements packaging/entitlements/launcher.entitlements` 重签(加了无害),与 Task 6 既有注记呼应。
+- [ ] 截图首用:屏幕录制授权弹窗归因 EpicTrace,截图功能可用
 - [ ] MinerU 供给走包内 uv(断言:Finder 启动、PATH 无 uv 时仍能装)
 - [ ] 索引 + 引用问答 + 跳回会话时刻,全链路与 dev 一致(数据/模型共用验证)
 - [ ] 升级路径:bump backend/pyproject version → 重打包 → 覆盖安装 → 启动器增量 sync(秒级~分钟级,非全量重下)
+- [ ] 升级覆盖安装后:麦克风/系统内录 TCC 授权保留、不再重弹(bundle id 稳定 + 签名有效)
 - [ ] 干净账户首启:新建 macOS 用户账户,拷入 dmg,完整首启(无 venv/模型/Xcode CLT);或主账户 headless 模拟(与启动器 CLI 语义一致,不污染真实 `~/.epictrace`):`dist/EpicTrace.app/Contents/MacOS/EpicTrace --headless-provision --resources <…>/Resources --runtime /tmp/et-clean-rt --data-dir /tmp/et-clean-dd`
 - [ ] 顺手实测:Dock 悬停名/强退框是否显示 "Python"(记录结果回填设计文档 §10 决策 2 的注)
 - [ ] 环境自愈:删 `~/Library/Application Support/EpicTrace/runtime/` 后再启动,自动重供给

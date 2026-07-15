@@ -26,6 +26,7 @@ for a in "$@"; do case "$a" in
   --skip-frontend) frontend=0 ;;
   *) echo "未知参数:$a" >&2; exit 2 ;;
 esac; done
+[ "$sign" = 0 ] && [ "$notarize" = 1 ] && { echo "✗ --no-sign 与 --notarize 冲突:公证要求已签名的 .app" >&2; exit 2; }
 [ "$sign" = 1 ] && : "${SIGN_IDENTITY:?需要 SIGN_IDENTITY(或用 --no-sign)}"
 [ "$notarize" = 1 ] && : "${NOTARY_PROFILE:?--notarize 需要 NOTARY_PROFILE}"
 [ -x "$PY" ] || { echo "✗ backend/.venv 缺失" >&2; exit 1; }
