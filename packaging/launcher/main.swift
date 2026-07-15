@@ -29,18 +29,34 @@ func writeLog(_ line: String) {
 
 // ---- 参数解析 ----
 var args = Array(CommandLine.arguments.dropFirst())
+func takeFlag(_ flag: String) -> Bool {
+    guard let i = args.firstIndex(of: flag) else { return false }
+    args.remove(at: i)
+    return true
+}
 func takeValue(_ flag: String) -> String? {
-    guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+    guard let i = args.firstIndex(of: flag) else { return nil }
+    // 值缺失或紧跟另一个 flag:静默吞掉会落到错误目录,必须硬失败(Codex Medium)。
+    guard i + 1 < args.count, !args[i + 1].hasPrefix("--") else {
+        fputs("参数 \(flag) 缺少值\n", stderr)
+        exit(2)
+    }
     let v = args[i + 1]
     args.removeSubrange(i ... i + 1)
     return v
 }
-let headless = args.contains("--headless-provision")
-let printPlan = args.contains("--print-plan")
-let force = args.contains("--force")
+let headless = takeFlag("--headless-provision")
+let printPlan = takeFlag("--print-plan")
+let force = takeFlag("--force")
 let resourcesOverride = takeValue("--resources")
 let runtimeOverride = takeValue("--runtime")
 let dataDirOverride = takeValue("--data-dir")
+// 剩余未识别参数只在 CLI 语义(headless/print-plan)下报错:GUI 模式 Finder 启动
+// 历史上可能带 -psn_* 进程序列号等遗留参数,不做校验。
+if headless || printPlan, !args.isEmpty {
+    fputs("未知参数:\(args.joined(separator: " "))\n", stderr)
+    exit(2)
+}
 
 func resolveResources() -> URL {
     if let r = resourcesOverride { return URL(fileURLWithPath: r) }
@@ -127,6 +143,11 @@ final class AppState: NSObject, NSApplicationDelegate {
             showProgressWindow()
             DispatchQueue.global(qos: .userInitiated).async { self.runProvision() }
         }
+    }
+
+    /// GUI 退出路径兜底(菜单退出 / 弹窗「退出」等):供给若在跑,先终止其子进程。
+    func applicationWillTerminate(_ notification: Notification) {
+        engine.terminateCurrent()
     }
 
     func runProvision() {
@@ -220,7 +241,7 @@ final class AppState: NSObject, NSApplicationDelegate {
             alert.alertStyle = .critical
             alert.messageText = "EpicTrace 启动失败"
             alert.informativeText = "运行环境可能已损坏(退出码 \(proc.terminationStatus))。"
-                + "\n\n日志:~/Library/Logs/EpicTrace/bootstrap.log"
+                + "\n\n日志:~/Library/Logs/EpicTrace/shell.log(应用输出)与 bootstrap.log(启动器)"
             alert.addButton(withTitle: "重建环境")
             alert.addButton(withTitle: "退出")
             if alert.runModal() == .alertFirstButtonReturn {
@@ -250,7 +271,7 @@ final class AppState: NSObject, NSApplicationDelegate {
                 alert.messageText = "后端未在 30 秒内就绪"
                 alert.informativeText = "首次启动或刚更新后,加载运行环境可能较慢,建议「继续等待」。"
                     + "\n若长时间无响应,可能是端口 8765 被其它程序占用。"
-                    + "\n\n日志:~/Library/Logs/EpicTrace/bootstrap.log"
+                    + "\n\n日志:~/Library/Logs/EpicTrace/shell.log(应用输出)与 bootstrap.log(启动器)"
                 alert.addButton(withTitle: "继续等待")
                 alert.addButton(withTitle: "退出")
                 if alert.runModal() == .alertSecondButtonReturn {
@@ -266,6 +287,7 @@ final class AppState: NSObject, NSApplicationDelegate {
             signal(sig, SIG_IGN)
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             src.setEventHandler {
+                engine.terminateCurrent()  // 供给期子进程(uv 等)随启动器终止,不留孤儿
                 self.shell?.terminate()
                 NSApp.terminate(nil)
             }

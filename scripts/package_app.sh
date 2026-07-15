@@ -38,7 +38,8 @@ rm -rf "$BUILD" "$APP"; mkdir -p "$BUILD"
 # [1] 前端
 if [ "$frontend" = 1 ]; then
   echo "▶ 构建前端…"
-  (cd "$ROOT/frontend" && { [ -d node_modules ] || npm install; } && npm run build)
+  # npm ci 按 lockfile 重建依赖树,杜绝陈旧 node_modules 混进签名产物;--skip-frontend 仍是快路径。
+  (cd "$ROOT/frontend" && npm ci && npm run build)
 fi
 [ -f "$ROOT/frontend/dist/index.html" ] || { echo "✗ frontend/dist 缺失(先 build)" >&2; exit 1; }
 

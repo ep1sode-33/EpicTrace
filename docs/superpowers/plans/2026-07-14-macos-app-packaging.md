@@ -726,6 +726,18 @@ final class ProvisionEngine {
     }
 
     // ---- 子进程 ----
+    /// 供给期在跑的子进程(uv 等):锁保护,退出路径可随启动器一起终止,不留孤儿。
+    private let procLock = NSLock()
+    private var current: Process?
+
+    /// 终止当前在跑的供给子进程(信号 / GUI 退出路径调用;无在跑进程时为空操作)。
+    func terminateCurrent() {
+        procLock.lock()
+        let p = current
+        procLock.unlock()
+        if let p, p.isRunning { p.terminate() }
+    }
+
     @discardableResult
     func run(_ argv: [String], env: [String: String]? = nil, stage: String) throws -> Int32 {
         log("$ " + argv.joined(separator: " "))
@@ -739,6 +751,9 @@ final class ProvisionEngine {
         do { try p.run() } catch {
             throw ProvisionError(stage: stage, message: "无法启动 \(argv[0]): \(error.localizedDescription)")
         }
+        procLock.lock()
+        current = p
+        procLock.unlock()
         // 后台线程同步读到 EOF,替代 readabilityHandler:
         // 1) 子进程退出瞬间滞留在管道缓冲、尚未派发的最后几行不会丢(失败时最有
         //    诊断价值的恰是这几行),读干 EOF 后才取 tail;
@@ -770,6 +785,9 @@ final class ProvisionEngine {
             drained.signal()
         }
         p.waitUntilExit()
+        procLock.lock()
+        current = nil
+        procLock.unlock()
         drained.wait()  // 等读线程见到 EOF,tail 才完整
         guard p.terminationStatus == 0 else {
             throw ProvisionError(stage: stage,
@@ -809,6 +827,10 @@ final class ProvisionEngine {
             progress("Python 版本变更,重建虚拟环境…")
             try fm.removeItem(at: venvDir)
         }
+
+        // 进入实际变更 runtime 之前先作废 marker:修复/升级半途失败时,
+        // 旧 marker 不得放行残废环境(Codex High)。新 marker 仍只在全部成功后写。
+        try? fm.removeItem(at: markerFile)
 
         progress("安装 Python \(ver)(约 26MB)…")
         try run([uvBin.path, "python", "install", ver], env: env, stage: "python-install")
@@ -904,18 +926,34 @@ func writeLog(_ line: String) {
 
 // ---- 参数解析 ----
 var args = Array(CommandLine.arguments.dropFirst())
+func takeFlag(_ flag: String) -> Bool {
+    guard let i = args.firstIndex(of: flag) else { return false }
+    args.remove(at: i)
+    return true
+}
 func takeValue(_ flag: String) -> String? {
-    guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+    guard let i = args.firstIndex(of: flag) else { return nil }
+    // 值缺失或紧跟另一个 flag:静默吞掉会落到错误目录,必须硬失败(Codex Medium)。
+    guard i + 1 < args.count, !args[i + 1].hasPrefix("--") else {
+        fputs("参数 \(flag) 缺少值\n", stderr)
+        exit(2)
+    }
     let v = args[i + 1]
     args.removeSubrange(i ... i + 1)
     return v
 }
-let headless = args.contains("--headless-provision")
-let printPlan = args.contains("--print-plan")
-let force = args.contains("--force")
+let headless = takeFlag("--headless-provision")
+let printPlan = takeFlag("--print-plan")
+let force = takeFlag("--force")
 let resourcesOverride = takeValue("--resources")
 let runtimeOverride = takeValue("--runtime")
 let dataDirOverride = takeValue("--data-dir")
+// 剩余未识别参数只在 CLI 语义(headless/print-plan)下报错:GUI 模式 Finder 启动
+// 历史上可能带 -psn_* 进程序列号等遗留参数,不做校验。
+if headless || printPlan, !args.isEmpty {
+    fputs("未知参数:\(args.joined(separator: " "))\n", stderr)
+    exit(2)
+}
 
 func resolveResources() -> URL {
     if let r = resourcesOverride { return URL(fileURLWithPath: r) }
@@ -1002,6 +1040,11 @@ final class AppState: NSObject, NSApplicationDelegate {
             showProgressWindow()
             DispatchQueue.global(qos: .userInitiated).async { self.runProvision() }
         }
+    }
+
+    /// GUI 退出路径兜底(菜单退出 / 弹窗「退出」等):供给若在跑,先终止其子进程。
+    func applicationWillTerminate(_ notification: Notification) {
+        engine.terminateCurrent()
     }
 
     func runProvision() {
@@ -1095,7 +1138,7 @@ final class AppState: NSObject, NSApplicationDelegate {
             alert.alertStyle = .critical
             alert.messageText = "EpicTrace 启动失败"
             alert.informativeText = "运行环境可能已损坏(退出码 \(proc.terminationStatus))。"
-                + "\n\n日志:~/Library/Logs/EpicTrace/bootstrap.log"
+                + "\n\n日志:~/Library/Logs/EpicTrace/shell.log(应用输出)与 bootstrap.log(启动器)"
             alert.addButton(withTitle: "重建环境")
             alert.addButton(withTitle: "退出")
             if alert.runModal() == .alertFirstButtonReturn {
@@ -1125,7 +1168,7 @@ final class AppState: NSObject, NSApplicationDelegate {
                 alert.messageText = "后端未在 30 秒内就绪"
                 alert.informativeText = "首次启动或刚更新后,加载运行环境可能较慢,建议「继续等待」。"
                     + "\n若长时间无响应,可能是端口 8765 被其它程序占用。"
-                    + "\n\n日志:~/Library/Logs/EpicTrace/bootstrap.log"
+                    + "\n\n日志:~/Library/Logs/EpicTrace/shell.log(应用输出)与 bootstrap.log(启动器)"
                 alert.addButton(withTitle: "继续等待")
                 alert.addButton(withTitle: "退出")
                 if alert.runModal() == .alertSecondButtonReturn {
@@ -1141,6 +1184,7 @@ final class AppState: NSObject, NSApplicationDelegate {
             signal(sig, SIG_IGN)
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             src.setEventHandler {
+                engine.terminateCurrent()  // 供给期子进程(uv 等)随启动器终止,不留孤儿
                 self.shell?.terminate()
                 NSApp.terminate(nil)
             }
@@ -1317,7 +1361,8 @@ rm -rf "$BUILD" "$APP"; mkdir -p "$BUILD"
 # [1] 前端
 if [ "$frontend" = 1 ]; then
   echo "▶ 构建前端…"
-  (cd "$ROOT/frontend" && { [ -d node_modules ] || npm install; } && npm run build)
+  # npm ci 按 lockfile 重建依赖树,杜绝陈旧 node_modules 混进签名产物;--skip-frontend 仍是快路径。
+  (cd "$ROOT/frontend" && npm ci && npm run build)
 fi
 [ -f "$ROOT/frontend/dist/index.html" ] || { echo "✗ frontend/dist 缺失(先 build)" >&2; exit 1; }
 

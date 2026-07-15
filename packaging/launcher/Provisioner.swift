@@ -129,6 +129,18 @@ final class ProvisionEngine {
     }
 
     // ---- 子进程 ----
+    /// 供给期在跑的子进程(uv 等):锁保护,退出路径可随启动器一起终止,不留孤儿。
+    private let procLock = NSLock()
+    private var current: Process?
+
+    /// 终止当前在跑的供给子进程(信号 / GUI 退出路径调用;无在跑进程时为空操作)。
+    func terminateCurrent() {
+        procLock.lock()
+        let p = current
+        procLock.unlock()
+        if let p, p.isRunning { p.terminate() }
+    }
+
     @discardableResult
     func run(_ argv: [String], env: [String: String]? = nil, stage: String) throws -> Int32 {
         log("$ " + argv.joined(separator: " "))
@@ -142,6 +154,9 @@ final class ProvisionEngine {
         do { try p.run() } catch {
             throw ProvisionError(stage: stage, message: "无法启动 \(argv[0]): \(error.localizedDescription)")
         }
+        procLock.lock()
+        current = p
+        procLock.unlock()
         // 后台线程同步读到 EOF,替代 readabilityHandler:
         // 1) 子进程退出瞬间滞留在管道缓冲、尚未派发的最后几行不会丢(失败时最有
         //    诊断价值的恰是这几行),读干 EOF 后才取 tail;
@@ -173,6 +188,9 @@ final class ProvisionEngine {
             drained.signal()
         }
         p.waitUntilExit()
+        procLock.lock()
+        current = nil
+        procLock.unlock()
         drained.wait()  // 等读线程见到 EOF,tail 才完整
         guard p.terminationStatus == 0 else {
             throw ProvisionError(stage: stage,
@@ -212,6 +230,10 @@ final class ProvisionEngine {
             progress("Python 版本变更,重建虚拟环境…")
             try fm.removeItem(at: venvDir)
         }
+
+        // 进入实际变更 runtime 之前先作废 marker:修复/升级半途失败时,
+        // 旧 marker 不得放行残废环境(Codex High)。新 marker 仍只在全部成功后写。
+        try? fm.removeItem(at: markerFile)
 
         progress("安装 Python \(ver)(约 26MB)…")
         try run([uvBin.path, "python", "install", ver], env: env, stage: "python-install")
