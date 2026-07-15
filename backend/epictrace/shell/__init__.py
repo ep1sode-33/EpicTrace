@@ -349,8 +349,14 @@ def _ensure_sysaudio_helper() -> None:
 
     from epictrace.config import AppConfig
 
-    out = AppConfig().data_dir / "bin" / "epictrace-sysaudio"
+    cfg = AppConfig()
+    out = cfg.data_dir / "bin" / "epictrace-sysaudio"
     if out.exists():
+        return
+    if cfg.packaged:
+        # 打包模式:helper 由启动器从 .app Resources 预置;缺失说明启动器流程有错。
+        # 终端用户无 Xcode CLT,绝不在用户机器上找 swiftc。
+        print("[EpicTrace] packaged 模式缺系统内录 helper(应由启动器预置);系统内录暂不可用", flush=True)
         return
     src = Path(__file__).resolve().parent / "native" / "SystemAudioCapture.swift"
     swiftc = shutil.which("swiftc")
@@ -366,10 +372,53 @@ def _ensure_sysaudio_helper() -> None:
         print(f"[EpicTrace] 系统内录 helper 构建失败: {e}", flush=True)
 
 
+def _fix_app_identity() -> None:
+    """窗口进程是 venv python,能修的门面尽量修:应用菜单名(CFBundleName trick,只影响
+    菜单栏第一项;Dock 悬停名/强退框仍显示 Python——设计决策 2 已接受)。
+    须在 webview.start() 前调用。"""
+    try:
+        from AppKit import NSBundle
+
+        info = NSBundle.mainBundle().localizedInfoDictionary() or NSBundle.mainBundle().infoDictionary()
+        if info is not None:
+            info["CFBundleName"] = "EpicTrace"
+    except Exception as e:  # noqa: BLE001 — 纯门面,失败不挡启动
+        print(f"[EpicTrace] fix app name failed: {e}", flush=True)
+
+
+def _apply_dock_icon(window: "webview.Window") -> None:
+    """EPICTRACE_APP_ICON 指向 .icns 时,窗口 shown 后在主线程把 Dock 图标换成它
+    (NSApp 要等 webview 起完才存在;AppKit 调用必须主线程,同 HUD 调级别的模式)。"""
+    icon = os.environ.get("EPICTRACE_APP_ICON")
+    if not icon or not os.path.isfile(icon):
+        return
+
+    def _set() -> None:
+        try:
+            from AppKit import NSApp, NSImage
+
+            img = NSImage.alloc().initWithContentsOfFile_(icon)
+            if img is not None:
+                NSApp.setApplicationIconImage_(img)
+        except Exception as e:  # noqa: BLE001
+            print(f"[EpicTrace] set dock icon: {e}", flush=True)
+
+    def _sched() -> None:
+        try:
+            from PyObjCTools import AppHelper
+
+            AppHelper.callAfter(_set)
+        except Exception as e:  # noqa: BLE001
+            print(f"[EpicTrace] schedule dock icon: {e}", flush=True)
+
+    window.events.shown += _sched
+
+
 def main() -> None:
+    _fix_app_identity()
     t = threading.Thread(target=_serve, daemon=True)
     t.start()
-    # 缺失则后台构建系统内录 helper(不阻塞开窗)。
+    # 缺失则后台构建系统内录 helper(不阻塞开窗;packaged 模式内部直接跳过)。
     threading.Thread(target=_ensure_sysaudio_helper, daemon=True).start()
     if not _wait_until_ready():
         print("[EpicTrace] backend not ready in time; opening window anyway.", flush=True)
@@ -379,8 +428,5 @@ def main() -> None:
     )
     api.set_window(window)
     _register_native_drop(window)  # 原生拖拽转发,纯附加,不改动既有逻辑
+    _apply_dock_icon(window)
     webview.start()
-
-
-if __name__ == "__main__":
-    main()

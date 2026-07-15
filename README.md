@@ -71,7 +71,7 @@ backend/epictrace/
   interfaces/  五个抽象接口
   services/    采集/归类/索引/设置等应用服务
 frontend/src/views/   采集 / 处理入库 / 项目与对话 / 设置
-shell/         pywebview 桌面外壳(run.py)+ macOS 系统内录原生 helper(native/)
+backend/epictrace/shell/  pywebview 桌面外壳 + macOS 系统内录原生 helper(native/)
 docs/          spec / plan / 决策记录
 ```
 
@@ -99,7 +99,7 @@ cd frontend && npm run dev      # http://localhost:5173
 
 ```bash
 cd frontend && npm run build
-cd ../backend && .venv/bin/python ../shell/run.py
+cd ../backend && .venv/bin/python -m epictrace.shell
 ```
 
 > 首次用语音转写需先在「设置 → ASR」下载模型(本地 mlx large-v3)。系统内录需在 *系统设置 → 隐私与安全性 → 屏幕录制* 授权后重启 app。
@@ -110,6 +110,18 @@ cd ../backend && .venv/bin/python ../shell/run.py
 cd backend && .venv/bin/pytest          # 后端
 cd frontend && npm run build            # 前端(tsc + vite)
 ```
+
+## 打包(macOS .app / dmg)
+
+```bash
+scripts/package_app.sh --no-sign     # 本地冒烟(不签名)
+SIGN_IDENTITY="Developer ID Application: …" scripts/package_app.sh           # 签名 .app
+SIGN_IDENTITY="…" NOTARY_PROFILE=epictrace-notary scripts/package_app.sh --notarize  # dmg+公证
+```
+
+首启由启动器用内嵌 uv 供给运行环境到 `~/Library/Application Support/EpicTrace/runtime/`
+(纯派生,可删除重建);用户数据照旧在 `~/.epictrace`。设计与事实来源:
+`docs/superpowers/specs/2026-07-14-epictrace-macos-app-packaging-design.md`。
 
 ## 现状
 

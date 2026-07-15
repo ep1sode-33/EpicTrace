@@ -100,11 +100,21 @@ def create_app(
     app.include_router(references.router, prefix="/api")
     app.include_router(capture.router, prefix="/api")
 
-    import os
     from pathlib import Path
     from fastapi.staticfiles import StaticFiles
 
-    dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    # 前端静态资源:打包模式由启动器经 EPICTRACE_FRONTEND_DIST 注入(config.frontend_dist);
+    # dev 回退仓库相对路径。注入了却不存在 = 打包错误,打日志且不挂载(404 可见),
+    # 绝不回退错误路径静默白屏。复用 create_app 上文已算好的 app.state.config
+    # (= config or db.config or AppConfig()),不再二次构造,避免与 app 其余部位的
+    # config 来源分叉(测试注入 db 自带 config 时也一致)。
+    cfg = app.state.config
+    if cfg.frontend_dist is not None:
+        dist = cfg.frontend_dist
+        if not dist.exists():
+            print(f"[EpicTrace] frontend dist not found: {dist}", flush=True)
+    else:
+        dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
     if dist.exists():
         app.mount("/", StaticFiles(directory=str(dist), html=True), name="frontend")
 

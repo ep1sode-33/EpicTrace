@@ -49,3 +49,4 @@ build/
 backend/eval-data/
 backend/scripts/rag_eval/runs/
 backend/scripts/rag_eval/corpus_spec.json
+packaging/vendor/

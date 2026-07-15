@@ -35,7 +35,9 @@ def _rich_processors(config: AppConfig) -> list[MediaProcessor]:
 
     ext = SettingsService(config).get_extraction_settings()
     if ext["engine"] == "mineru":
-        provisioner = MinerUProvisioner(config.mineru_venv_dir)
+        provisioner = MinerUProvisioner(
+            config.mineru_venv_dir, uv_bin=getattr(config, "uv_bin", None)
+        )
         return [
             MinerUMediaProcessor(
                 provisioner,

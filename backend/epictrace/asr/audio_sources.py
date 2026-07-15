@@ -223,7 +223,7 @@ def _is_permission_denied_line(line: str) -> bool:
 class SystemAudioSource(_SourceBase):
     """macOS 系统声音(采集):Popen 原生 helper 二进制,从其 stdout 读裸 PCM(48k mono float32 le)。
 
-    helper 用 Core Audio process tap → stereo 混 mono、输出 **48kHz**(全频宽,见 shell/native helper)。
+    helper 用 Core Audio process tap → stereo 混 mono、输出 **48kHz**(全频宽,见 epictrace/shell/native helper)。
     读 stdout 的线程在 start() 起;另起一守护线程逐行抽干 stderr(防管道填满阻塞 helper),
     遇 PERMISSION_DENIED 行置 permission_denied 标志供 worker 读取。真采集 + 权限 = 真机手测。
     """
