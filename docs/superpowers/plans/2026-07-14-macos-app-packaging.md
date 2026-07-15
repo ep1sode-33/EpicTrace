@@ -1123,7 +1123,8 @@ final class AppState: NSObject, NSApplicationDelegate {
                 let alert = NSAlert()
                 alert.alertStyle = .warning
                 alert.messageText = "后端未在 30 秒内就绪"
-                alert.informativeText = "端口 8765 可能被其它程序占用。"
+                alert.informativeText = "首次启动或刚更新后,加载运行环境可能较慢,建议「继续等待」。"
+                    + "\n若长时间无响应,可能是端口 8765 被其它程序占用。"
                     + "\n\n日志:~/Library/Logs/EpicTrace/bootstrap.log"
                 alert.addButton(withTitle: "继续等待")
                 alert.addButton(withTitle: "退出")
