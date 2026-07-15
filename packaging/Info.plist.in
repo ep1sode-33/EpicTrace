@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+  <key>CFBundleExecutable</key><string>EpicTrace</string>
+  <key>CFBundleIdentifier</key><string>com.epictrace.app</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>EpicTrace</string>
+  <key>CFBundleDisplayName</key><string>EpicTrace</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>LSMinimumSystemVersion</key><string>14.4</string>
+  <key>LSArchitecturePriority</key><array><string>arm64</string></array>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>EpicTrace 仅在你主动开始录制会话时使用麦克风进行语音转写。</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>EpicTrace 仅在你主动开始录制会话且选择「系统声音」时采集系统音频。</string>
+</dict>
+</plist>
