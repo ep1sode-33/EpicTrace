@@ -35,11 +35,14 @@ jobs:
       - name: Install backend (with dev extras)
         run: |
           python -m pip install --upgrade pip
-          # jieba 的 pkg_resources 兼容层在 setuptools 81-82 过渡版会炸:
-          # pkg_resources 可导入但 resource_stream 已被剥除 → AttributeError。
-          # 钉 >=83(完全不带 pkg_resources)与打包版 venv 行为一致,jieba 走 importlib 兜底。
-          python -m pip install -U "setuptools>=83"
           python -m pip install -e "backend[dev]"
+          # runner 镜像残留一个残缺的 pkg_resources(可导入但没有 resource_stream),
+          # 且不随 setuptools 卸载/升级被清掉 → jieba 的 pkg_resources 兼容层直接炸。
+          # 后装完整版覆盖之:<81 是 pkg_resources API 完整的最后区间,与本地 dev venv 行为一致;
+          # --force-reinstall 确保 pkg_resources 目录被重写。
+          python -m pip install --force-reinstall "setuptools>=80,<81"
+          # 诊断(不挡构建):确认 pkg_resources 来源与 resource_stream 是否齐全。
+          python -c "import pkg_resources; print('pkg_resources from:', pkg_resources.__file__, '| has resource_stream:', hasattr(pkg_resources,'resource_stream'))"
 
       # 重模型测试由 EPICTRACE_RUN_SLOW 门控,此处不设该变量 → 自动跳过。
       # 预期:752 passed / 7 skipped。
