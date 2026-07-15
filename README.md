@@ -111,6 +111,18 @@ cd backend && .venv/bin/pytest          # 后端
 cd frontend && npm run build            # 前端(tsc + vite)
 ```
 
+## 打包(macOS .app / dmg)
+
+```bash
+scripts/package_app.sh --no-sign     # 本地冒烟(不签名)
+SIGN_IDENTITY="Developer ID Application: …" scripts/package_app.sh           # 签名 .app
+SIGN_IDENTITY="…" NOTARY_PROFILE=epictrace-notary scripts/package_app.sh --notarize  # dmg+公证
+```
+
+首启由启动器用内嵌 uv 供给运行环境到 `~/Library/Application Support/EpicTrace/runtime/`
+(纯派生,可删除重建);用户数据照旧在 `~/.epictrace`。设计与事实来源:
+`docs/superpowers/specs/2026-07-14-epictrace-macos-app-packaging-design.md`。
+
 ## 现状
 
 采集(会话/事件/暂存/时间线/录制 HUD)、麦克风 + 系统内录 ASR(48kHz 录音 + mlx 一次性转写)、归类入库、BGE-M3 + Milvus Lite 索引、混合检索 + rerank、ReAct Agent 带引用对话——均已打通。
