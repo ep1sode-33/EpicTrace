@@ -5,8 +5,12 @@
   · stream_final_answer 用到的 llm 用 TimingLLM 代理——.complete()=接地闸门、
     .stream()/.stream_events()=终答流,借相邻方法边界近似每次 generator LLM 调用的时刻。
 
-事件 (t, kind, meta):run_start / seed_done / think / tool_step / react_done /
-gate_start / gate_done / answer_first_token / answer_done。由这些边界切出各阶段耗时。
+事件 (t, kind, meta):run_start / seed_callback_fired / seed_done / think / tool_step /
+react_done / gate_start / gate_done / answer_first_event / answer_first_token / answer_done。
+由这些边界切出各阶段耗时。TTFT 取**产品口径**:消费 stream_final_answer 的事件流,首个
+event=="token"(正文首 token,answer.py 分流后;reasoning 走 thinking 不算)记
+answer_first_token;answer_first_event 为底层 LLM 流首个 item(推理模型下多为 reasoning,
+旧口径),留 extras 对照,不进聚合表。
 
 纯逻辑(记录器/汇总/聚合/表格/TimingLLM)在模块顶层,无重依赖;真跑用到的 agent 原语
 (run_react_loop / stream_final_answer / build_tools / ChunkAccumulator)在 run_one_timed
@@ -83,7 +87,10 @@ def _dur(a: float | None, b: float | None) -> float | None:
 
 
 def summarize_events(events: list[dict]) -> dict:
-    """把一题的事件序列切成各阶段耗时 + 计数。缺哪个边界哪个阶段记 None,鲁棒不崩。"""
+    """把一题的事件序列切成各阶段耗时 + 计数 + 对照值。缺哪个边界哪个阶段记 None,鲁棒不崩。
+
+    answer_ttft 用产品口径的 answer_first_token(首个正文 token);旧口径(底层流首 item,
+    含 reasoning)记进 extras.answer_ttfe 供新旧对照,不进聚合表。"""
     rec = LatencyRecorder(events=events)
     t_run = rec._first("run_start")
     t_seed = rec._first("seed_done")
@@ -91,6 +98,7 @@ def summarize_events(events: list[dict]) -> dict:
     t_gate_s = rec._first("gate_start")
     t_gate_e = rec._first("gate_done")
     t_first = rec._first("answer_first_token")
+    t_first_ev = rec._first("answer_first_event")
     t_done = rec._last("answer_done")
 
     agent_start = t_seed if t_seed is not None else t_run          # seed 缺 → 从 run 起
@@ -103,16 +111,23 @@ def summarize_events(events: list[dict]) -> dict:
         "answer_stream": _dur(t_first, t_done),
         "total": _dur(t_run, t_done),
     }
+    extras = {
+        # 旧口径 TTFT(底层流首个 item,推理模型下常是 reasoning),留新旧对照。
+        "answer_ttfe": _dur(ttft_base, t_first_ev),
+    }
+    seed_cbs = sum(1 for e in events if e["kind"] == "seed_callback_fired")
     counts = {
         "tool_steps": sum(1 for e in events if e["kind"] == "tool_step"),
         "think_bursts": sum(1 for e in events if e["kind"] == "think"),
         "gate_ran": t_gate_s is not None,
+        "seed_callbacks": seed_cbs,
+        "seed_callback_fired": seed_cbs > 0,
     }
     react = next((e for e in events if e["kind"] == "react_done"), None)
     if react is not None:
         counts["react_status"] = react["meta"].get("status")
         counts["pool"] = react["meta"].get("pool")
-    return {"stages": stages, "counts": counts}
+    return {"stages": stages, "counts": counts, "extras": extras}
 
 
 # ---------------------------------------------------------------- 计时 LLM 代理
@@ -120,9 +135,11 @@ def summarize_events(events: list[dict]) -> dict:
 class TimingLLM:
     """透明代理产品 LLMProvider,给终答链路的三个入口打点,不改产品代码:
       · complete()      → 接地闸门(_is_answerable):gate_start/gate_done;
-      · stream_events() → 终答主路(有推理分离):首 item=answer_first_token,耗尽=answer_done;
-        **仅当底层 llm 也有 stream_events 才暴露**——answer.py 用 getattr 特征探测选流路,
-        恒暴露会把无此方法的 provider 骗上主路 → AttributeError 而非优雅降级到 stream();
+      · stream_events() → 终答主路(有推理分离):首 item=answer_first_event(**旧口径**,
+        推理模型下常是 reasoning;产品口径的 answer_first_token 由 run_one_timed 消费
+        stream_final_answer 事件流、在首个 event=="token" 时另记),耗尽=answer_done;
+        **仅当底层 llm 有可调用的 stream_events 才暴露**——answer.py 用 getattr+callable
+        特征探测选流路,恒暴露会把无此方法的 provider 骗上主路 → AttributeError 而非优雅降级;
       · stream()        → 拒答/退化路:同上打点。
     其余属性透传底层 llm(stream_final_answer 只用到这三个)。"""
 
@@ -141,7 +158,7 @@ class TimingLLM:
         first = True
         for x in it:
             if first:
-                self._rec.mark("answer_first_token", {})
+                self._rec.mark("answer_first_event", {})   # 底层流首 item(旧口径,对照用)
                 first = False
             yield x
         self._rec.mark("answer_done", {})
@@ -154,6 +171,8 @@ class TimingLLM:
         # 底层缺失 → 此处 AttributeError → 探测方 getattr(..., None) 得 None,优雅降级到 stream())。
         if name == "stream_events":
             inner = self._llm.stream_events   # 底层没有 → AttributeError(正确语义)
+            if not callable(inner):           # 有名无实(如 stream_events=None)同样视为没有,
+                raise AttributeError(name)    # 镜像 answer.py 的 callable(se) 检查
 
             def _timed_stream_events(messages, **kwargs) -> Iterator[dict]:
                 return self._timed_stream(inner(messages, **kwargs))
@@ -181,10 +200,18 @@ def run_one_timed(it, *, build_chat_model, llm, retriever, project_id: int,
                         reference_texts={}, fulltext_ids=[])
 
     # seed 用**显式标记**判定,不靠"第一条 on_step"的位置:自己先调 seed_first_retrieval
-    # (与 run_react_loop(force_seed=True) 内部完全同参同序,时序保真),其专属回调才记
-    # seed_done;seed 工具缺失/抛错不回调 → 无 seed_done 事件,不会把真实工具步误标成 seed。
+    # (与 run_react_loop(force_seed=True) 内部完全同参同序,时序保真)。seed 边界
+    # (seed_done)在其**返回后无条件**记录——seed_first_retrieval 内部静默吞错时不回调,
+    # 若只靠回调记边界,失败 seed 的耗时会被错算进 agent 段。回调是否触发/次数分开记
+    # (seed_callback_fired 事件 + seed_done.meta),不会把真实工具步误标成 seed。
+    seed_cb = {"fired": 0, "tool": None, "count": None}
+
     def on_seed(payload: dict) -> None:
-        rec.mark("seed_done", {"tool": payload.get("tool"), "count": payload.get("count")})
+        seed_cb["fired"] += 1
+        seed_cb["tool"] = payload.get("tool")
+        seed_cb["count"] = payload.get("count")
+        rec.mark("seed_callback_fired", {"tool": payload.get("tool"),
+                                         "count": payload.get("count")})
 
     def on_step(payload: dict) -> None:
         rec.mark("tool_step", {"tool": payload.get("tool"), "count": payload.get("count")})
@@ -193,6 +220,8 @@ def run_one_timed(it, *, build_chat_model, llm, retriever, project_id: int,
         rec.mark("think", {"chars": len(text or "")})
 
     seed_first_retrieval(tools, acc, it.question, on_step=on_seed)
+    rec.mark("seed_done", {"fired": seed_cb["fired"] > 0, "callbacks": seed_cb["fired"],
+                           "tool": seed_cb["tool"], "count": seed_cb["count"]})
     status = run_react_loop(build_chat_model(), tools, acc, it.question, history=[],
                             attachment_manifest="", force_seed=False,
                             on_step=on_step, on_think=on_think)
@@ -201,12 +230,23 @@ def run_one_timed(it, *, build_chat_model, llm, retriever, project_id: int,
 
     timed = TimingLLM(llm, rec)
     answer = ""
+    saw_token = False
     for ev in stream_final_answer(timed, it.question, pool, history=[], attached_names=[]):
-        if ev.get("event") == "_answer":
+        et = ev.get("event")
+        if et == "token" and not saw_token:
+            saw_token = True
+            # 产品口径 TTFT:answer.py 分流后的首个**正文** token(reasoning 走 thinking 不算);
+            # 拒答路的兜底 token(answer.py 流耗尽后补发)也在此被记到。
+            rec.mark("answer_first_token", {})
+        elif et == "_answer":
             answer = ev["data"]
-    # 极端:stream_final_answer 未产出任何 answer 流(不应发生)→ 补一个 answer_done 兜底,total 可测。
-    if rec._first("answer_first_token") is None and rec._last("answer_done") is None:
-        rec.mark("answer_done", {"empty": True})
+    # 兜底两种边角:① 底层流一个 item 都没被拉(无 answer_done);② 兜底 token 在底层流
+    # 耗尽之后才补发(answer_done 早于首 token,answer_stream 会算成负)→ 以流消费完毕
+    # 时刻补记 answer_done(_last 取后者),保 total/answer_stream 可测且非负。
+    t_done = rec._last("answer_done")
+    t_tok = rec._first("answer_first_token")
+    if t_done is None or (t_tok is not None and t_done < t_tok):
+        rec.mark("answer_done", {"fallback": True})
 
     summ = summarize_events(rec.events)
     t0 = rec.events[0]["t"] if rec.events else 0.0
@@ -215,6 +255,7 @@ def run_one_timed(it, *, build_chat_model, llm, retriever, project_id: int,
         "slices": it.slices,
         "stages": summ["stages"],
         "counts": summ["counts"],
+        "extras": summ["extras"],
         "answer_len": len(answer),
         # 事件时间轴转相对秒,便于人读 / 归档复盘(不泄露答案内容)。
         "events": [{"t": round(e["t"] - t0, 4), "kind": e["kind"], "meta": e["meta"]}

@@ -52,13 +52,15 @@ def test_recorder_coalesces_think_bursts():
 def test_summarize_events_stage_durations():
     events = [
         {"t": 0.0, "kind": "run_start", "meta": {}},
-        {"t": 1.0, "kind": "seed_done", "meta": {"tool": "search", "count": 3}},
+        {"t": 0.9, "kind": "seed_callback_fired", "meta": {"tool": "search", "count": 3}},
+        {"t": 1.0, "kind": "seed_done", "meta": {"fired": True, "callbacks": 1}},
         {"t": 1.2, "kind": "think", "meta": {"chunks": 5}},
         {"t": 2.5, "kind": "tool_step", "meta": {"tool": "search", "count": 2}},
         {"t": 3.0, "kind": "react_done", "meta": {"status": "ok", "pool": 5}},
         {"t": 3.1, "kind": "gate_start", "meta": {}},
         {"t": 3.6, "kind": "gate_done", "meta": {}},
-        {"t": 4.0, "kind": "answer_first_token", "meta": {}},
+        {"t": 3.8, "kind": "answer_first_event", "meta": {}},   # 底层流首 item(reasoning,旧口径)
+        {"t": 4.0, "kind": "answer_first_token", "meta": {}},   # 首个正文 token(产品口径)
         {"t": 6.0, "kind": "answer_done", "meta": {}},
     ]
     s = summarize_events(events)
@@ -66,11 +68,13 @@ def test_summarize_events_stage_durations():
     assert st["seed"] == 1.0
     assert st["agent"] == 2.0            # seed_done → react_done
     assert st["gate"] == 0.5
-    assert round(st["answer_ttft"], 4) == 0.4   # gate_done → first token
+    assert round(st["answer_ttft"], 4) == 0.4   # gate_done → 首个 token 事件(新口径)
     assert st["answer_stream"] == 2.0
     assert st["total"] == 6.0
+    assert round(s["extras"]["answer_ttfe"], 4) == 0.2   # 旧口径:gate_done → 底层流首 item
     assert s["counts"]["tool_steps"] == 1
     assert s["counts"]["gate_ran"] is True
+    assert s["counts"]["seed_callbacks"] == 1 and s["counts"]["seed_callback_fired"] is True
     assert s["counts"]["react_status"] == "ok" and s["counts"]["pool"] == 5
 
 
@@ -151,7 +155,8 @@ def test_timing_llm_marks_gate_and_answer():
     assert list(timed.stream_events([])) == [                            # first→done
         {"type": "reasoning", "text": "r"}, {"type": "content", "text": "c"}]
     kinds = [e["kind"] for e in rec.events]
-    assert kinds == ["gate_start", "gate_done", "answer_first_token", "answer_done"]
+    # 底层流首 item 记 answer_first_event(旧口径;产品口径 token 由 run_one_timed 另记)
+    assert kinds == ["gate_start", "gate_done", "answer_first_event", "answer_done"]
     assert [e["t"] for e in rec.events] == [0, 1, 2, 3]
 
 
@@ -159,7 +164,7 @@ def test_timing_llm_stream_path_marks_answer():
     rec = LatencyRecorder(clock=_Clock([0, 1]))
     timed = TimingLLM(_FakeLLM(), rec)
     assert list(timed.stream([])) == ["a", "b"]        # 拒答/退化路走 .stream()
-    assert [e["kind"] for e in rec.events] == ["answer_first_token", "answer_done"]
+    assert [e["kind"] for e in rec.events] == ["answer_first_event", "answer_done"]
 
 
 class _NoEventsLLM:
@@ -177,7 +182,28 @@ def test_timing_llm_hides_stream_events_when_underlying_lacks_it():
     timed = TimingLLM(_NoEventsLLM(), rec)
     assert getattr(timed, "stream_events", None) is None
     assert list(timed.stream([])) == ["a"]             # 降级路照常打点
-    assert [e["kind"] for e in rec.events] == ["answer_first_token", "answer_done"]
+    assert [e["kind"] for e in rec.events] == ["answer_first_event", "answer_done"]
+
+
+class _NoneEventsLLM:
+    """stream_events 有名无实(=None)的假件:callable 检查须视同没有。"""
+    stream_events = None
+
+    def complete(self, messages, **kw):
+        return "yes"
+
+    def stream(self, messages, **kw):
+        yield "a"
+
+
+def test_timing_llm_non_callable_stream_events_treated_as_missing():
+    # 底层 stream_events 非可调用(None)→ 代理 raise AttributeError(镜像 answer.py 的
+    # callable(se) 检查),探测方 getattr(..., None) 得 None → 优雅降级到 stream()。
+    rec = LatencyRecorder(clock=_Clock([0, 1]))
+    timed = TimingLLM(_NoneEventsLLM(), rec)
+    assert getattr(timed, "stream_events", None) is None
+    assert list(timed.stream([])) == ["a"]
+    assert [e["kind"] for e in rec.events] == ["answer_first_event", "answer_done"]
 
 
 # ---------------------------------------------------------------- 单题真跑(全假件)
@@ -207,8 +233,9 @@ def test_run_one_timed_end_to_end(monkeypatch):
     def fake_stream(llm, question, pool, **kw):
         assert isinstance(llm, TimingLLM)
         llm.complete([{"role": "user", "content": "gate?"}])          # → gate_start/gate_done
-        for _ in llm.stream_events([{"role": "user", "content": "ans"}]):  # → answer marks
-            pass
+        for ev in llm.stream_events([{"role": "user", "content": "ans"}]):
+            if ev["type"] == "content":                               # 镜像 answer.py 分流:
+                yield {"event": "token", "data": ev["text"]}          # 仅正文吐 token 事件
         yield {"event": "_answer", "data": "答案 [1]"}
 
     monkeypatch.setattr("epictrace.agent.react.seed_first_retrieval", fake_seed)
@@ -221,19 +248,25 @@ def test_run_one_timed_end_to_end(monkeypatch):
                         retriever=object(), project_id=1)
 
     kinds = [e["kind"] for e in rec["events"]]
-    assert kinds == ["run_start", "seed_done", "think", "tool_step", "react_done",
-                     "gate_start", "gate_done", "answer_first_token", "answer_done"]
+    assert kinds == ["run_start", "seed_callback_fired", "seed_done", "think", "tool_step",
+                     "react_done", "gate_start", "gate_done", "answer_first_event",
+                     "answer_first_token", "answer_done"]
     assert rec["counts"]["tool_steps"] == 1           # seed 回调走专属标记,不计入工具步
+    assert rec["counts"]["seed_callbacks"] == 1 and rec["counts"]["seed_callback_fired"] is True
     assert rec["counts"]["pool"] == 1
     st = rec["stages"]
     for name in ("seed", "agent", "gate", "answer_ttft", "answer_stream", "total"):
         assert st[name] is not None and st[name] >= 0.0
     assert st["total"] >= st["agent"]
+    # 旧口径首事件(reasoning)先于新口径首 token → answer_ttfe ≤ answer_ttft
+    assert rec["extras"]["answer_ttfe"] is not None
+    assert rec["extras"]["answer_ttfe"] <= st["answer_ttft"]
     assert rec["answer_len"] == len("答案 [1]")
 
 
-def test_run_one_timed_seed_not_triggered_no_false_seed_done(monkeypatch):
-    # seed 工具缺失/抛错 → seed_first_retrieval 不回调:不得把第一条真实工具步误标成 seed_done。
+def test_run_one_timed_seed_silent_failure_attributed_to_seed(monkeypatch):
+    # seed 工具缺失/静默吞错 → 无回调:seed 边界仍**无条件**记录(返回时刻),失败 seed 的
+    # 耗时归 seed 段而非混进 agent 段;回调未触发要可见(seed_callback_fired=False)。
     def fake_seed(tools, accumulator, question, **kw):
         pass                                          # 无回调(工具缺失/内部吞错)
 
@@ -243,8 +276,8 @@ def test_run_one_timed_seed_not_triggered_no_false_seed_done(monkeypatch):
         return "ok"
 
     def fake_stream(llm, question, pool, **kw):
-        for _ in llm.stream([{"role": "user", "content": "ans"}]):
-            pass
+        for tok in llm.stream([{"role": "user", "content": "ans"}]):
+            yield {"event": "token", "data": tok}
         yield {"event": "_answer", "data": "答"}
 
     monkeypatch.setattr("epictrace.agent.react.seed_first_retrieval", fake_seed)
@@ -257,11 +290,62 @@ def test_run_one_timed_seed_not_triggered_no_false_seed_done(monkeypatch):
                         retriever=object(), project_id=1)
 
     kinds = [e["kind"] for e in rec["events"]]
-    assert "seed_done" not in kinds                    # 不误标
-    assert rec["stages"]["seed"] is None               # seed 阶段不可测 → None
-    assert rec["counts"]["tool_steps"] == 1            # 真实工具步照常计数
-    assert rec["stages"]["agent"] is not None          # agent 从 run_start 起算,仍可测
+    assert "seed_callback_fired" not in kinds          # 回调确实没触发
+    assert kinds.count("seed_done") == 1               # 边界仍无条件记录
+    assert rec["counts"]["seed_callback_fired"] is False
+    assert rec["stages"]["seed"] is not None           # 失败 seed 耗时可测且归 seed 段
+    assert rec["counts"]["tool_steps"] == 1            # 真实工具步照常计数、不被误标
+    assert rec["stages"]["agent"] is not None          # agent 从 seed 边界起算
     assert rec["stages"]["total"] is not None
+
+
+class _EmptyStreamLLM:
+    """流式零产出的极端 provider:answer.py 拒答路会在流耗尽后补发兜底 token。"""
+    def complete(self, messages, **kw):
+        return "no"
+
+    def stream(self, messages, **kw):
+        return iter(())
+
+
+def test_run_one_timed_refusal_fallback_token_still_gets_ttft(monkeypatch):
+    # 拒答兜底路(answer.py:底层流零产出,流耗尽后补发兜底 token):首 token 仍要被记到;
+    # 此时 answer_done(流耗尽时刻)早于首 token → run_one_timed 补记校正,answer_stream 非负。
+    def fake_seed(tools, accumulator, question, **kw):
+        kw["on_step"]({"tool": "search_project_library", "query": question, "count": 1})
+
+    def fake_loop(chat_model, tools, accumulator, question, **kw):
+        accumulator.chunks.append(object())
+        return "ok"
+
+    def fake_stream(llm, question, pool, **kw):
+        # 镜像 answer.py 拒答路:gate(complete)→ 流(零产出)→ 兜底 token
+        llm.complete([{"role": "user", "content": "gate?"}])
+        parts = []
+        for tok in llm.stream([{"role": "user", "content": "refuse"}]):
+            parts.append(tok)
+            yield {"event": "token", "data": tok}
+        if not parts:
+            yield {"event": "token", "data": "现有资料没有涉及"}
+        yield {"event": "_answer", "data": "现有资料没有涉及"}
+
+    monkeypatch.setattr("epictrace.agent.react.seed_first_retrieval", fake_seed)
+    monkeypatch.setattr("epictrace.agent.react.run_react_loop", fake_loop)
+    monkeypatch.setattr("epictrace.agent.answer.stream_final_answer", fake_stream)
+    monkeypatch.setattr("epictrace.agent.tools.build_tools", lambda **k: [])
+    monkeypatch.setattr("epictrace.agent.tools.ChunkAccumulator", _Acc)
+
+    rec = run_one_timed(_item(), build_chat_model=lambda: object(), llm=_EmptyStreamLLM(),
+                        retriever=object(), project_id=1)
+
+    kinds = [e["kind"] for e in rec["events"]]
+    assert "answer_first_token" in kinds               # 兜底 token 也计 TTFT
+    assert "answer_first_event" not in kinds           # 底层流零产出,无旧口径首事件
+    assert rec["extras"]["answer_ttfe"] is None
+    st = rec["stages"]
+    assert st["answer_ttft"] is not None
+    assert st["answer_stream"] is not None and st["answer_stream"] >= 0.0
+    assert st["total"] is not None
 
 
 def test_run_latency_profile_aggregates_and_samples(monkeypatch):
