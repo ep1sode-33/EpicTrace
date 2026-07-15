@@ -56,8 +56,10 @@ Info.plist 要点:`CFBundleIdentifier` 一经发布**永不更改**(TCC 授权�
 
 ### 4.1 日常路径(marker 匹配)
 
-读 `marker.json`(记录 `app_version` + `lock_hash` + `python_version`),与包内一致 → 直接
-`<venv>/bin/python -m epictrace.shell`,等后端 `127.0.0.1:8765` 就绪(健康检查沿用现 shell 内的实现,启动器只负责超时兜底),pywebview 开窗。启动器**保持存活为父进程**直到壳退出(TCC 归因锚点,见 §8),转发 SIGTERM。
+读 `marker.json`(记录 `wheel_sha256`(wheel 文件内容 hash)+ `lock_sha256` + `python_version`),与包内一致 → 直接
+`<venv>/bin/python -m epictrace.shell`,等后端 `127.0.0.1:8765` 就绪(健康检查沿用现 shell 内的实现,启动器只负责超时兜底),pywebview 开窗。启动器**保持存活为父进程**直到壳退出(TCC 归因锚点,见 §8),转发 SIGTERM。壳的 stdout/stderr append 到 `~/Library/Logs/EpicTrace/shell.log`(Finder 双击启动无终端,Python 侧诊断输出不能无声消失)。
+
+wheel 判据用**文件内容 hash 而非版本号/文件名**:开发/验收期版本号恒 0.1.0,同版本重打包 wheel hash 必变 → marker 不匹配自动触发增量重供给(helper 也随之更新)。
 
 ### 4.2 首启 / 升级供给(marker 缺失或不匹配)
 

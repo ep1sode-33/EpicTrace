@@ -622,9 +622,11 @@ func humanMessage(_ error: Error) -> String {
     return raw
 }
 
+/// 判据 = wheel 内容 hash(不是文件名/版本号):开发/验收期版本恒 0.1.0,
+/// 同版本重打包 wheel hash 必变 → 自动触发增量 re-sync,helper 也随之更新。
 struct Marker: Codable, Equatable {
     let lockSha256: String
-    let wheelName: String
+    let wheelSha256: String
     let pythonVersion: String
 }
 
@@ -705,9 +707,11 @@ final class ProvisionEngine {
     // ---- marker ----
     func expectedMarker() throws -> Marker {
         let lock = try Data(contentsOf: lockFile)
-        let hash = SHA256.hash(data: lock).map { String(format: "%02x", $0) }.joined()
-        return Marker(lockSha256: hash,
-                      wheelName: try wheelURL().lastPathComponent,
+        let lockHash = SHA256.hash(data: lock).map { String(format: "%02x", $0) }.joined()
+        let wheel = try Data(contentsOf: try wheelURL())
+        let wheelHash = SHA256.hash(data: wheel).map { String(format: "%02x", $0) }.joined()
+        return Marker(lockSha256: lockHash,
+                      wheelSha256: wheelHash,
                       pythonVersion: try pythonVersion())
     }
 
@@ -860,16 +864,16 @@ let home = fm.homeDirectoryForCurrentUser
 let defaultRuntime = home.appendingPathComponent("Library/Application Support/EpicTrace/runtime")
 let logDir = home.appendingPathComponent("Library/Logs/EpicTrace")
 
-func openLogHandle() -> FileHandle? {
+func openAppendHandle(_ fileName: String) -> FileHandle? {
     try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
-    let f = logDir.appendingPathComponent("bootstrap.log")
+    let f = logDir.appendingPathComponent(fileName)
     if !fm.fileExists(atPath: f.path) { fm.createFile(atPath: f.path, contents: nil) }
     let h = try? FileHandle(forWritingTo: f)
     _ = try? h?.seekToEnd()
     return h
 }
 
-let logHandle = openLogHandle()
+let logHandle = openAppendHandle("bootstrap.log")
 let logQueue = DispatchQueue(label: "epictrace.launcher.log")
 func writeLog(_ line: String) {
     logQueue.sync {
@@ -931,7 +935,7 @@ if printPlan {
     print("data-dir:  \(engine.dataDir.path)")
     print("provisioned: \(engine.isProvisioned())")
     if let m = try? engine.expectedMarker() {
-        print("expect: python \(m.pythonVersion), wheel \(m.wheelName), lock \(m.lockSha256.prefix(12))…")
+        print("expect: python \(m.pythonVersion), wheel \(m.wheelSha256.prefix(12))…, lock \(m.lockSha256.prefix(12))…")
     }
     for (k, v) in engine.uvEnvironment().sorted(by: { $0.key < $1.key }) where k.hasPrefix("UV_") {
         print("env \(k)=\(v)")
@@ -1040,6 +1044,13 @@ final class AppState: NSObject, NSApplicationDelegate {
         p.executableURL = engine.venvPython
         p.arguments = ["-m", "epictrace.shell"]
         p.environment = engine.shellEnvironment()
+        // 壳输出不能无声消失:Finder 双击启动无终端,Python 侧 print/异常栈全部
+        // append 到 shell.log(stdout/stderr 共用同一 handle)。
+        if let shellLog = openAppendHandle("shell.log") {
+            p.standardOutput = shellLog
+            p.standardError = shellLog
+            writeLog("shell 输出重定向 → \(logDir.path)/shell.log")
+        }
         p.terminationHandler = { proc in
             writeLog("shell 退出,code=\(proc.terminationStatus)")
             DispatchQueue.main.async { self.handleShellExit(proc) }
