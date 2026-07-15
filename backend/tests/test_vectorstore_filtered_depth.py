@@ -35,16 +35,41 @@ def _rec(vec: list[float], rid: int, pid: int, text: str) -> dict:
             "embed_model_id": "fake", "capture_session_id": 0, "ts": ""}
 
 
+# milvus-lite 私有布局依赖,集中一处:引擎把每个 segment 的向量索引持久化成
+# <db>/partitions/<partition>/indexes/<segment>.<field>.<type>.idx sidecar 文件。
+_IDX_GLOB = "**/indexes/*.idx"
+
+
+def _sidecar_index_files(db_path: str) -> list[Path]:
+    """按引擎私有布局(_IDX_GLOB)找索引 sidecar 文件 —— 白盒探测,只许测试用。
+
+    引擎没有公开 API 能问"索引文件在哪/是否已落盘",而测试要等索引建成、要对 sidecar
+    注入故障(截断/删除),只能按布局摸文件。升级 milvus-lite 后本文件若开始超时/报错,
+    先查引擎索引文件布局是否变了(另见 docs/decisions/ 的 FLAT 索引决策记录)。"""
+    return sorted(Path(db_path).glob(_IDX_GLOB))
+
+
+def _restart_engine(db_path: str) -> None:
+    """模拟 app 重启(与 _sidecar_index_files 同级的引擎内部白盒依赖)。
+
+    MilvusClient.close 只断 gRPC 通道;milvus-lite 3.0 的 in-process 引擎(后台线程
+    gRPC server + 内存态 collection)仍挂在 server_manager 上,同进程重开同一路径会
+    复用活引擎 —— 那不是重启。显式 release 才是冷启动:重读 manifest、从 sidecar
+    重载索引(sidecar 故障注入要测的正是这条加载路径)。"""
+    from milvus_lite.server_manager import server_manager_instance
+    server_manager_instance.release_server(db_path)
+
+
 def _wait_index_built(db_path: str, timeout: float = 30.0) -> None:
     """等后台索引构建落盘(.idx 文件出现)。
 
     没建成索引时 milvus-lite 走 memtable/brute-force,filter 天然正确 —— 截断 bug 只在
-    索引建成后出现,所以必须等到 .idx 才算进入被测状态。文件布局是 milvus-lite 内部细节,
-    但没有公开的"索引已建成"API;布局变了这里会超时报错,宁可响也不静默测错状态。
+    索引建成后出现,所以必须等到 .idx 才算进入被测状态。布局变了这里会超时报错,
+    宁可响也不静默测错状态。
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if list(Path(db_path).glob("**/indexes/*.idx")):
+        if _sidecar_index_files(db_path):
             time.sleep(0.2)   # 落盘与查询侧挂载之间留一拍
             return
         time.sleep(0.2)
@@ -124,7 +149,7 @@ from pathlib import Path
 from pymilvus import DataType, MilvusClient
 from epictrace.vectorstore.milvus_lite import _SCALARS
 
-db, dim = sys.argv[1], int(sys.argv[2])
+db, dim, idx_glob = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 client = MilvusClient(db)
 schema = client.create_schema(auto_id=True, enable_dynamic_field=False)
 schema.add_field("id", DataType.INT64, is_primary=True)
@@ -155,7 +180,7 @@ for i in range(0, len(rows), 200):
 client.flush("chunks")
 deadline = time.time() + 30
 while time.time() < deadline:
-    if list(Path(db).glob("**/indexes/*.idx")):
+    if list(Path(db).glob(idx_glob)):
         break
     time.sleep(0.2)
 else:
@@ -170,7 +195,7 @@ def _build_legacy_hnsw_collection(db: str) -> None:
     import sys
 
     env = {**os.environ, "KMP_DUPLICATE_LIB_OK": "TRUE", "OMP_NUM_THREADS": "1"}
-    subprocess.run([sys.executable, "-c", _LEGACY_BUILD_SCRIPT, db, str(DIM)],
+    subprocess.run([sys.executable, "-c", _LEGACY_BUILD_SCRIPT, db, str(DIM), _IDX_GLOB],
                    check=True, env=env, cwd=str(Path(__file__).resolve().parents[1]),
                    timeout=120)
 
@@ -190,4 +215,78 @@ def test_reopen_legacy_hnsw_collection_heals_index_to_flat(tmp_path, caplog):
     assert len(hits) == 30
     assert hits[0]["text"] == "GOLD"
     assert len(store.list_by_project(1)) == 1200   # 向量是派生物没错,但这次连派生物都不用重算
+    store.close()
+
+
+# ── 索引 sidecar 半写窗口(Codex High,故障注入实锤)────────────────────────────
+# 引擎 create_index 先把索引 spec 提交进 manifest,load 时才(非原子地,open+np.save,
+# 无 tmp+rename)把索引写成 .idx sidecar —— 进程死在写入中途,就留下"manifest 说索引
+# 已建成(describe_index: FLAT/Finished)、文件却只有半个"的状态。describe 只读 manifest
+# 看不出来;引擎 load 读损坏文件抛 MilvusException 且不清理该文件(orphan 清理只按数据
+# 文件 stem 匹配,截断文件 stem 合法、不会被清)。修复前:每次重开都在 load_collection
+# 同一处失败,向量库持续不可用;行数据(parquet)完好。
+
+
+def _build_small_store(db: str) -> None:
+    """40 行 project 1 + 10 行 project 2(含 GOLD),索引落盘后冷关(真重启语义)。"""
+    store = MilvusLiteStore(db_path=db, dim=DIM)
+    rng = random.Random(5)
+    rows = [_rec(_noisy(QUERY, 0.01, rng), 1, 1, f"p1-{i}") for i in range(40)]
+    rows += [_rec(_noisy(_ORTHO, 0.05, rng), 2, 2, f"p2-{i}") for i in range(9)]
+    rows.append(_rec(GOLD_VEC, 3, 2, "GOLD"))
+    store.upsert(rows)
+    store._client.flush("chunks")
+    _wait_index_built(db)
+    store.close()
+    _restart_engine(db)
+
+
+def test_reopen_with_truncated_sidecar_self_heals_once_then_noop(tmp_path, caplog):
+    """spec 已提交 + sidecar 截断一半(模拟死在索引落盘中途):重开一次即自愈
+    (load 失败兜底:drop 索引连带清掉损坏文件 → 重建 → 重新 load),数据一行不丢;
+    再重开是干净 no-op(不再走兜底、不再报 warning)。修复前此场景每次重开都抛
+    MilvusException('file seems not fully written')、永不自愈。"""
+    db = str(tmp_path / "v.db")
+    _build_small_store(db)
+    files = _sidecar_index_files(db)
+    assert files, "前置不成立:索引 sidecar 未落盘"
+    for p in files:
+        with open(p, "r+b") as f:
+            f.truncate(p.stat().st_size // 2)   # 半写:只留前一半字节
+
+    with caplog.at_level("WARNING", logger="epictrace"):
+        store = MilvusLiteStore(db_path=db, dim=DIM)   # 修复前:这里就炸
+    assert any("load 失败" in r.message for r in caplog.records)   # 自愈要留痕
+    hits = store.query(QUERY, filter={"project_id": 2}, k=10)
+    assert len(hits) == 10
+    assert hits[0]["text"] == "GOLD"
+    assert len(store.list_by_project(1)) == 40   # 行数据完好,只重建了派生索引
+    store.close()
+    _restart_engine(db)
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="epictrace"):
+        store = MilvusLiteStore(db_path=db, dim=DIM)
+    assert not [r for r in caplog.records if r.name == "epictrace"]   # 二开 no-op
+    assert len(store.query(QUERY, filter={"project_id": 2}, k=10)) == 10
+    store.close()
+
+
+def test_reopen_with_missing_sidecar_rebuilds(tmp_path):
+    """spec 已提交 + sidecar 整个缺失(死在 manifest 提交后、文件创建前):重开必须直接
+    可用且 sidecar 重新落盘。当前引擎对"文件不存在"本就走重建分支(故障注入实证);
+    若未来引擎把它变成硬错误,则由我们的 load 失败兜底接住 —— 两层谁接都行,锁的是
+    "重开一次即可用"这个行为。"""
+    db = str(tmp_path / "v.db")
+    _build_small_store(db)
+    files = _sidecar_index_files(db)
+    assert files, "前置不成立:索引 sidecar 未落盘"
+    for p in files:
+        p.unlink()
+
+    store = MilvusLiteStore(db_path=db, dim=DIM)
+    hits = store.query(QUERY, filter={"project_id": 2}, k=10)
+    assert len(hits) == 10
+    assert hits[0]["text"] == "GOLD"
+    assert _sidecar_index_files(db), "sidecar 未重建落盘"
     store.close()
