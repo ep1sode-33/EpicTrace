@@ -19,6 +19,15 @@ _COLLECTION = "chunks"
 # Milvus query 的硬上限:单次 query 最多返回这么多行。list_by 用它一次性拉全(如全项目的 chunk
 # 喂给 BM25 稀疏检索语料)。超过此数会被静默截断 → 语料不全、稀疏召回有缺口。
 _LIST_LIMIT = 16384
+# 向量索引用 FLAT(精确暴力检索),不用 HNSW —— 这是修复,不是偷懒:
+# milvus-lite 的 HNSW 检索是"全局 beam 遍历(ef 固定 64,search_params 传不进去)+ 拿 filter
+# 当结果 mask",等价于先取全局 ~一两百条候选再按 project 后过滤。多 project 同库时,冷门
+# project 的有效 dense 深度只剩个位~几十条(dense_n 形同虚设),且随其他 project 语料增长
+# 静默劣化 —— eval 实锤过 3 个池级漏检。FLAT 走 BruteForceIndex:filter 先变 valid_mask、
+# 只对过滤后的行精确算距离,filtered KNN 语义完整;顺带把 faiss 踢出检索路径(faiss 与 torch
+# 撞双 libomp 的老坑)。代价是 O(N·dim)/查询,本地单机万级 chunk 是毫秒量级,与稀疏通道每查
+# 全量拉语料重建 BM25 同一个量级。规模真上去了按 VectorStore 接口缝换真 filtered-ANN 实现。
+_INDEX_TYPE = "FLAT"
 # 默认(folder_scan)collection 的 schema,v2:capture_session_id/ts 让 chunk 可回溯到
 # 会话时刻(哨兵 0/"" = 非会话来源;ts 为 naive-UTC ISO 秒级,与 timealign marker 同源)。
 # 升级后旧 collection 由 __init__ 的字段集比对自愈重建;记录侧的一次性重置见
@@ -91,14 +100,41 @@ class MilvusLiteStore(VectorStore):
                 schema.add_field(name, dtype, **kw)
             index_params = self._client.prepare_index_params()
             index_params.add_index(
-                field_name="vector", index_type="HNSW", metric_type="COSINE",
-                params={"M": 16, "efConstruction": 200},
+                field_name="vector", index_type=_INDEX_TYPE, metric_type="COSINE",
             )
             self._client.create_collection(collection, schema=schema, index_params=index_params)
+        else:
+            # 存量库(旧版建的 HNSW 索引)就地换 FLAT:索引是数据(parquet)的派生物,
+            # drop/create 只改索引 spec,行与向量原样保留 —— 不需要重新 embedding。
+            self._heal_index_type()
         # 无论新建还是已存在,都确保 collection 已加载 —— 否则对"已存在(上次会话建的)
         # collection"调 search/query 会报 'collection is in state released'(对话检索走这条路,
         # app 重启后第一次提问必中)。load 对已加载的 collection 是幂等的。
         self._client.load_collection(collection)
+
+    def _heal_index_type(self) -> None:
+        """向量索引类型自愈:已存在的 collection 若索引不是 FLAT(旧版建的 HNSW),
+        release → drop_index → create_index(FLAT)。见 _INDEX_TYPE 注释:HNSW 在 milvus-lite
+        下 filter 是全局候选后过滤,project 隔离失效。swap 后旧 .idx 文件因命名含索引类型
+        不再被挂载,查询立即走 brute-force 精确路径;新 FLAT 索引由引擎在下次 flush 后台重建。
+        不触发 on_schema_heal:数据一行未动,无需把记录翻回待索引。"""
+        names = self._client.list_indexes(self._collection)
+        stale = [n for n in names
+                 if self._client.describe_index(self._collection, n).get("index_type") != _INDEX_TYPE]
+        if names and not stale:
+            return
+        _log.warning(
+            "collection %s 向量索引 %s 非 %s,就地换索引(数据/向量保留,无需重索引)",
+            self._collection, names, _INDEX_TYPE,
+        )
+        # 与 schema 自愈同理先 release:drop_index 拒绝在 loaded collection 上执行,
+        # 且此时尚未 load,release 对未加载的 collection 是安全的 no-op。
+        self._client.release_collection(self._collection)
+        for n in names:
+            self._client.drop_index(self._collection, n)
+        index_params = self._client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type=_INDEX_TYPE, metric_type="COSINE")
+        self._client.create_index(self._collection, index_params)
 
     def close(self) -> None:
         """释放 milvus-lite 的独占文件锁(便于同进程内重开 store / 测试模拟重启)。"""
