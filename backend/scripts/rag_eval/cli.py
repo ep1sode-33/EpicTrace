@@ -125,6 +125,25 @@ def _cmd_run(ns) -> int:
     return 0
 
 
+def _cmd_latency(ns) -> int:
+    # eval-only agent 链路时延分解:**不调 judge**(零 opus 成本),generator 用当前活动 profile。
+    # 重件装配走 wiring(懒导入真件);CLI 测试 monkeypatch 掉 wiring.* 与 latency.run_latency_profile。
+    from scripts.rag_eval import latency, wiring
+    golden = load_golden(ns.golden)
+    cfg = EvalConfig(label=ns.label or "")
+    res = latency.run_latency_profile(
+        golden, build_chat_model=wiring.build_chat_model_factory(),
+        llm=wiring.build_llm(), retriever=wiring.build_retriever(ns.project_id),
+        project_id=ns.project_id, sample=ns.sample)
+    meta = _build_meta(cfg, ns.golden, gen_model=_active_model_name())
+    meta["mode"] = "latency"
+    meta["sample"] = ns.sample
+    out = latency.write_latency_run(res, _RUNS, label=ns.label or "run", meta=meta)
+    print(latency.format_latency_table(res["aggregate"]))
+    print(f"\n[rag-eval] latency run written to {out}", file=sys.stderr)
+    return 0
+
+
 def _cmd_gen_golden(ns) -> int:
     # 采样→synth_item 的编排见 plan 手动 bring-up:需按真实抽取文本(doc_text per ingest_record_id)接线,
     # 与 indexing.py 一样打通真 store。本任务先延迟到手动期,给出清晰退出信息。
@@ -191,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:
     rn.add_argument("--golden", required=True); rn.add_argument("--project-id", dest="project_id", type=int, required=True)
     rn.add_argument("--k", type=int, default=6); rn.add_argument("--dense-n", dest="dense_n", type=int, default=30)
     rn.add_argument("--fuse-m", dest="fuse_m", type=int, default=20); rn.add_argument("--label", default="")
+
+    lt = sub.add_parser("latency"); lt.set_defaults(fn=_cmd_latency)
+    lt.add_argument("--golden", required=True); lt.add_argument("--project-id", dest="project_id", type=int, required=True)
+    lt.add_argument("--sample", type=int, default=None); lt.add_argument("--label", default="")
 
     rg = sub.add_parser("review-golden"); rg.set_defaults(fn=_cmd_review_golden)
     rg.add_argument("--candidates", required=True); rg.add_argument("--out", required=True)
