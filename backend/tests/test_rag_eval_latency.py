@@ -162,6 +162,24 @@ def test_timing_llm_stream_path_marks_answer():
     assert [e["kind"] for e in rec.events] == ["answer_first_token", "answer_done"]
 
 
+class _NoEventsLLM:
+    """无 stream_events 的老 provider:answer.py 特征探测应优雅降级到 stream()。"""
+    def complete(self, messages, **kw):
+        return "yes"
+
+    def stream(self, messages, **kw):
+        yield "a"
+
+
+def test_timing_llm_hides_stream_events_when_underlying_lacks_it():
+    # 底层无 stream_events → 代理也不暴露(getattr 得 None),不骗探测方上主路。
+    rec = LatencyRecorder(clock=_Clock([0, 1]))
+    timed = TimingLLM(_NoEventsLLM(), rec)
+    assert getattr(timed, "stream_events", None) is None
+    assert list(timed.stream([])) == ["a"]             # 降级路照常打点
+    assert [e["kind"] for e in rec.events] == ["answer_first_token", "answer_done"]
+
+
 # ---------------------------------------------------------------- 单题真跑(全假件)
 
 class _Acc:
@@ -173,14 +191,16 @@ class _Acc:
 
 
 def test_run_one_timed_end_to_end(monkeypatch):
-    # 桩掉懒导入的 agent 原语:run_react_loop 触发 seed/think/tool_step 回调并塞池;
+    # 桩掉懒导入的 agent 原语:seed_first_retrieval 触发专属 seed 回调(显式标记),
+    # run_react_loop 触发 think/tool_step 回调并塞池;
     # stream_final_answer 用传入的 TimingLLM 代理触发 gate + answer 打点。
+    def fake_seed(tools, accumulator, question, **kw):
+        kw["on_step"]({"tool": "search_project_library", "query": question, "count": 3})
+
     def fake_loop(chat_model, tools, accumulator, question, **kw):
-        on_step = kw["on_step"]
-        on_think = kw["on_think"]
-        on_step({"tool": "search_project_library", "query": question, "count": 3})  # seed
-        on_think("正在想搜什么")
-        on_step({"tool": "search_project_library", "query": "q2", "count": 2})      # 真实工具轮
+        assert kw.get("force_seed") is False          # seed 已在外部显式跑过,循环内不重跑
+        kw["on_think"]("正在想搜什么")
+        kw["on_step"]({"tool": "search_project_library", "query": "q2", "count": 2})  # 真实工具步
         accumulator.chunks.append(object())
         return "ok"
 
@@ -191,6 +211,7 @@ def test_run_one_timed_end_to_end(monkeypatch):
             pass
         yield {"event": "_answer", "data": "答案 [1]"}
 
+    monkeypatch.setattr("epictrace.agent.react.seed_first_retrieval", fake_seed)
     monkeypatch.setattr("epictrace.agent.react.run_react_loop", fake_loop)
     monkeypatch.setattr("epictrace.agent.answer.stream_final_answer", fake_stream)
     monkeypatch.setattr("epictrace.agent.tools.build_tools", lambda **k: [])
@@ -202,13 +223,45 @@ def test_run_one_timed_end_to_end(monkeypatch):
     kinds = [e["kind"] for e in rec["events"]]
     assert kinds == ["run_start", "seed_done", "think", "tool_step", "react_done",
                      "gate_start", "gate_done", "answer_first_token", "answer_done"]
-    assert rec["counts"]["tool_steps"] == 1           # 第一条 on_step 记 seed_done,不计入
+    assert rec["counts"]["tool_steps"] == 1           # seed 回调走专属标记,不计入工具步
     assert rec["counts"]["pool"] == 1
     st = rec["stages"]
     for name in ("seed", "agent", "gate", "answer_ttft", "answer_stream", "total"):
         assert st[name] is not None and st[name] >= 0.0
     assert st["total"] >= st["agent"]
     assert rec["answer_len"] == len("答案 [1]")
+
+
+def test_run_one_timed_seed_not_triggered_no_false_seed_done(monkeypatch):
+    # seed 工具缺失/抛错 → seed_first_retrieval 不回调:不得把第一条真实工具步误标成 seed_done。
+    def fake_seed(tools, accumulator, question, **kw):
+        pass                                          # 无回调(工具缺失/内部吞错)
+
+    def fake_loop(chat_model, tools, accumulator, question, **kw):
+        kw["on_step"]({"tool": "search_project_library", "query": "q", "count": 2})
+        accumulator.chunks.append(object())
+        return "ok"
+
+    def fake_stream(llm, question, pool, **kw):
+        for _ in llm.stream([{"role": "user", "content": "ans"}]):
+            pass
+        yield {"event": "_answer", "data": "答"}
+
+    monkeypatch.setattr("epictrace.agent.react.seed_first_retrieval", fake_seed)
+    monkeypatch.setattr("epictrace.agent.react.run_react_loop", fake_loop)
+    monkeypatch.setattr("epictrace.agent.answer.stream_final_answer", fake_stream)
+    monkeypatch.setattr("epictrace.agent.tools.build_tools", lambda **k: [])
+    monkeypatch.setattr("epictrace.agent.tools.ChunkAccumulator", _Acc)
+
+    rec = run_one_timed(_item(), build_chat_model=lambda: object(), llm=_FakeLLM(),
+                        retriever=object(), project_id=1)
+
+    kinds = [e["kind"] for e in rec["events"]]
+    assert "seed_done" not in kinds                    # 不误标
+    assert rec["stages"]["seed"] is None               # seed 阶段不可测 → None
+    assert rec["counts"]["tool_steps"] == 1            # 真实工具步照常计数
+    assert rec["stages"]["agent"] is not None          # agent 从 run_start 起算,仍可测
+    assert rec["stages"]["total"] is not None
 
 
 def test_run_latency_profile_aggregates_and_samples(monkeypatch):

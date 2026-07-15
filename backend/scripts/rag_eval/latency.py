@@ -10,7 +10,11 @@ gate_start / gate_done / answer_first_token / answer_done。由这些边界切�
 
 纯逻辑(记录器/汇总/聚合/表格/TimingLLM)在模块顶层,无重依赖;真跑用到的 agent 原语
 (run_react_loop / stream_final_answer / build_tools / ChunkAccumulator)在 run_one_timed
-里**懒导入**,好让记录器/聚合能被单测轻量导入。"""
+里**懒导入**,好让记录器/聚合能被单测轻量导入。
+
+已知保真度限制:react 返回 FALLBACK 的题此处仍走 stream_final_answer 终答(产品里
+ChatService 对 FALLBACK 会回退另一条路,不走这条终答流)——基线 fallback 0/24 无影响;
+若未来出现 fallback 题,其 answer 段耗时与产品路径不完全对应。"""
 from __future__ import annotations
 
 import json
@@ -117,7 +121,9 @@ class TimingLLM:
     """透明代理产品 LLMProvider,给终答链路的三个入口打点,不改产品代码:
       · complete()      → 接地闸门(_is_answerable):gate_start/gate_done;
       · stream_events() → 终答主路(有推理分离):首 item=answer_first_token,耗尽=answer_done;
-      · stream()        → 拒答/退化路:同上。
+        **仅当底层 llm 也有 stream_events 才暴露**——answer.py 用 getattr 特征探测选流路,
+        恒暴露会把无此方法的 provider 骗上主路 → AttributeError 而非优雅降级到 stream();
+      · stream()        → 拒答/退化路:同上打点。
     其余属性透传底层 llm(stream_final_answer 只用到这三个)。"""
 
     def __init__(self, llm, recorder: LatencyRecorder) -> None:
@@ -143,11 +149,16 @@ class TimingLLM:
     def stream(self, messages, **kwargs) -> Iterator[str]:
         return self._timed_stream(self._llm.stream(messages, **kwargs))
 
-    def stream_events(self, messages, **kwargs) -> Iterator[dict]:
-        return self._timed_stream(self._llm.stream_events(messages, **kwargs))
+    def __getattr__(self, name):  # 仅在本类未定义时命中
+        # stream_events 不定义在类上:仅当底层有才合成计时版(镜像 answer.py 的特征探测;
+        # 底层缺失 → 此处 AttributeError → 探测方 getattr(..., None) 得 None,优雅降级到 stream())。
+        if name == "stream_events":
+            inner = self._llm.stream_events   # 底层没有 → AttributeError(正确语义)
 
-    def __getattr__(self, name):  # 透传底层其余接口(仅在本类未定义时命中)
-        return getattr(self._llm, name)
+            def _timed_stream_events(messages, **kwargs) -> Iterator[dict]:
+                return self._timed_stream(inner(messages, **kwargs))
+            return _timed_stream_events
+        return getattr(self._llm, name)       # 其余属性透传底层
 
 
 # ---------------------------------------------------------------- 单题真跑
@@ -158,7 +169,7 @@ def run_one_timed(it, *, build_chat_model, llm, retriever, project_id: int,
 
     重依赖懒导入,好让本模块的记录器/聚合能被单测轻量导入(不拉 langchain 等)。"""
     from epictrace.agent.answer import stream_final_answer
-    from epictrace.agent.react import run_react_loop
+    from epictrace.agent.react import run_react_loop, seed_first_retrieval
     from epictrace.agent.tools import ChunkAccumulator, build_tools
 
     rec = recorder or LatencyRecorder()
@@ -169,20 +180,22 @@ def run_one_timed(it, *, build_chat_model, llm, retriever, project_id: int,
                         attachment_retriever=None, conversation_id=0, indexed_ext_ids=[],
                         reference_texts={}, fulltext_ids=[])
 
-    seen_step = {"seed": False}
+    # seed 用**显式标记**判定,不靠"第一条 on_step"的位置:自己先调 seed_first_retrieval
+    # (与 run_react_loop(force_seed=True) 内部完全同参同序,时序保真),其专属回调才记
+    # seed_done;seed 工具缺失/抛错不回调 → 无 seed_done 事件,不会把真实工具步误标成 seed。
+    def on_seed(payload: dict) -> None:
+        rec.mark("seed_done", {"tool": payload.get("tool"), "count": payload.get("count")})
 
     def on_step(payload: dict) -> None:
-        # run_react_loop 里 force_seed 在建图前**同步**先跑,其 on_step 必是第一条 → 记 seed_done;
-        # 其后的都是真实工具轮 → tool_step。
-        kind = "tool_step" if seen_step["seed"] else "seed_done"
-        seen_step["seed"] = True
-        rec.mark(kind, {"tool": payload.get("tool"), "count": payload.get("count")})
+        rec.mark("tool_step", {"tool": payload.get("tool"), "count": payload.get("count")})
 
     def on_think(text: str) -> None:
         rec.mark("think", {"chars": len(text or "")})
 
+    seed_first_retrieval(tools, acc, it.question, on_step=on_seed)
     status = run_react_loop(build_chat_model(), tools, acc, it.question, history=[],
-                            attachment_manifest="", on_step=on_step, on_think=on_think)
+                            attachment_manifest="", force_seed=False,
+                            on_step=on_step, on_think=on_think)
     pool = list(acc.chunks)
     rec.mark("react_done", {"status": status, "pool": len(pool)})
 
@@ -259,7 +272,9 @@ def _mean(values: list[float]) -> float | None:
 
 
 def aggregate_latency(per_q: list[dict]) -> dict:
-    """跑批聚合:各阶段 p50/p95/max/mean/n + agent 轮数分布。"""
+    """跑批聚合:各阶段 p50/p95/max/mean/n + 工具调用步数(tool-call steps)分布。
+    注意 tool_steps 数的是 ToolMessage(**工具调用次数**),不是 agent 轮数——LOOP_SYS 明示
+    单轮可并行多次调用,故步数可以远超 max_rounds(如 15 步 vs 上限 8 轮,轮数并未破顶)。"""
     by_stage: dict = {}
     for st in STAGES:
         vals = [q["stages"].get(st) for q in per_q]
@@ -290,7 +305,8 @@ def format_latency_table(agg: dict) -> str:
                      f"{_fmt(s['max']):>8}{_fmt(s['mean']):>8}{s['n']:>5}")
     r = agg["tool_steps"]
     lines.append("-" * 63)
-    lines.append(f"agent 工具轮数(不含 seed):p50={_fmt(r['p50']).strip()} "
+    lines.append(f"工具调用步数 tool-call steps(不含 seed;单轮可并行多次调用,非轮数):"
+                 f"p50={_fmt(r['p50']).strip()} "
                  f"p95={_fmt(r['p95']).strip()} max={r['max']} mean={_fmt(r['mean']).strip()}"
                  f"  | fallback {agg['fallbacks']}/{agg['n']}")
     # 最大瓶颈:除 total 外 p50 最大的阶段。
