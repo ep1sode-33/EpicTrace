@@ -19,6 +19,15 @@ _COLLECTION = "chunks"
 # Milvus query 的硬上限:单次 query 最多返回这么多行。list_by 用它一次性拉全(如全项目的 chunk
 # 喂给 BM25 稀疏检索语料)。超过此数会被静默截断 → 语料不全、稀疏召回有缺口。
 _LIST_LIMIT = 16384
+# 向量索引用 FLAT(精确暴力检索),不用 HNSW —— 这是修复,不是偷懒:
+# milvus-lite 的 HNSW 检索是"全局 beam 遍历(ef 固定 64,search_params 传不进去)+ 拿 filter
+# 当结果 mask",等价于先取全局 ~一两百条候选再按 project 后过滤。多 project 同库时,冷门
+# project 的有效 dense 深度只剩个位~几十条(dense_n 形同虚设),且随其他 project 语料增长
+# 静默劣化 —— eval 实锤过 3 个池级漏检。FLAT 走 BruteForceIndex:filter 先变 valid_mask、
+# 只对过滤后的行精确算距离,filtered KNN 语义完整;顺带把 faiss 踢出检索路径(faiss 与 torch
+# 撞双 libomp 的老坑)。代价是 O(N·dim)/查询,本地单机万级 chunk 是毫秒量级,与稀疏通道每查
+# 全量拉语料重建 BM25 同一个量级。规模真上去了按 VectorStore 接口缝换真 filtered-ANN 实现。
+_INDEX_TYPE = "FLAT"
 # 默认(folder_scan)collection 的 schema,v2:capture_session_id/ts 让 chunk 可回溯到
 # 会话时刻(哨兵 0/"" = 非会话来源;ts 为 naive-UTC ISO 秒级,与 timealign marker 同源)。
 # 升级后旧 collection 由 __init__ 的字段集比对自愈重建;记录侧的一次性重置见
@@ -91,14 +100,81 @@ class MilvusLiteStore(VectorStore):
                 schema.add_field(name, dtype, **kw)
             index_params = self._client.prepare_index_params()
             index_params.add_index(
-                field_name="vector", index_type="HNSW", metric_type="COSINE",
-                params={"M": 16, "efConstruction": 200},
+                field_name="vector", index_type=_INDEX_TYPE, metric_type="COSINE",
             )
             self._client.create_collection(collection, schema=schema, index_params=index_params)
+        else:
+            # 存量库(旧版建的 HNSW 索引)就地换 FLAT:索引是数据(parquet)的派生物,
+            # drop/create 只改索引 spec,行与向量原样保留 —— 不需要重新 embedding。
+            self._heal_index_type()
         # 无论新建还是已存在,都确保 collection 已加载 —— 否则对"已存在(上次会话建的)
         # collection"调 search/query 会报 'collection is in state released'(对话检索走这条路,
         # app 重启后第一次提问必中)。load 对已加载的 collection 是幂等的。
-        self._client.load_collection(collection)
+        #
+        # load 同时是索引文件"物理可加载性"的唯一关卡:describe_index 只读 manifest 元数据,
+        # 看不出半写/损坏的索引 sidecar(引擎 create_index 先提交 manifest spec、load 时才
+        # 非原子地写 .idx 文件 —— 进程死在写入中途就留下这个状态),而引擎 load 读到损坏文件
+        # 直接抛错且不清理 → 不兜底则每次重开都在同一处失败,向量库持续不可用(故障注入实锤,
+        # 行数据 parquet 完好)。兜底 = 走公开 API 重建派生索引:drop_index 连带删掉该索引的
+        # 引擎持久化文件,重新 load 时从行数据重建 —— 一行不丢、无需重新 embedding,也不触发
+        # on_schema_heal。只重试一次:重建后仍失败说明不是索引层的问题(如数据文件损坏),
+        # 原样抛出,不掩盖。对没有"索引 sidecar"概念的未来引擎安全降级:load 不失败就永远
+        # 不进这条路,进了也只用公开索引 API。
+        try:
+            self._client.load_collection(collection)
+        except Exception as e:  # noqa: BLE001 — 引擎侧抛 MilvusException,兜底不赌具体异常类型
+            _log.warning(
+                "collection %s load 失败(疑似向量索引文件损坏),drop 索引清理后重建重试:%s",
+                collection, e,
+            )
+            self._rebuild_vector_index()
+            self._client.load_collection(collection)
+
+    def _heal_index_type(self) -> None:
+        """向量索引类型自愈:已存在的 collection 若 vector 字段索引不是 FLAT(旧版建的
+        HNSW),release → drop_index → create_index(FLAT)。见 _INDEX_TYPE 注释:HNSW 在
+        milvus-lite 下 filter 是全局候选后过滤,project 隔离失效。
+
+        引擎实际行为(源码核实,注意 create_index 的引擎 docstring 是过时的):
+        - drop_index **当场删除**旧 .hnsw.idx 文件,并在无剩余索引时把 load-state
+          自动翻回 loaded;
+        - create_index 在 loaded 状态下**同步内联**为现有 segment 构建 FLAT 索引并写
+          .idx sidecar —— 本方法返回时检索即已可用、即已精确,不依赖下次 flush。
+        数据(parquet)与向量原样保留,不需重新 embedding;不触发 on_schema_heal:
+        数据一行未动,无需把记录翻回待索引。"""
+        names = self._client.list_indexes(self._collection)
+        # 只看/只动 vector 字段的索引:当前引擎每 collection 只有单索引,这里是防御 ——
+        # 万一未来加了 scalar/sparse 索引,不许被这条自愈连带删掉。
+        infos = {n: self._client.describe_index(self._collection, n) for n in names}
+        vector_idx = {n: i for n, i in infos.items() if i.get("field_name") == "vector"}
+        stale = [n for n, i in vector_idx.items() if i.get("index_type") != _INDEX_TYPE]
+        if vector_idx and not stale:
+            return
+        _log.warning(
+            "collection %s vector 索引 %s 非 %s,就地换索引(数据/向量保留,无需重索引)",
+            self._collection, stale or "缺失", _INDEX_TYPE,
+        )
+        self._rebuild_vector_index()
+
+    def _rebuild_vector_index(self) -> None:
+        """重建 vector 字段的索引 spec:release → drop 全部 vector 索引(不论类型)→
+        建 FLAT。两处调用:索引类型自愈(HNSW→FLAT 迁移)与 __init__ 的 load 失败兜底
+        (损坏 sidecar 清理)。drop_index 的公开语义包含删除该索引的引擎持久化文件
+        (.idx sidecar),所以这同时就是损坏文件的清理路径 —— 全程公开 API,不碰引擎
+        私有文件布局。幂等:成功后再重开,describe 是 FLAT、load 直接成功,两个调用方
+        都不会再进来;中途再死一次,下次重开还是同样的单次重建。
+
+        与 schema 自愈同理先 release:drop_index 拒绝在 loaded collection 上执行;
+        此处要么尚未 load、要么 load 刚失败被引擎回滚到 released,release 对未加载的
+        collection 是安全的 no-op。只动 vector 字段的索引(引擎每字段至多一个索引):
+        万一未来加了 scalar/sparse 索引,不许被这条重建连带删掉。"""
+        self._client.release_collection(self._collection)
+        for n in self._client.list_indexes(self._collection):
+            if self._client.describe_index(self._collection, n).get("field_name") == "vector":
+                self._client.drop_index(self._collection, n)
+        index_params = self._client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type=_INDEX_TYPE, metric_type="COSINE")
+        self._client.create_index(self._collection, index_params)
 
     def close(self) -> None:
         """释放 milvus-lite 的独占文件锁(便于同进程内重开 store / 测试模拟重启)。"""
