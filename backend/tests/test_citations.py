@@ -1,4 +1,4 @@
-from epictrace.agent.citations import build_citations
+from epictrace.cowork.citations import build_citations
 from epictrace.retrieval.types import RetrievedChunk
 
 

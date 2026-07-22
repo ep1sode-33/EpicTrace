@@ -15,6 +15,10 @@
   <key>LSMinimumSystemVersion</key><string>14.4</string>
   <key>LSArchitecturePriority</key><array><string>arm64</string></array>
   <key>LSUIElement</key><true/>
+  <!-- agent 任务要在后台继续跑:禁止 App Nap 挂起与「突然终止」——否则切走后
+       macOS 会把后端连同在跑的 agent 循环一起杀掉(对齐 Cowork 的后台执行体验)。 -->
+  <key>LSAppNapIsDisabled</key><true/>
+  <key>NSSupportsSuddenTermination</key><false/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>EpicTrace 仅在你主动开始录制会话时使用麦克风进行语音转写。</string>

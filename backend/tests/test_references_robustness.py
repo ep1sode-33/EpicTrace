@@ -4,7 +4,7 @@ import pytest
 
 from epictrace.config import AppConfig
 from epictrace.db import Database
-from epictrace.models import Conversation, IngestRecord, Project
+from epictrace.models import AgentSession, IngestRecord, Project
 from epictrace.services.references import ReferenceService
 
 
@@ -14,7 +14,7 @@ def _setup(tmp_path, n_projects=1):
     with db.session() as s:
         for i in range(n_projects):
             p = Project(title=f"P{i}", folder_path=str(tmp_path)); s.add(p); s.flush()
-            c = Conversation(project_id=p.id, title="t"); s.add(c); s.flush()
+            c = AgentSession(project_id=p.id, name="t"); s.add(c); s.flush()
             ids.append((p.id, c.id))
     return db, ids
 
@@ -56,7 +56,7 @@ def test_detach_scoped_to_conversation(tmp_path: Path):
     db, [(_pid, cid)] = _setup(tmp_path)
     svc = ReferenceService(db)
     ref = svc.add_external(cid, _w(tmp_path, "n.md", "内容内容"), context_window=1_000_000)
-    svc.detach(cid + 999, ref["id"])      # 错误的 conversation id → 不解挂
+    svc.detach(cid + 999, ref["id"])      # 错误的 session id → 不解挂
     assert len(svc.list_active(cid)) == 1
     svc.detach(cid, ref["id"])            # 正确 → 解挂
     assert svc.list_active(cid) == []

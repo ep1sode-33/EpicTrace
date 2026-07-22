@@ -2,7 +2,7 @@ from pathlib import Path
 
 from epictrace.config import AppConfig
 from epictrace.db import Database
-from epictrace.models import Conversation, IngestRecord, Project
+from epictrace.models import AgentSession, IngestRecord, Project
 from epictrace.services.references import ReferenceService
 
 BIG_WIN = 1_000_000     # 预算极大 → 一定 fulltext
@@ -13,7 +13,7 @@ def _setup(tmp_path):
     db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
     with db.session() as s:
         p = Project(title="P", folder_path=str(tmp_path)); s.add(p); s.flush()
-        c = Conversation(project_id=p.id, title="t"); s.add(c); s.flush()
+        c = AgentSession(project_id=p.id, name="t"); s.add(c); s.flush()
         cid, pid = c.id, p.id
     return db, cid, pid
 

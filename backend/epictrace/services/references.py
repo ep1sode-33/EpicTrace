@@ -11,16 +11,16 @@ from epictrace.media import get_processor
 from epictrace.media.errors import ExtractionEngineNotReady, ExtractionFailed
 from epictrace.media.mineru import MinerUMediaProcessor
 from epictrace.media.provenance import write_provenance
-from epictrace.models import Conversation, ConversationReference, IngestRecord
+from epictrace.models import AgentSession, IngestRecord, Reference
 from epictrace.services.budget import estimate_tokens, fits_fulltext
 from epictrace.services.settings import SettingsService
 
 _log = logging.getLogger("epictrace")
 
 
-def _to_dict(r: ConversationReference) -> dict:
+def _to_dict(r: Reference) -> dict:
     return {
-        "id": r.id, "conversation_id": r.conversation_id, "kind": r.kind,
+        "id": r.id, "session_id": r.session_id, "kind": r.kind,
         "display_name": r.display_name, "source_path": r.source_path,
         "ingest_record_id": r.ingest_record_id, "extracted_text": r.extracted_text,
         "mode": r.mode, "text_chars": r.text_chars, "detached": r.detached,
@@ -40,9 +40,9 @@ class ReferenceService:
         self._attachment_store = attachment_store
         self._provisioner = provisioner
 
-    def _used_fulltext_tokens(self, conversation_id: int) -> int:
+    def _used_fulltext_tokens(self, session_id: int) -> int:
         return sum(estimate_tokens(r.get("extracted_text") or "")
-                   for r in self.list_active(conversation_id) if r["mode"] == "fulltext")
+                   for r in self.list_active(session_id) if r["mode"] == "fulltext")
 
     def _ensure_models_ready(self, progress_cb=None) -> None:
         """提取前的「门」:provisioner 为 installed_no_models 或 downloading_models 时,
@@ -61,7 +61,7 @@ class ReferenceService:
                 model_source=ext["model_source"], progress_cb=progress_cb
             )
 
-    def add_external(self, conversation_id: int, path: str, context_window: int,
+    def add_external(self, session_id: int, path: str, context_window: int,
                      progress_cb=None, cancel=None) -> dict:
         p = Path(path)
         if not p.exists() or not p.is_file():
@@ -87,11 +87,11 @@ class ReferenceService:
         text = result.text
         if not text.strip():
             raise ValueError("empty file")
-        used = self._used_fulltext_tokens(conversation_id)
+        used = self._used_fulltext_tokens(session_id)
         mode = "fulltext" if fits_fulltext(text, context_window, used) else "deferred"
         with self._db.session() as s:
-            ref = ConversationReference(
-                conversation_id=conversation_id, kind="external", display_name=p.name,
+            ref = Reference(
+                session_id=session_id, kind="external", display_name=p.name,
                 source_path=str(p), extracted_text=text, text_chars=len(text), mode=mode,
             )
             s.add(ref); s.flush(); s.refresh(ref)
@@ -112,19 +112,19 @@ class ReferenceService:
                 )
         # 大文件:尝试切块+embed 进会话级临时集合(失败保持 deferred,不阻塞)。
         if mode == "deferred" and self._embedder is not None and self._attachment_store is not None:
-            if self._index_attachment(conversation_id, ref_id, text):
+            if self._index_attachment(session_id, ref_id, text):
                 with self._db.session() as s:
-                    r = s.get(ConversationReference, ref_id)
+                    r = s.get(Reference, ref_id)
                     if r is not None:
                         r.mode = "indexed"
                 out["mode"] = "indexed"
         return out
 
-    def add_internal(self, conversation_id: int, ingest_record_id: int, context_window: int) -> dict:
+    def add_internal(self, session_id: int, ingest_record_id: int, context_window: int) -> dict:
         with self._db.session() as s:
-            conv = s.get(Conversation, conversation_id)
+            conv = s.get(AgentSession, session_id)
             if conv is None:
-                raise ValueError("conversation not found")
+                raise ValueError("session not found")
             rec = s.get(IngestRecord, ingest_record_id)
             if rec is None:
                 raise ValueError("ingest record not found")
@@ -139,12 +139,12 @@ class ReferenceService:
             except Exception:  # noqa: BLE001 — 提取失败 → 退化为 focus(复用现成向量)
                 text = ""
         # 内部:小→fulltext(缓存整段);大或无法提取→focus(只记 ingest_record_id,复用现成向量)
-        used = self._used_fulltext_tokens(conversation_id)
+        used = self._used_fulltext_tokens(session_id)
         fulltext = bool(text.strip()) and fits_fulltext(text, context_window, used)
         mode = "fulltext" if fulltext else "focus"
         with self._db.session() as s:
-            ref = ConversationReference(
-                conversation_id=conversation_id, kind="internal", display_name=name,
+            ref = Reference(
+                session_id=session_id, kind="internal", display_name=name,
                 ingest_record_id=ingest_record_id,
                 extracted_text=(text if fulltext else None),
                 text_chars=len(text), mode=mode,
@@ -152,7 +152,7 @@ class ReferenceService:
             s.add(ref); s.flush(); s.refresh(ref)
             return _to_dict(ref)
 
-    def _index_attachment(self, conversation_id: int, reference_id: int, text: str) -> bool:
+    def _index_attachment(self, session_id: int, reference_id: int, text: str) -> bool:
         """切块 → embed → upsert 进临时集合。成功 True,失败 False(调用方保持 deferred)。"""
         try:
             chunks = chunk_text(text)
@@ -160,7 +160,7 @@ class ReferenceService:
                 return False
             vectors = self._embedder.embed([c.text for c in chunks])
             self._attachment_store.upsert([
-                {"vector": vec, "text": c.text, "conversation_id": conversation_id,
+                {"vector": vec, "text": c.text, "session_id": session_id,
                  "reference_id": reference_id, "char_start": c.char_start, "char_end": c.char_end,
                  "source_type": "attachment", "embed_model_id": self._embedder.model_id}
                 for c, vec in zip(chunks, vectors)
@@ -169,28 +169,28 @@ class ReferenceService:
         except Exception:  # noqa: BLE001 — 索引失败回退 deferred
             return False
 
-    def detach(self, conversation_id: int, reference_id: int) -> None:
+    def detach(self, session_id: int, reference_id: int) -> None:
         owned = False
         with self._db.session() as s:
-            ref = s.get(ConversationReference, reference_id)
-            if ref is not None and ref.conversation_id == conversation_id:
+            ref = s.get(Reference, reference_id)
+            if ref is not None and ref.session_id == session_id:
                 ref.detached = True
                 owned = True
-        # 仅在归属校验通过时清理临时向量,且按 conversation_id + reference_id 双重限定;
+        # 仅在归属校验通过时清理临时向量,且按 session_id + reference_id 双重限定;
         # 清理失败不应影响解挂(残留向量无害——检索按活跃引用过滤)。
         if owned and self._attachment_store is not None:
             try:
-                self._attachment_store.delete({"conversation_id": conversation_id,
+                self._attachment_store.delete({"session_id": session_id,
                                                "reference_id": reference_id})
             except Exception:  # noqa: BLE001
                 pass
 
-    def list_active(self, conversation_id: int) -> list[dict]:
+    def list_active(self, session_id: int) -> list[dict]:
         with self._db.session() as s:
             rows = s.execute(
-                select(ConversationReference).where(
-                    ConversationReference.conversation_id == conversation_id,
-                    ConversationReference.detached.is_(False),
-                ).order_by(ConversationReference.id)
+                select(Reference).where(
+                    Reference.session_id == session_id,
+                    Reference.detached.is_(False),
+                ).order_by(Reference.id)
             ).scalars().all()
             return [_to_dict(r) for r in rows]

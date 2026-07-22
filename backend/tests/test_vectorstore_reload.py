@@ -66,7 +66,7 @@ def test_reopen_v1_collection_drops_and_rebuilds(tmp_path: Path, caplog):
 def test_reopen_attachment_collection_schema_unchanged_keeps_rows(tmp_path: Path):
     """attachment collection 的 scalars 未变:自愈比对一致 → 不 drop,数据原样保留。"""
     db = str(tmp_path / "v.db")
-    arec = {"vector": [0.1] * DIM, "text": "附件块", "conversation_id": 1, "reference_id": 10,
+    arec = {"vector": [0.1] * DIM, "text": "附件块", "session_id": 1, "reference_id": 10,
             "char_start": 0, "char_end": 3, "source_type": "attachment", "embed_model_id": "fake"}
     s1 = MilvusLiteStore(db_path=db, dim=DIM, collection="attachment_chunks",
                          scalars=_ATTACHMENT_SCALARS)
@@ -75,7 +75,7 @@ def test_reopen_attachment_collection_schema_unchanged_keeps_rows(tmp_path: Path
 
     s2 = MilvusLiteStore(db_path=db, dim=DIM, collection="attachment_chunks",
                          scalars=_ATTACHMENT_SCALARS)
-    rows = s2.list_by({"conversation_id": 1})
+    rows = s2.list_by({"session_id": 1})
     assert len(rows) == 1 and rows[0]["reference_id"] == 10
     s2.close()
 
@@ -129,7 +129,7 @@ def test_schema_heal_callback_failure_does_not_block_construction(tmp_path: Path
 def test_schema_heal_callback_not_called_for_attachment_collection(tmp_path: Path):
     """attachment collection scalars 未变 → 不触发自愈、回调不调。"""
     db = str(tmp_path / "v.db")
-    arec = {"vector": [0.1] * DIM, "text": "附件块", "conversation_id": 1, "reference_id": 10,
+    arec = {"vector": [0.1] * DIM, "text": "附件块", "session_id": 1, "reference_id": 10,
             "char_start": 0, "char_end": 3, "source_type": "attachment", "embed_model_id": "fake"}
     s1 = MilvusLiteStore(db_path=db, dim=DIM, collection="attachment_chunks",
                          scalars=_ATTACHMENT_SCALARS)

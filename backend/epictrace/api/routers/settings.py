@@ -7,15 +7,23 @@ from fastapi import APIRouter, HTTPException, Request
 from epictrace.api.deps import get_asr_provisioner, get_provisioner
 from epictrace.llm.openai_compat import OpenAICompatLLM
 from epictrace.schemas import (
+    AgentSettingsIn,
+    AgentSettingsOut,
     AsrDeviceOut,
     AsrSettingsIn,
     AsrSettingsOut,
     AsrStatusOut,
+    EmbeddingSettingsIn,
+    EmbeddingSettingsOut,
     ExtractionSettingsIn,
     ExtractionSettingsOut,
     ExtractionStatusOut,
+    PermissionSettingsIn,
+    PermissionSettingsOut,
     ProfileCreate,
     ProfileUpdate,
+    SandboxSettingsIn,
+    SandboxSettingsOut,
     SetActiveIn,
     TestProfileIn,
     TestProfileOut,
@@ -86,6 +94,67 @@ def set_active(payload: SetActiveIn, request: Request):
     svc.set_active(payload.profile_id)
     _invalidate_llm(request)
     return svc.public_view()
+
+
+@router.get("/settings/agent", response_model=AgentSettingsOut)
+def get_agent_settings(request: Request):
+    return _svc(request).get_agent_settings()
+
+
+@router.put("/settings/agent", response_model=AgentSettingsOut)
+def put_agent_settings(payload: AgentSettingsIn, request: Request):
+    # 部分更新:None 的键保留原值;空串 user_instructions 是合法取值(清空自定义指令)。
+    sent = payload.model_dump(exclude_unset=True)
+    patch = {k: v for k, v in sent.items() if v is not None}
+    try:
+        return _svc(request).set_agent_settings(patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/settings/permissions", response_model=PermissionSettingsOut)
+def get_permission_settings(request: Request):
+    return _svc(request).get_permission_settings()
+@router.put("/settings/permissions", response_model=PermissionSettingsOut)
+def put_permission_settings(payload: PermissionSettingsIn, request: Request):
+    sent = payload.model_dump(exclude_unset=True)
+    patch = {k: v for k, v in sent.items() if v is not None}
+    try:
+        return _svc(request).set_permission_settings(patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/settings/sandbox", response_model=SandboxSettingsOut)
+def get_sandbox_settings(request: Request):
+    return _svc(request).get_sandbox_settings()
+
+
+@router.put("/settings/sandbox", response_model=SandboxSettingsOut)
+def put_sandbox_settings(payload: SandboxSettingsIn, request: Request):
+    sent = payload.model_dump(exclude_unset=True)
+    patch = {k: v for k, v in sent.items() if v is not None}
+    try:
+        return _svc(request).set_sandbox_settings(patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/settings/embedding", response_model=EmbeddingSettingsOut)
+def get_embedding_settings(request: Request):
+    return _svc(request).get_embedding_settings()
+
+
+@router.put("/settings/embedding", response_model=EmbeddingSettingsOut)
+def put_embedding_settings(payload: EmbeddingSettingsIn, request: Request):
+    """切换/配置 embedding provider(需求 8)。provider/model/dimensions 变化后,
+    embedder 按签名自动重建;维度变化时 Milvus schema 自愈重建索引(向量清空,需重新索引)。"""
+    sent = payload.model_dump(exclude_unset=True)
+    patch = {k: v for k, v in sent.items() if v is not None}
+    try:
+        return _svc(request).set_embedding_settings(patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/settings/test")

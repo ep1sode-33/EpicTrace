@@ -21,19 +21,20 @@ def _tok(text: str) -> list[str]:
 
 
 class AttachmentRetriever:
-    """对会话级临时集合做 dense+sparse→RRF→rerank,按 conversation_id + reference_id 过滤。
-    与项目 HybridRetriever 同形,但作用于附件向量、产出 source_kind=attachment 的 chunk。"""
+    """对会话级临时集合做 dense+sparse→RRF→rerank,按 session_id + reference_id 过滤。
+    与项目 HybridRetriever 同形,但作用于附件向量、产出 source_kind=attachment 的 chunk。
+    (早期以 conversation_id 为元数据键的旧向量已随对话栈迁移废弃,见 services/references。)"""
 
     def __init__(self, embedder, store, reranker) -> None:
         self._embedder = embedder
         self._store = store
         self._reranker = reranker
 
-    def retrieve(self, *, conversation_id: int, reference_ids: list[int], query: str,
+    def retrieve(self, *, session_id: int, reference_ids: list[int], query: str,
                  k: int = 6, dense_n: int = 30, fuse_m: int = 20) -> list[RetrievedChunk]:
         if not reference_ids:
             return []
-        flt = {"conversation_id": conversation_id, "reference_id": list(reference_ids)}
+        flt = {"session_id": session_id, "reference_id": list(reference_ids)}
         vec = self._embedder.embed([query])[0]
         dense_rows = self._store.query(vec, filter=flt, k=dense_n)
         dense = [_row_to_chunk(r, score=1.0 / (i + 1)) for i, r in enumerate(dense_rows)]

@@ -123,7 +123,7 @@ def test_attachment_filter_gets_full_depth(tmp_path):
     rng = random.Random(11)
 
     def arec(vec: list[float], cid: int, rid: int, text: str) -> dict:
-        return {"vector": vec, "text": text, "conversation_id": cid, "reference_id": rid,
+        return {"vector": vec, "text": text, "session_id": cid, "reference_id": rid,
                 "char_start": 0, "char_end": len(text), "source_type": "attachment",
                 "embed_model_id": "fake"}
 
@@ -135,7 +135,7 @@ def test_attachment_filter_gets_full_depth(tmp_path):
     store._client.flush("attachment_chunks")
     _wait_index_built(db)
 
-    hits = store.query(QUERY, filter={"conversation_id": 2, "reference_id": [20]}, k=30)
+    hits = store.query(QUERY, filter={"session_id": 2, "reference_id": [20]}, k=30)
     assert len(hits) == 30
     assert hits[0]["text"] == "GOLD"
     store.close()

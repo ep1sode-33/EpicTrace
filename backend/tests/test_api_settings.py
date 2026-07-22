@@ -132,12 +132,9 @@ def test_test_profile_failure_is_data_not_http_error(app_client, monkeypatch):
 
 
 def test_chat_409_when_no_profile(app_client):
-    pid = app_client.post(
-        "/api/projects", json={"title": "P", "folder_path": "/tmp/p_409"}
-    ).json()["id"]
-    cid = app_client.post(f"/api/projects/{pid}/conversations", json={}).json()["id"]
+    sid = app_client.post("/api/cowork/sessions", json={}).json()["id"]
     r = app_client.request(
-        "POST", f"/api/conversations/{cid}/messages", json={"content": "x"}
+        "POST", f"/api/cowork/sessions/{sid}/messages", json={"content": "x"}
     )
     assert r.status_code == 409
 

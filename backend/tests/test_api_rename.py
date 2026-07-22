@@ -20,50 +20,45 @@ def _project(client: TestClient, tmp_path: Path) -> int:
     return client.post("/api/projects", json={"title": "P", "folder_path": folder}).json()["id"]
 
 
-def _conversation(client: TestClient, pid: int) -> int:
-    return client.post(f"/api/projects/{pid}/conversations", json={"title": "旧标题"}).json()["id"]
+def _session(client: TestClient) -> int:
+    return client.post("/api/cowork/sessions", json={"name": "旧标题"}).json()["id"]
 
 
-# ---- conversation rename ----
+# ---- cowork session rename ----
 
-def test_rename_conversation_updates_title(client, tmp_path):
-    pid = _project(client, tmp_path)
-    cid = _conversation(client, pid)
-    resp = client.patch(f"/api/conversations/{cid}", json={"title": "新标题"})
+def test_rename_session_updates_name(client):
+    sid = _session(client)
+    resp = client.patch(f"/api/cowork/sessions/{sid}", json={"name": "新标题"})
     assert resp.status_code == 200
-    assert resp.json()["title"] == "新标题"
-    assert resp.json()["id"] == cid
-    # 重新拉列表确认已落库。
-    listed = client.get(f"/api/projects/{pid}/conversations").json()
-    assert listed[0]["title"] == "新标题"
+    assert resp.json()["name"] == "新标题"
+    assert resp.json()["id"] == sid
+    # 重新拉取确认已落库。
+    assert client.get(f"/api/cowork/sessions/{sid}").json()["name"] == "新标题"
 
 
-def test_rename_conversation_trims_whitespace(client, tmp_path):
-    pid = _project(client, tmp_path)
-    cid = _conversation(client, pid)
-    resp = client.patch(f"/api/conversations/{cid}", json={"title": "  去空白  "})
+def test_rename_session_trims_whitespace(client):
+    sid = _session(client)
+    resp = client.patch(f"/api/cowork/sessions/{sid}", json={"name": "  去空白  "})
     assert resp.status_code == 200
-    assert resp.json()["title"] == "去空白"
+    assert resp.json()["name"] == "去空白"
 
 
-def test_rename_conversation_empty_is_400(client, tmp_path):
-    pid = _project(client, tmp_path)
-    cid = _conversation(client, pid)
-    assert client.patch(f"/api/conversations/{cid}", json={"title": "   "}).status_code == 400
+def test_rename_session_empty_is_400(client):
+    sid = _session(client)
+    assert client.patch(f"/api/cowork/sessions/{sid}", json={"name": "   "}).status_code == 400
     # 标题未被改坏。
-    assert client.get(f"/api/projects/{pid}/conversations").json()[0]["title"] == "旧标题"
+    assert client.get(f"/api/cowork/sessions/{sid}").json()["name"] == "旧标题"
 
 
-def test_rename_conversation_clamps_maxlen(client, tmp_path):
-    pid = _project(client, tmp_path)
-    cid = _conversation(client, pid)
-    resp = client.patch(f"/api/conversations/{cid}", json={"title": "标" * 100})
-    assert resp.status_code == 200
-    assert len(resp.json()["title"]) == 30
+def test_rename_session_over_maxlen_is_422(client):
+    # 新栈契约:CoworkSessionRename schema 上限 255,超长 → 422(旧栈是钳到 30)。
+    sid = _session(client)
+    assert client.patch(f"/api/cowork/sessions/{sid}", json={"name": "标" * 300}).status_code == 422
+    assert client.get(f"/api/cowork/sessions/{sid}").json()["name"] == "旧标题"
 
 
-def test_rename_unknown_conversation_404(client):
-    assert client.patch("/api/conversations/999999", json={"title": "x"}).status_code == 404
+def test_rename_unknown_session_404(client):
+    assert client.patch("/api/cowork/sessions/999999", json={"name": "x"}).status_code == 404
 
 
 # ---- project rename ----

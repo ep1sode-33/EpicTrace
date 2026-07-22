@@ -1,5 +1,3 @@
-from langchain_core.messages import AIMessage
-
 from epictrace.interfaces.embedding import EmbeddingProvider
 from epictrace.interfaces.vector_store import VectorStore
 from epictrace.retrieval.types import RetrievedChunk
@@ -81,84 +79,20 @@ class FakeReranker:
         return sorted(chunks, key=score, reverse=True)[:top_k]
 
 
-class FakeLLM:
-    """可编排:route、grade(固定)或 grade_sequence(逐次)、rewrite、title、answer。
-    记录收到的 system 提示以分流(ROUTE_SYS / GRADE_SYS / REWRITE_SYS / 标题 / GENERATE)。"""
+class FakeCoworkComplete:
+    """cowork AgentLoop 的 complete_fn 假件:按脚本依次返回 LLMResponse,脚本耗尽回默认。
 
-    def __init__(self, *, route="retrieve", grade="sufficient", grade_sequence=None,
-                 rewrite="改写后的查询", title="自动标题", answer="假答案[1]"):
-        self._route_verdict = route
-        self._grade = grade
-        self._grade_seq = list(grade_sequence) if grade_sequence else None
-        self._rewrite = rewrite
-        self._title = title
-        self._answer = answer
-        self.stream_messages: list[list[dict]] = []   # 记录每次 stream 收到的完整 message 列表(供多轮断言)
-        self.complete_messages: list[list[dict]] = []  # 记录每次 complete 收到的完整 message 列表(供标题断言)
+    记录每次调用收到的 (messages, tools),供断言工具 schema 与历史回放。"""
 
-    def _route(self, messages):
-        sys = messages[0]["content"]
-        if "retrieve 或 direct" in sys:  # ROUTE_SYS
-            return self._route_verdict
-        if "sufficient" in sys:  # GRADE_SYS
-            if self._grade_seq:
-                return self._grade_seq.pop(0) if self._grade_seq else "sufficient"
-            return self._grade
-        if "改写" in sys:  # REWRITE_SYS
-            return self._rewrite
-        if "标题" in sys:  # title prompt
-            return self._title
-        return self._answer  # GENERATE_SYS
+    def __init__(self, script=None, default=None):
+        from epictrace.cowork.llm_client import LLMResponse
 
-    def complete(self, messages, **kwargs):
-        self.complete_messages.append(list(messages))
-        return self._route(messages)
-
-    def stream(self, messages, **kwargs):
-        self.stream_messages.append(list(messages))
-        for ch in self._route(messages):
-            yield ch
-
-
-class RaisingLLM:
-    """任一调用都抛错;用于验证 ChatService 把故障转成 error 事件且不落 assistant 消息。"""
-
-    def __init__(self, exc: Exception | None = None) -> None:
-        self._exc = exc or RuntimeError("llm boom")
-
-    def complete(self, messages, **kwargs):
-        raise self._exc
-
-    def stream(self, messages, **kwargs):
-        raise self._exc
-        yield  # pragma: no cover — 让它成为生成器
-
-
-class FakeChatModel:
-    """LangChain-shaped fake for ChatOpenAI.bind_tools(...).invoke(messages).
-
-    Returns scripted AIMessages in order (each call pops the next); after the
-    script is exhausted, returns `default`. `.bind_tools(tools)` records the
-    tools and returns self so ToolNode executes the real bound tools. Tracks
-    every invoke's messages for assertions."""
-
-    def __init__(self, *, script=None, default=None):
         self._script = list(script or [])
-        self._default = default or AIMessage(content="假答案")
-        self.bound_tools = None
-        self.invocations: list[list] = []
+        self._default = default or LLMResponse(content="假答案")
+        self.calls: list[tuple[list[dict], list[dict]]] = []
 
-    def bind_tools(self, tools, **kwargs):
-        self.bound_tools = list(tools)
-        return self
-
-    def invoke(self, messages, **kwargs):
-        self.invocations.append(list(messages))
+    def __call__(self, messages, tools):
+        self.calls.append((list(messages), list(tools)))
         if self._script:
             return self._script.pop(0)
         return self._default
-
-    def stream(self, messages, **kwargs):
-        # agent 节点改用 stream:把脚本里的下一条消息当作单个 chunk 吐出(累积即还原)。
-        self.invocations.append(list(messages))
-        yield self._script.pop(0) if self._script else self._default

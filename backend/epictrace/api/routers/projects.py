@@ -11,6 +11,9 @@ from epictrace.services.scan import ScanService
 
 router = APIRouter(prefix="/projects", tags=["projects"])  # /api 由 app 工厂统一挂载
 
+# 项目标题长度上限(与 cowork.service._TITLE_MAX 同值;旧对话栈删除后本地持有一份)。
+_TITLE_MAX = 30
+
 
 def _job_to_out(job) -> IndexStatusOut:
     # 后台线程会原地更新 job.done/errors/status,读时取锁拍快照。
@@ -55,8 +58,6 @@ def list_projects(db: Database = Depends(get_db)) -> list[ProjectOut]:
 @router.patch("/{project_id}", response_model=ProjectOut)
 def rename_project(project_id: int, payload: RenameIn, db: Database = Depends(get_db)) -> ProjectOut:
     # 仅改显示标题:去首尾空白 → 非空校验 → 钳到 _TITLE_MAX;绝不触碰 folder_path / 磁盘。
-    from epictrace.services.chat import _TITLE_MAX
-
     title = payload.title.strip()
     if not title:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="title must not be empty")

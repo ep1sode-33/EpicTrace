@@ -41,6 +41,23 @@ class Database:
                 conn.exec_driver_sql(
                     "ALTER TABLE ingest_records ADD COLUMN source_session_id INTEGER"
                 )
+            # agent_messages 补引用链列(Phase A:citations_json 落库)。
+            msg_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(agent_messages)")}
+            if msg_cols and "citations_json" not in msg_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE agent_messages ADD COLUMN citations_json TEXT"
+                )
+            # agent_sessions 补项目绑定列(「项目与对话」迁移)。
+            sess_cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(agent_sessions)")}
+            if sess_cols and "project_id" not in sess_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE agent_sessions ADD COLUMN project_id INTEGER"
+                )
+        # 旧对话栈(conversations/messages/conversation_references)→ cowork 栈的一次性
+        # 数据迁移:检测到旧表才动手,幂等;详见 db_migrate 模块 docstring。
+        from epictrace.db_migrate import migrate_legacy_conversations
+
+        migrate_legacy_conversations(self._engine)
 
     @contextmanager
     def session(self) -> Iterator[Session]:

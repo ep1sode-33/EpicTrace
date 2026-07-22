@@ -40,12 +40,50 @@ def _short_id() -> str:
     return secrets.token_hex(4)
 
 
+def _clamp_int(value, default: int, lo: int, hi: int) -> int:
+    """读时归一:非 int 或越界 → 回退默认/钳位,保证旧设置缺新字段也不崩。"""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(v, hi))
+
+
+def _validate_int_range(name: str, value, lo: int, hi: int) -> None:
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid {name}: {value}")
+    if not (lo <= v <= hi):
+        raise ValueError(f"{name} out of range [{lo},{hi}]: {v}")
+
+
 _VALID_EFFORT = {"high", "medium"}
 _VALID_MODEL_SOURCE = {"modelscope", "huggingface", "local"}
 # v2:可选 pypdf(简单文字处理,默认、开箱即用、免安装)或 mineru(OCR/VLM,质量高)。
 _VALID_ENGINE = {"pypdf", "mineru"}
 # 默认引擎:pypdf。免安装、免下模型,文本类 PDF/DOCX/PPTX 直接可用。
 _DEFAULT_ENGINE = "pypdf"
+
+# Cowork agent 循环的可调参数(settings.json 顶层 "agent" 键)
+_AGENT_DEFAULTS = {"max_turns": 50, "turn_timeout_sec": 120, "user_instructions": ""}
+_MAX_TURNS_RANGE = (1, 200)
+_TURN_TIMEOUT_RANGE = (10, 3600)
+
+_SANDBOX_DEFAULTS = {"memory_mb": 512, "cpu_sec": 60, "network": "none"}
+_SANDBOX_MEMORY_RANGE = (64, 8192)
+_SANDBOX_CPU_RANGE = (5, 600)
+_SANDBOX_NETWORK_MODES = {"none", "unrestricted"}
+
+_EMBEDDING_DEFAULTS = {
+    "provider": "local", "base_url": "", "api_key": "", "model": "", "dimensions": 1024,
+}
+_EMBEDDING_PROVIDERS = {"local", "remote"}
+_EMBEDDING_DIM_RANGE = (64, 8192)
+
+# Cowork 权限模型(settings.json 顶层 "permissions" 键)
+_VALID_PERMISSION_MODES = {"ask", "follow_a_plan", "skip_all"}
+_VALID_TOOL_OVERRIDE = {"ask", "ask-session", "allow"}
 
 
 class SettingsService:
@@ -250,6 +288,157 @@ class SettingsService:
             data["asr"] = AsrConfig.from_dict(merged).to_dict()
             self._write(data)
         return self.get_asr_settings()
+
+    def get_agent_settings(self) -> dict:
+        """Cowork agent 循环参数(max_turns/turn_timeout_sec/user_instructions),缺省回退默认。"""
+        data = self._read_raw()
+        agent = data.get("agent")
+        if not isinstance(agent, dict):
+            agent = {}
+        return {
+            "max_turns": _clamp_int(agent.get("max_turns"), _AGENT_DEFAULTS["max_turns"],
+                                    *_MAX_TURNS_RANGE),
+            "turn_timeout_sec": _clamp_int(agent.get("turn_timeout_sec"),
+                                           _AGENT_DEFAULTS["turn_timeout_sec"],
+                                           *_TURN_TIMEOUT_RANGE),
+            "user_instructions": str(agent.get("user_instructions", "") or ""),
+        }
+
+    def set_agent_settings(self, d: dict) -> dict:
+        """校验后部分合并 agent 设置并持久化(值为 None 的键保留原值)。非法值 → ValueError。"""
+        d = d or {}
+        if d.get("max_turns") is not None:
+            _validate_int_range("max_turns", d["max_turns"], *_MAX_TURNS_RANGE)
+        if d.get("turn_timeout_sec") is not None:
+            _validate_int_range("turn_timeout_sec", d["turn_timeout_sec"], *_TURN_TIMEOUT_RANGE)
+        if d.get("user_instructions") is not None and not isinstance(d["user_instructions"], str):
+            raise ValueError("invalid user_instructions: must be a string")
+        with self._lock:
+            data = self._read_raw()
+            merged = self.get_agent_settings()
+            for k in ("max_turns", "turn_timeout_sec", "user_instructions"):
+                if d.get(k) is not None:
+                    merged[k] = d[k]
+            data["agent"] = merged
+            self._write(data)
+        return self.get_agent_settings()
+
+    def get_sandbox_settings(self) -> dict:
+        """沙箱参数(需求 5):memory_mb/cpu_sec/network(none|unrestricted),缺省回退默认。"""
+        data = self._read_raw()
+        sb = data.get("sandbox")
+        if not isinstance(sb, dict):
+            sb = {}
+        network = sb.get("network")
+        if network not in _SANDBOX_NETWORK_MODES:
+            network = _SANDBOX_DEFAULTS["network"]
+        return {
+            "memory_mb": _clamp_int(sb.get("memory_mb"), _SANDBOX_DEFAULTS["memory_mb"],
+                                    *_SANDBOX_MEMORY_RANGE),
+            "cpu_sec": _clamp_int(sb.get("cpu_sec"), _SANDBOX_DEFAULTS["cpu_sec"],
+                                  *_SANDBOX_CPU_RANGE),
+            "network": network,
+        }
+
+    def set_sandbox_settings(self, d: dict) -> dict:
+        """校验后部分合并沙箱设置并持久化。非法值 → ValueError。"""
+        d = d or {}
+        if d.get("memory_mb") is not None:
+            _validate_int_range("memory_mb", d["memory_mb"], *_SANDBOX_MEMORY_RANGE)
+        if d.get("cpu_sec") is not None:
+            _validate_int_range("cpu_sec", d["cpu_sec"], *_SANDBOX_CPU_RANGE)
+        if d.get("network") is not None and d["network"] not in _SANDBOX_NETWORK_MODES:
+            raise ValueError(f"invalid network: {d['network']}")
+        with self._lock:
+            data = self._read_raw()
+            merged = self.get_sandbox_settings()
+            for k in ("memory_mb", "cpu_sec", "network"):
+                if d.get(k) is not None:
+                    merged[k] = d[k]
+            data["sandbox"] = merged
+            self._write(data)
+        return self.get_sandbox_settings()
+
+    def get_embedding_settings(self) -> dict:
+        """Embedding provider 设置(需求 8):local(BGE-M3)/ remote(OpenAI 兼容端点)。
+        非法持久化值读时归一;api_key 原样保存(与 LLM Profile 同文件同保护级)。"""
+        data = self._read_raw()
+        emb = data.get("embedding")
+        if not isinstance(emb, dict):
+            emb = {}
+        provider = emb.get("provider")
+        if provider not in _EMBEDDING_PROVIDERS:
+            provider = _EMBEDDING_DEFAULTS["provider"]
+        dimensions = _clamp_int(emb.get("dimensions"),
+                                _EMBEDDING_DEFAULTS["dimensions"], *_EMBEDDING_DIM_RANGE)
+        if provider == "local":
+            # 本地 BGE-M3 恒为 1024 维:remote 配置过的维度不能带回来(codex review R3)
+            dimensions = 1024
+        return {
+            "provider": provider,
+            "base_url": str(emb.get("base_url", "") or ""),
+            "api_key": str(emb.get("api_key", "") or ""),
+            "model": str(emb.get("model", "") or ""),
+            "dimensions": dimensions,
+        }
+
+    def set_embedding_settings(self, d: dict) -> dict:
+        """校验后部分合并 embedding 设置并持久化。非法值 → ValueError。"""
+        d = d or {}
+        if d.get("provider") is not None and d["provider"] not in _EMBEDDING_PROVIDERS:
+            raise ValueError(f"invalid provider: {d['provider']}")
+        if d.get("dimensions") is not None:
+            _validate_int_range("dimensions", d["dimensions"], *_EMBEDDING_DIM_RANGE)
+        for k in ("base_url", "api_key", "model"):
+            if d.get(k) is not None and not isinstance(d[k], str):
+                raise ValueError(f"invalid {k}: must be a string")
+        with self._lock:
+            data = self._read_raw()
+            merged = self.get_embedding_settings()
+            for k in ("provider", "base_url", "api_key", "model", "dimensions"):
+                if d.get(k) is not None:
+                    merged[k] = d[k]
+            data["embedding"] = merged
+            self._write(data)
+        return self.get_embedding_settings()
+
+    def get_permission_settings(self) -> dict:
+        """权限设置 {mode, tool_overrides}。非法持久化值读时归一,不崩。"""
+        data = self._read_raw()
+        perm = data.get("permissions")
+        if not isinstance(perm, dict):
+            perm = {}
+        mode = perm.get("mode")
+        if mode not in _VALID_PERMISSION_MODES:
+            mode = "ask"
+        overrides = perm.get("tool_overrides")
+        if not isinstance(overrides, dict):
+            overrides = {}
+        overrides = {str(k): v for k, v in overrides.items() if v in _VALID_TOOL_OVERRIDE}
+        return {"mode": mode, "tool_overrides": overrides}
+
+    def set_permission_settings(self, d: dict) -> dict:
+        """校验后部分合并权限设置并持久化。非法值 → ValueError。"""
+        d = d or {}
+        if d.get("mode") is not None and d["mode"] not in _VALID_PERMISSION_MODES:
+            raise ValueError(f"invalid mode: {d['mode']}")
+        if d.get("tool_overrides") is not None:
+            ov = d["tool_overrides"]
+            if not isinstance(ov, dict):
+                raise ValueError("invalid tool_overrides: must be an object")
+            for k, v in ov.items():
+                if v not in _VALID_TOOL_OVERRIDE:
+                    raise ValueError(f"invalid tool override for {k!r}: {v}")
+        with self._lock:
+            data = self._read_raw()
+            merged = self.get_permission_settings()
+            if d.get("mode") is not None:
+                merged["mode"] = d["mode"]
+            if d.get("tool_overrides") is not None:
+                merged["tool_overrides"] = dict(d["tool_overrides"])
+            data["permissions"] = merged
+            self._write(data)
+        return self.get_permission_settings()
 
     def extraction_status(self) -> dict:
         """高质量提取引擎(MinerU)的 provisioning 状态。"""

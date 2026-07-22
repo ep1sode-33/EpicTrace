@@ -2,7 +2,7 @@ from pathlib import Path
 
 from epictrace.config import AppConfig
 from epictrace.db import Database
-from epictrace.models import Conversation, Project
+from epictrace.models import AgentSession, Project
 from epictrace.services.references import ReferenceService
 from tests.fakes import FakeEmbedder, FakeVectorStore
 
@@ -13,7 +13,7 @@ def _setup(tmp_path):
     db = Database(AppConfig(data_dir=tmp_path)); db.create_all()
     with db.session() as s:
         p = Project(title="P", folder_path=str(tmp_path)); s.add(p); s.flush()
-        c = Conversation(project_id=p.id, title="t"); s.add(c); s.flush()
+        c = AgentSession(project_id=p.id, name="t"); s.add(c); s.flush()
         cid = c.id
     return db, cid
 
@@ -28,10 +28,10 @@ def test_large_external_is_indexed_into_attachment_store(tmp_path: Path):
     svc = ReferenceService(db, embedder=FakeEmbedder(), attachment_store=store)
     ref = svc.add_external(cid, _w(tmp_path, "big.md", "页表把虚拟地址映射到物理地址。" * 50), TINY)
     assert ref["mode"] == "indexed"
-    recs = store.list_by({"conversation_id": cid, "reference_id": ref["id"]})
+    recs = store.list_by({"session_id": cid, "reference_id": ref["id"]})
     assert len(recs) >= 1
     r0 = recs[0]
-    assert r0["conversation_id"] == cid and r0["reference_id"] == ref["id"]
+    assert r0["session_id"] == cid and r0["reference_id"] == ref["id"]
     assert "char_start" in r0 and "char_end" in r0 and r0["source_type"] == "attachment"
 
 

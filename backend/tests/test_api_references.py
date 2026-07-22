@@ -4,33 +4,33 @@ from pathlib import Path
 from epictrace.interfaces.media import MediaResult
 
 
-def _project_conv(client, tmp_path):
+def _project_session(client, tmp_path):
     folder = tmp_path / "proj"; folder.mkdir()
     pid = client.post("/api/projects", json={"title": "P", "folder_path": str(folder)}).json()["id"]
-    cid = client.post(f"/api/projects/{pid}/conversations", json={"title": "t"}).json()["id"]
+    cid = client.post("/api/cowork/sessions", json={"project_id": pid}).json()["id"]
     return pid, cid
 
 
 def test_add_external_reference_and_list(client, tmp_path: Path):
-    _, cid = _project_conv(client, tmp_path)
+    _, cid = _project_session(client, tmp_path)
     f = tmp_path / "note.md"; f.write_text("页表内容", encoding="utf-8")
-    r = client.post(f"/api/conversations/{cid}/references",
+    r = client.post(f"/api/cowork/sessions/{cid}/references",
                     json={"kind": "external", "source_path": str(f)})
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["kind"] == "external" and body["mode"] == "fulltext"
     assert "extracted_text" not in body
-    listed = client.get(f"/api/conversations/{cid}/references").json()
+    listed = client.get(f"/api/cowork/sessions/{cid}/references").json()
     assert len(listed) == 1 and listed[0]["display_name"] == "note.md"
 
 
 def test_detach_reference(client, tmp_path: Path):
-    _, cid = _project_conv(client, tmp_path)
+    _, cid = _project_session(client, tmp_path)
     f = tmp_path / "n.md"; f.write_text("内容内容", encoding="utf-8")
-    rid = client.post(f"/api/conversations/{cid}/references",
+    rid = client.post(f"/api/cowork/sessions/{cid}/references",
                       json={"kind": "external", "source_path": str(f)}).json()["id"]
-    assert client.delete(f"/api/conversations/{cid}/references/{rid}").status_code == 204
-    assert client.get(f"/api/conversations/{cid}/references").json() == []
+    assert client.delete(f"/api/cowork/sessions/{cid}/references/{rid}").status_code == 204
+    assert client.get(f"/api/cowork/sessions/{cid}/references").json() == []
 
 
 def test_add_reference_engine_not_ready_is_409(client, tmp_path: Path, monkeypatch):
@@ -39,7 +39,7 @@ def test_add_reference_engine_not_ready_is_409(client, tmp_path: Path, monkeypat
     from epictrace.media.errors import ExtractionEngineNotReady
     from epictrace.media.mineru import MinerUMediaProcessor
 
-    _, cid = _project_conv(client, tmp_path)
+    _, cid = _project_session(client, tmp_path)
     f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
 
     class _Prov:
@@ -56,7 +56,7 @@ def test_add_reference_engine_not_ready_is_409(client, tmp_path: Path, monkeypat
     monkeypatch.setattr("epictrace.services.references.get_processor",
                         lambda p, config: real_proc)
 
-    r = client.post(f"/api/conversations/{cid}/references",
+    r = client.post(f"/api/cowork/sessions/{cid}/references",
                     json={"kind": "external", "source_path": str(f)})
     assert r.status_code == 409, r.text
     assert "MinerU" in r.json()["detail"]
@@ -67,7 +67,7 @@ def test_add_reference_extraction_failed_is_400(client, tmp_path: Path, monkeypa
     from epictrace.media.errors import ExtractionFailed
     from epictrace.media.mineru import MinerUMediaProcessor
 
-    _, cid = _project_conv(client, tmp_path)
+    _, cid = _project_session(client, tmp_path)
     f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
 
     class _Prov:
@@ -84,16 +84,16 @@ def test_add_reference_extraction_failed_is_400(client, tmp_path: Path, monkeypa
     monkeypatch.setattr("epictrace.services.references.get_processor",
                         lambda p, config: real_proc)
 
-    r = client.post(f"/api/conversations/{cid}/references",
+    r = client.post(f"/api/cowork/sessions/{cid}/references",
                     json={"kind": "external", "source_path": str(f)})
     assert r.status_code == 400, r.text
     assert "boom" in r.json()["detail"]
 
 
 def test_add_reference_bad_file_is_400(client, tmp_path: Path):
-    _, cid = _project_conv(client, tmp_path)
+    _, cid = _project_session(client, tmp_path)
     f = tmp_path / "empty.md"; f.write_text("   ", encoding="utf-8")
-    r = client.post(f"/api/conversations/{cid}/references",
+    r = client.post(f"/api/cowork/sessions/{cid}/references",
                     json={"kind": "external", "source_path": str(f)})
     assert r.status_code == 400
 
@@ -116,7 +116,7 @@ def _sse_events(body: str) -> list[tuple[str, str]]:
 
 def test_stream_attach_emits_status_then_done(client, tmp_path: Path, monkeypatch):
     """SSE 挂附件:假处理器报几次进度后返回 → status* 事件 + done(带创建的引用)。"""
-    _, cid = _project_conv(client, tmp_path)
+    _, cid = _project_session(client, tmp_path)
     f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")  # 文件存在即可,文本由假处理器给
 
     class _Proc:
@@ -131,7 +131,7 @@ def test_stream_attach_emits_status_then_done(client, tmp_path: Path, monkeypatc
     monkeypatch.setattr("epictrace.services.references.get_processor",
                         lambda p, config: _Proc())
 
-    with client.stream("POST", f"/api/conversations/{cid}/references/stream",
+    with client.stream("POST", f"/api/cowork/sessions/{cid}/references/stream",
                        json={"kind": "external", "source_path": str(f)}) as r:
         assert r.status_code == 200
         body = "".join(chunk for chunk in r.iter_text())
@@ -145,13 +145,13 @@ def test_stream_attach_emits_status_then_done(client, tmp_path: Path, monkeypatc
     assert ref["mode"] == "fulltext"
     assert "extracted_text" not in ref  # done 用 ReferenceOut 形状(与非流式一致)
     # block-until-ready:done 之后引用确已落库、可列出。
-    listed = client.get(f"/api/conversations/{cid}/references").json()
+    listed = client.get(f"/api/cowork/sessions/{cid}/references").json()
     assert len(listed) == 1 and listed[0]["id"] == ref["id"]
 
 
 def test_stream_attach_emits_error_on_extraction_failure(client, tmp_path: Path, monkeypatch):
     """提取失败(processor.process 抛错)→ SSE error 事件,且不落引用。"""
-    _, cid = _project_conv(client, tmp_path)
+    _, cid = _project_session(client, tmp_path)
     f = tmp_path / "broken.pdf"; f.write_bytes(b"%PDF")
 
     from epictrace.media.errors import ExtractionFailed
@@ -167,7 +167,7 @@ def test_stream_attach_emits_error_on_extraction_failure(client, tmp_path: Path,
     monkeypatch.setattr("epictrace.services.references.get_processor",
                         lambda p, config: _Proc())
 
-    with client.stream("POST", f"/api/conversations/{cid}/references/stream",
+    with client.stream("POST", f"/api/cowork/sessions/{cid}/references/stream",
                        json={"kind": "external", "source_path": str(f)}) as r:
         assert r.status_code == 200
         body = "".join(chunk for chunk in r.iter_text())
@@ -176,18 +176,18 @@ def test_stream_attach_emits_error_on_extraction_failure(client, tmp_path: Path,
     errors = [d for e, d in events if e == "error"]
     assert len(errors) == 1 and "boom" in errors[0]
     assert [e for e, _ in events if e == "done"] == []
-    assert client.get(f"/api/conversations/{cid}/references").json() == []
+    assert client.get(f"/api/cowork/sessions/{cid}/references").json() == []
 
 
 def test_stream_attach_rejects_non_external(client, tmp_path: Path):
-    _, cid = _project_conv(client, tmp_path)
-    r = client.post(f"/api/conversations/{cid}/references/stream",
+    _, cid = _project_session(client, tmp_path)
+    r = client.post(f"/api/cowork/sessions/{cid}/references/stream",
                     json={"kind": "internal", "ingest_record_id": 1})
     assert r.status_code == 400
 
 
-def test_stream_attach_unknown_conversation_404(client):
-    r = client.post("/api/conversations/999999/references/stream",
+def test_stream_attach_unknown_session_404(client):
+    r = client.post("/api/cowork/sessions/999999/references/stream",
                     json={"kind": "external", "source_path": "/nope.pdf"})
     assert r.status_code == 404
 
@@ -206,13 +206,13 @@ def test_stream_attach_client_disconnect_cancels_worker(client, tmp_path: Path, 
 
     from epictrace.services.references import ReferenceService
 
-    _, cid = _project_conv(client, tmp_path)
+    _, cid = _project_session(client, tmp_path)
     f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
 
     stopped = threading.Event()
     saw_cancel = threading.Event()
 
-    def fake_add_external(self, conversation_id, path, context_window,
+    def fake_add_external(self, session_id, path, context_window,
                           progress_cb=None, cancel=None):
         # 模拟长耗时提取:循环到被取消;每圈报一次进度。
         progress_cb and progress_cb("解析中 1/29")
@@ -232,7 +232,7 @@ def test_stream_attach_client_disconnect_cancels_worker(client, tmp_path: Path, 
     monkeypatch.setattr(ReferenceService, "add_external", fake_add_external)
     monkeypatch.setattr(Request, "is_disconnected", always_disconnected)
 
-    with client.stream("POST", f"/api/conversations/{cid}/references/stream",
+    with client.stream("POST", f"/api/cowork/sessions/{cid}/references/stream",
                        json={"kind": "external", "source_path": str(f)}) as r:
         assert r.status_code == 200
         body = "".join(chunk for chunk in r.iter_text())  # 消费到流结束(不挂)
@@ -249,7 +249,7 @@ def test_stream_attach_downloads_models_then_extracts(client, tmp_path: Path, mo
     阻塞到就绪),下完转 ready,再提取出 done。"""
     from epictrace.media.mineru import MinerUMediaProcessor
 
-    _, cid = _project_conv(client, tmp_path)
+    _, cid = _project_session(client, tmp_path)
     f = tmp_path / "paper.pdf"; f.write_bytes(b"%PDF")
 
     class _Prov:
@@ -277,7 +277,7 @@ def test_stream_attach_downloads_models_then_extracts(client, tmp_path: Path, mo
     monkeypatch.setattr("epictrace.services.references.get_processor",
                         lambda p, config: real_proc)
 
-    with client.stream("POST", f"/api/conversations/{cid}/references/stream",
+    with client.stream("POST", f"/api/cowork/sessions/{cid}/references/stream",
                        json={"kind": "external", "source_path": str(f)}) as r:
         assert r.status_code == 200
         body = "".join(chunk for chunk in r.iter_text())

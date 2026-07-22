@@ -15,13 +15,32 @@ def get_db(request: Request) -> Database:
 
 
 def get_embedder(request: Request):
-    """延迟构造默认 embedder:仅在索引路由首次用到时才起真件(BGE-M3)。"""
-    embedder = request.app.state.embedder
-    if embedder is None:
+    """延迟构造 embedder:仅在索引/检索路由首次用到时才起真件。
+
+    provider 由 embedding 设置决定(需求 8):local = BGE-M3;remote = OpenAI 兼容端点。
+    设置变更后经「签名比对」自动重建(app.state.embedder_key),无需重启。"""
+    from epictrace.services.settings import SettingsService
+
+    config = getattr(request.app.state, "config", None)
+    # smoke 测试的 SimpleNamespace 无 data_dir → 读不了 settings,按 local 处理
+    cfg = (SettingsService(config).get_embedding_settings()
+           if config is not None and hasattr(config, "data_dir") else None)
+    key = (cfg["provider"], cfg["base_url"], cfg["api_key"], cfg["model"], cfg["dimensions"]) if cfg else ("local",)
+    if request.app.state.embedder is not None and getattr(
+            request.app.state, "embedder_key", None) == key:
+        return request.app.state.embedder
+    if cfg is not None and cfg["provider"] == "remote" and cfg["base_url"] and cfg["model"]:
+        from epictrace.embedding.openai_compat import OpenAICompatEmbedder
+
+        embedder = OpenAICompatEmbedder(
+            base_url=cfg["base_url"], api_key=cfg["api_key"], model=cfg["model"],
+            dimensions=cfg["dimensions"])
+    else:
         from epictrace.embedding.bge_m3 import BgeM3Embedder
 
         embedder = BgeM3Embedder()
-        request.app.state.embedder = embedder
+    request.app.state.embedder = embedder
+    request.app.state.embedder_key = key
     return embedder
 
 
@@ -45,10 +64,29 @@ def get_vector_store(request: Request):
     之前先 warmup embedding 与 reranker 模型(此时进程内还没有任何 gRPC),全局保证顺序安全。
     用锁串行化,避免并发两次构造抢 milvus-lite 的独占文件锁。"""
     store = request.app.state.vector_store
-    if store is not None:
+    # 签名 = embedding 空间完整身份(provider/base_url/model/dimensions;codex review R3),
+    # 持久化在 <milvus>.embedsig.json(进程重启后仍可比对)。
+    from epictrace.services.settings import SettingsService
+
+    config0 = getattr(request.app.state, "config", None)
+    sig = _embedding_sig(config0)
+    cur_dim = sig[3]
+    tracked = getattr(request.app.state, "vector_store_sig", None)
+    if store is not None and (tracked is None or tracked == sig):
         return store
     with _vector_store_lock:
         store = request.app.state.vector_store
+        tracked = getattr(request.app.state, "vector_store_sig", None)
+        stale = store is not None and tracked is not None and tracked != sig
+        if store is None and config0 is not None:
+            # 重启后:内存签名丢失,与持久化签名比对;不一致则旧向量整体作废
+            stale = not _sig_file_matches(getattr(config0, "milvus_path", None), sig)
+        if stale:
+            config0b = getattr(request.app.state, "config", None)
+            _drop_store_file(store, getattr(config0b, "milvus_path", None))
+            store = request.app.state.vector_store = None
+            # 向量已清空:全部记录翻回待索引(否则零目标、检索静默变空)
+            _make_reset_indexed_on_heal(request)()
         if store is None:
             get_embedder(request).warmup()  # 先加载 embedding 模型(此时无 gRPC)
             get_reranker(request).warmup()  # 再加载 reranker 模型(仍无 gRPC)
@@ -58,10 +96,72 @@ def get_vector_store(request: Request):
             # 用注入的 app.state.config(测试为 tmp data_dir),同 get_attachment_store 的模式;
             # 无注入才回退新建 AppConfig()(smoke 测试的 SimpleNamespace 无 config 属性,靠 getattr 回退)。
             config = getattr(request.app.state, "config", None) or AppConfig()
-            store = MilvusLiteStore(db_path=config.milvus_path, dim=1024,
+            store = MilvusLiteStore(db_path=config.milvus_path, dim=cur_dim,
                                     on_schema_heal=_make_reset_indexed_on_heal(request))
             request.app.state.vector_store = store
+            request.app.state.vector_store_sig = sig
+            _write_sig_file(config.milvus_path, sig)
     return store
+
+
+def _embedding_sig(config) -> tuple:
+    """embedding 空间身份(provider, base_url, model, dimensions);无配置 → 本地默认。"""
+    from epictrace.services.settings import SettingsService
+
+    if config is None or not hasattr(config, "data_dir"):
+        return ("local", "", "", 1024)
+    cfg = SettingsService(config).get_embedding_settings()
+    return (cfg["provider"], cfg["base_url"], cfg["model"], cfg["dimensions"])
+
+
+def _sig_path(db_path: str | None):
+    from pathlib import Path
+
+    return Path(str(db_path) + ".embedsig.json") if db_path else None
+
+
+def _sig_file_matches(db_path: str | None, sig: tuple) -> bool:
+    """持久化签名与当前一致?无签名文件(旧库/新库)→ 视为一致(旧库历史上就是本地模型)。"""
+    import json
+
+    p = _sig_path(db_path)
+    if p is None or not p.exists():
+        return True
+    try:
+        return tuple(json.loads(p.read_text(encoding="utf-8"))) == sig
+    except (json.JSONDecodeError, OSError, TypeError):
+        return True  # 签名文件损坏:不因此误删用户索引
+
+
+def _write_sig_file(db_path: str | None, sig: tuple) -> None:
+    import json
+    import logging
+
+    p = _sig_path(db_path)
+    if p is None:
+        return
+    try:
+        p.write_text(json.dumps(list(sig), ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        logging.getLogger("epictrace").warning("写 embedding 签名文件失败: %s", e)
+
+
+def _drop_store_file(store, db_path: str | None) -> None:
+    """签名变化后废弃一个 Milvus Lite store:尽力 close,再删库文件(派生数据,可重建)。"""
+    import logging
+    from pathlib import Path
+
+    try:
+        close = getattr(store, "close", None)
+        if callable(close):
+            close()
+    except Exception:  # noqa: BLE001
+        pass
+    if db_path:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except OSError as e:
+            logging.getLogger("epictrace").warning("删除 milvus 库文件失败(%s): %s", db_path, e)
 
 
 def _make_reset_indexed_on_heal(request: Request):
@@ -86,12 +186,28 @@ def _make_reset_indexed_on_heal(request: Request):
 def get_attachment_store(request: Request):
     """会话级临时附件向量库(attachment_chunks)。**单独一个 milvus-lite 文件**——milvus-lite
     对每个 db 文件持独占锁,不能和项目库共用一个文件(否则两个 MilvusClient 抢锁)。
-    与 get_vector_store 同样保证"先暖 embedder+reranker 再起 Milvus"(macOS fork 段错误)。"""
+    与 get_vector_store 同样保证"先暖 embedder+reranker 再起 Milvus"(macOS fork 段错误)。
+    签名(embedding 空间身份)持久化在 <db>.embedsig.json;失效时重建并把 indexed 引用
+    翻回 deferred(codex review R2/R3)。"""
+    config0 = getattr(request.app.state, "config", None)
+    sig = _embedding_sig(config0)
+    cur_dim = sig[3]
     store = getattr(request.app.state, "attachment_store", None)
-    if store is not None:
+    tracked = getattr(request.app.state, "attachment_store_sig", None)
+    if store is not None and (tracked is None or tracked == sig):
         return store
     with _vector_store_lock:
         store = request.app.state.attachment_store
+        tracked = getattr(request.app.state, "attachment_store_sig", None)
+        stale = store is not None and tracked is not None and tracked != sig
+        if store is None and config0 is not None:
+            stale = not _sig_file_matches(getattr(config0, "attachment_milvus_path", None), sig)
+        if stale:
+            config0b = getattr(request.app.state, "config", None)
+            _drop_store_file(store, getattr(config0b, "attachment_milvus_path", None))
+            store = request.app.state.attachment_store = None
+            # 向量已空但 Reference.mode 仍标 indexed(codex review R3):翻回 deferred(可重建态)
+            _reset_indexed_attachments(request)
         if store is None:
             get_embedder(request).warmup()
             get_reranker(request).warmup()
@@ -99,10 +215,31 @@ def get_attachment_store(request: Request):
             from epictrace.vectorstore.milvus_lite import MilvusLiteStore, _ATTACHMENT_SCALARS
 
             config = getattr(request.app.state, "config", None) or AppConfig()
-            store = MilvusLiteStore(db_path=config.attachment_milvus_path, dim=1024,
+            store = MilvusLiteStore(db_path=config.attachment_milvus_path, dim=cur_dim,
                                     collection="attachment_chunks", scalars=_ATTACHMENT_SCALARS)
             request.app.state.attachment_store = store
+            request.app.state.attachment_store_sig = sig
+            _write_sig_file(config.attachment_milvus_path, sig)
     return store
+
+
+def _reset_indexed_attachments(request: Request) -> None:
+    """附件向量库被废弃后,把 references.mode='indexed' 翻回 'deferred'(可重建态)。"""
+    import logging
+
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return
+    from sqlalchemy import update
+
+    from epictrace.models import Reference
+
+    try:
+        with db.session() as s:
+            s.execute(update(Reference).where(Reference.mode == "indexed")
+                      .values(mode="deferred"))
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("epictrace").warning("附件引用重分类失败: %s", e)
 
 
 def get_llm(request: Request):
@@ -169,43 +306,3 @@ def get_retriever(request: Request):
         get_vector_store(request),
         get_reranker(request),
     )
-
-
-def _active_profile(request: Request) -> dict | None:
-    """活动 Profile 的完整字典(含 id/base_url/api_key/model)——agent 路探测 + 构造用。
-    用 app.state.config(测试隔离),无活动 Profile → None。"""
-    from epictrace.config import AppConfig
-    from epictrace.services.settings import SettingsService
-
-    config = getattr(request.app.state, "config", None) or AppConfig()
-    return SettingsService(config).get_active_profile()
-
-
-def get_chat_model_factory(request: Request):
-    """返回一个 ()->ChatOpenAI 工厂(基于活动 Profile),供 ChatService 的 agent 路懒构造;
-    无活动 Profile → None(ChatService 据此只走 Plan 5)。"""
-    profile = _active_profile(request)
-    if profile is None:
-        return None
-    from epictrace.agent.chat_model import make_chat_model
-
-    return lambda: make_chat_model(profile)
-
-
-def get_supports_tools(request: Request):
-    """返回 ()->bool:活动 Profile 是否支持工具调用(探测结果缓存在 app.state)。
-    无活动 Profile / 探测失败 → 视为不支持(走 Plan 5)。"""
-    profile = _active_profile(request)
-    if profile is None:
-        return lambda: False
-    from epictrace.agent.chat_model import make_chat_model
-    from epictrace.agent.tool_probe import cached_supports_tools
-
-    def supports() -> bool:
-        try:
-            return cached_supports_tools(
-                request.app.state, profile, lambda p: make_chat_model(p))
-        except Exception:  # noqa: BLE001 — 探测/构造任何故障 → 不支持
-            return False
-
-    return supports

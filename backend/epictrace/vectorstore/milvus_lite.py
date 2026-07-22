@@ -43,11 +43,12 @@ _SCALARS = {
     "capture_session_id": (DataType.INT64, {}),
     "ts": (DataType.VARCHAR, {"max_length": 64}),
 }
-# 临时附件(chat attachment)collection 的 schema:用 conversation_id/reference_id 取代
+# 临时附件(session attachment)collection 的 schema:用 session_id/reference_id 取代
 # project_id/ingest_record_id —— 这是会话级临时 RAG,随会话清理,不进用户的 Project 文件夹。
+# 旧键 conversation_id 已随对话栈迁移废弃;字段集不一致时由 __init__ 自愈 drop 重建(旧向量是孤儿)。
 _ATTACHMENT_SCALARS = {
     "text": (DataType.VARCHAR, {"max_length": 65535}),
-    "conversation_id": (DataType.INT64, {}),
+    "session_id": (DataType.INT64, {}),
     "reference_id": (DataType.INT64, {}),
     "char_start": (DataType.INT64, {}),
     "char_end": (DataType.INT64, {}),
@@ -72,12 +73,18 @@ class MilvusLiteStore(VectorStore):
         # 向量是派生索引,可由重索引恢复;scalars 未变的 collection(如 attachment)
         # 字段集一致,天然 no-op。
         if self._client.has_collection(collection):
-            existing = {f["name"] for f in self._client.describe_collection(collection)["fields"]}
+            desc = self._client.describe_collection(collection)
+            existing = {f["name"] for f in desc["fields"]}
             expected = {"id", "vector", *self._scalars}
-            if existing != expected:
+            # 向量维度也要比对(codex review R2:改 dimensions 后旧宽度 collection 必须重建,
+            # 否则查询/写入全报维度错,且绕过 on_schema_heal 的 indexed 重置)
+            vec_field = next((f for f in desc["fields"] if f["name"] == "vector"), {})
+            existing_dim = (vec_field.get("params") or {}).get("dim")
+            if existing != expected or (existing_dim is not None and int(existing_dim) != self._dim):
                 _log.warning(
-                    "collection %s 字段集 %s 与当前 schema %s 不一致,drop 后重建(向量可由重索引恢复)",
-                    collection, sorted(existing), sorted(expected),
+                    "collection %s schema 不一致(字段集 %s vs %s,维度 %s vs %s),"
+                    "drop 后重建(向量可由重索引恢复)",
+                    collection, sorted(existing), sorted(expected), existing_dim, self._dim,
                 )
                 # 必须先 release 再 drop:drop 内部的 close 会把 WAL 回放的 memtable
                 # flush 成新 segment 并排队构建 faiss 索引 —— 本进程若已加载 torch

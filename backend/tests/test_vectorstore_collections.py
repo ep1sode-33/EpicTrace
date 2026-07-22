@@ -6,7 +6,7 @@ DIM = 1024
 
 
 def _arec(cid: int, rid: int, text: str) -> dict:
-    return {"vector": [0.1] * DIM, "text": text, "conversation_id": cid, "reference_id": rid,
+    return {"vector": [0.1] * DIM, "text": text, "session_id": cid, "reference_id": rid,
             "char_start": 0, "char_end": len(text), "source_type": "attachment",
             "embed_model_id": "fake"}
 
@@ -16,14 +16,14 @@ def test_attachment_collection_roundtrip_filter_and_cleanup(tmp_path: Path):
     store = MilvusLiteStore(db_path=db, dim=DIM, collection="attachment_chunks",
                             scalars=_ATTACHMENT_SCALARS)
     store.upsert([_arec(1, 10, "页表"), _arec(1, 20, "缓存"), _arec(2, 30, "无关")])
-    rows = store.list_by({"conversation_id": 1, "reference_id": [10, 20]})
+    rows = store.list_by({"session_id": 1, "reference_id": [10, 20]})
     assert {r["reference_id"] for r in rows} == {10, 20}
-    hits = store.query([0.1] * DIM, filter={"conversation_id": 1, "reference_id": [10]}, k=10)
+    hits = store.query([0.1] * DIM, filter={"session_id": 1, "reference_id": [10]}, k=10)
     assert [h["reference_id"] for h in hits] == [10]
     store.delete({"reference_id": 10})
-    assert {r["reference_id"] for r in store.list_by({"conversation_id": 1})} == {20}
-    store.delete({"conversation_id": 1})
-    assert store.list_by({"conversation_id": 1}) == []
+    assert {r["reference_id"] for r in store.list_by({"session_id": 1})} == {20}
+    store.delete({"session_id": 1})
+    assert store.list_by({"session_id": 1}) == []
     store.close()
 
 

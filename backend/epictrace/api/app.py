@@ -9,7 +9,7 @@ from epictrace.config import AppConfig
 from epictrace.db import Database
 from epictrace.api.routers import (
     capture,
-    conversations,
+    cowork,
     files,
     health,
     projects,
@@ -90,15 +90,58 @@ def create_app(
     # 守护 index/reindex 的「检查在跑 + 启动新 job」临界区:双击/重试/正在跑时再点
     # 不应起第二个并发的(破坏性)重建。见 routers/projects.py。
     app.state.index_lock = threading.Lock()
+    # Cowork agent session 管理(DB 持久 + 运行时状态);complete_fn 由路由按 Profile 构造,
+    # 测试可注入 app.state.cowork_complete 脚本化假件。
+    from epictrace.cowork.sessions import SessionManager
+    app.state.cowork_sessions = SessionManager(db)
+    # 上次进程死亡(App Nap/崩溃/强退)留下的运行态会话复位为 error:锁与取消都已随进程
+    # 消失,标着 thinking 会让前端恢复轮询永远等不到结果。已落库的 partial 消息保留可查。
+    from sqlalchemy import update
+
+    from epictrace.models import AgentSession
+
+    with db.session() as s:
+        stale = s.execute(
+            update(AgentSession)
+            .where(AgentSession.status.in_(["thinking", "executing", "waiting_approval"]))
+            .values(status="error")
+        ).rowcount
+    if stale:
+        import logging
+
+        logging.getLogger("epictrace").info("复位 %d 个进程死亡遗留的运行态会话为 error", stale)
+    # Cowork 权限审批:挂起中的工具确认请求(循环线程等待,前端 POST 决策唤醒)。
+    from epictrace.cowork.approvals import ApprovalManager
+    app.state.cowork_approvals = ApprovalManager()
+    # Cowork 取消信号:session_id → Event(stop 端点置位,循环/审批挂起据此中止)。
+    app.state.cowork_cancels = {}
+    # Cowork turn 串行锁:session_id → Lock(同一会话并发 turn 拒绝)。
+    app.state.cowork_turn_locks = {}
+    # Cowork 子 agent 派发(需求 4):任务表跨请求存活,agent 定义在启动时加载
+    # (捆绑 agent_defs/ + 用户 ~/.epictrace/agents/)。
+    from epictrace.cowork.agents import load_agent_defs
+    from epictrace.cowork.dispatch import Dispatcher
+    # Cowork skill 包(需求 6):捆绑 skills_bundle/ + 用户 ~/.epictrace/skills/。
+    from epictrace.cowork.skills import load_skills
+    app.state.cowork_skills = load_skills(app.state.config)
+    app.state.cowork_dispatcher = Dispatcher(
+        db=db,
+        sessions=app.state.cowork_sessions,
+        agent_defs=load_agent_defs(app.state.config),
+        approvals=app.state.cowork_approvals,
+        config=app.state.config,
+        skills=app.state.cowork_skills,
+        cancels=app.state.cowork_cancels,
+    )
 
     app.include_router(health.router, prefix="/api")
     app.include_router(projects.router, prefix="/api")
     app.include_router(files.router, prefix="/api")
-    app.include_router(conversations.router, prefix="/api")
     app.include_router(source.router, prefix="/api")
     app.include_router(settings.router, prefix="/api")
     app.include_router(references.router, prefix="/api")
     app.include_router(capture.router, prefix="/api")
+    app.include_router(cowork.router, prefix="/api")
 
     from pathlib import Path
     from fastapi.staticfiles import StaticFiles

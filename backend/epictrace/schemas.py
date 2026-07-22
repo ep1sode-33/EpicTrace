@@ -54,33 +54,8 @@ class IndexStatusOut(BaseModel):
     errors: list[str] = []
 
 
-class ConversationCreate(BaseModel):
-    title: str | None = None
-
-
 class RenameIn(BaseModel):
     title: str
-
-
-class ConversationOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    project_id: int
-    title: str
-    created_at: datetime
-
-
-class MessageCreate(BaseModel):
-    content: str = Field(min_length=1)
-
-
-class MessageOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    role: str
-    content: str
-    citations_json: str | None = None
-    created_at: datetime
 
 
 class SourceOut(BaseModel):
@@ -240,7 +215,7 @@ class ReferenceCreate(BaseModel):
 class ReferenceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
-    conversation_id: int
+    session_id: int
     kind: str
     display_name: str
     source_path: str | None = None
@@ -310,3 +285,145 @@ class AsrSourceIn(BaseModel):
     helper 开始采集转写,关闭会停掉采集。中途也能开启开始没勾的源。"""
     source: str
     enabled: bool
+
+
+# ---- Cowork ----
+
+class CoworkSessionCreate(BaseModel):
+    type: Literal["agent", "chat", "scheduled", "radar"] = "agent"
+    name: str | None = None
+    # None = 用设置里的默认权限模式(codex review P2:默认设置此前被忽略)
+    permission_mode: Literal["ask", "follow_a_plan", "skip_all"] | None = None
+    project_id: int | None = None  # 绑定项目后出现在「项目与对话」对应项目下
+
+
+class CoworkSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    type: str
+    parent_id: int | None
+    project_id: int | None = None
+    name: str
+    status: str
+    permission_mode: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CoworkMessageCreate(BaseModel):
+    content: str = Field(min_length=1)
+
+
+class CoworkSessionUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    permission_mode: Literal["ask", "follow_a_plan", "skip_all"] | None = None
+
+
+class CoworkMessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    session_id: int
+    role: str
+    content: str
+    name: str | None
+    citations_json: str | None = None
+    tool_call_id: str | None
+    created_at: datetime
+
+
+class CoworkToolOut(BaseModel):
+    name: str
+    description: str
+    permission: str
+    sandbox: str
+    always_allow_suppressed: bool
+
+
+class CoworkAgentDefOut(BaseModel):
+    name: str
+    description: str
+    tools: list[str]
+    disallowed_tools: list[str]
+    model: str
+    permission_mode: str
+    max_turns: int
+
+
+class CoworkSkillOut(BaseModel):
+    name: str
+    description: str
+    source: str  # bundled | user
+
+
+class CoworkProgressOut(BaseModel):
+    total: int
+    done: int
+    running: int
+
+
+class AgentSettingsIn(BaseModel):
+    max_turns: int | None = None
+    turn_timeout_sec: int | None = None
+    user_instructions: str | None = None
+
+
+class AgentSettingsOut(BaseModel):
+    max_turns: int
+    turn_timeout_sec: int
+    user_instructions: str
+
+
+class SandboxSettingsIn(BaseModel):
+    # 合法性由 SettingsService 校验(非法 → 400)
+    memory_mb: int | None = None
+    cpu_sec: int | None = None
+    network: str | None = None  # none | unrestricted
+
+
+class SandboxSettingsOut(BaseModel):
+    memory_mb: int
+    cpu_sec: int
+    network: str
+
+
+class EmbeddingSettingsIn(BaseModel):
+    # provider/dimensions 合法性由 SettingsService 校验(非法 → 400)
+    provider: str | None = None  # local | remote
+    base_url: str | None = None
+    api_key: str | None = None   # None = 保留既有密钥(与 Profile 更新同约定)
+    model: str | None = None
+    dimensions: int | None = None
+
+
+class EmbeddingSettingsOut(BaseModel):
+    provider: str
+    base_url: str
+    api_key: str  # 本地单机明文回传(与 Profile 的 public_view 同约定)
+    model: str
+    dimensions: int
+
+
+class ApprovalDecisionIn(BaseModel):
+    # permission 类 ∈ {once, session, deny};question 类是自由文本(ApprovalManager 按 kind 校验)
+    decision: str
+
+
+class ApprovalOut(BaseModel):
+    approval_id: str
+    session_id: int
+    tool: str
+    args: str
+    allow_session_option: bool
+    kind: str = "permission"  # permission | question
+    prompt: str = ""          # kind=question 时给用户的提问文本
+
+
+class PermissionSettingsIn(BaseModel):
+    # mode/override 的合法性由 SettingsService 校验(非法 → 400),此处不做 Literal 限定
+    mode: str | None = None
+    tool_overrides: dict[str, str] | None = None
+
+
+class PermissionSettingsOut(BaseModel):
+    mode: str
+    tool_overrides: dict[str, str]

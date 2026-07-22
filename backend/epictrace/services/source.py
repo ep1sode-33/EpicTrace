@@ -4,7 +4,7 @@ from pathlib import Path
 
 from epictrace.db import Database
 from epictrace.media import get_processor
-from epictrace.models import ConversationReference, IngestRecord
+from epictrace.models import IngestRecord, Reference
 
 
 class SourceService:
@@ -33,7 +33,7 @@ class SourceService:
     def get_attachment_text(self, reference_id: int) -> dict:
         """外部附件引用的来源:优先用缓存的提取文本;缺失则按 source_path 现提取。"""
         with self._db.session() as s:
-            ref = s.get(ConversationReference, reference_id)
+            ref = s.get(Reference, reference_id)
             if ref is None:
                 raise ValueError("reference not found")
             name = ref.display_name

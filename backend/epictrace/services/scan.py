@@ -24,6 +24,7 @@ INDEXABLE_SUFFIXES = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs",
     ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
     ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".css", ".sql",
+    ".srt", ".vtt",  # 转录文本(与 TEXT_SUFFIXES 对齐)
 }
 
 

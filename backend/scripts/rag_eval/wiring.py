@@ -37,16 +37,3 @@ def build_llm():
     if chat is None:
         raise SystemExit("build_llm: 无活动 LLM Profile（先在产品设置里配置 BYOK）")
     return OpenAICompatLLM(base_url=chat.base_url, api_key=chat.api_key, model=chat.model)
-
-
-def build_chat_model_factory():
-    # 复用产品的 chat_model 工厂(真 DeepSeek，agent 工具调用路）。镜像 api/deps.get_chat_model_factory。
-    # 返回 ()->ChatOpenAI；同样仅手动真跑时调用。
-    from epictrace.agent.chat_model import make_chat_model
-    from epictrace.config import AppConfig
-    from epictrace.services.settings import SettingsService
-
-    profile = SettingsService(AppConfig()).get_active_profile()
-    if profile is None:
-        raise SystemExit("build_chat_model_factory: 无活动 LLM Profile（先在产品设置里配置 BYOK）")
-    return lambda: make_chat_model(profile)

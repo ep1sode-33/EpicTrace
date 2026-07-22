@@ -1,5 +1,9 @@
-"""rag-eval CLI:index / build-corpus / retrieve / report / diff / run / gen-golden / review-golden。
-手动跑,不进 CI。"""
+"""rag-eval CLI:index / build-corpus / retrieve / report / diff / review-golden。
+手动跑,不进 CI。
+
+注:生成段评测(run/latency 子命令、runner_generation/latency/gen_dump 等)随旧对话栈
+(epictrace.agent)一并删除——它们整套挂在旧 ReAct 流水线上;cowork 栈的生成评测需另行搭建。
+"""
 from __future__ import annotations
 
 import argparse
@@ -9,18 +13,8 @@ from pathlib import Path
 
 from scripts.rag_eval.config import EvalConfig
 from scripts.rag_eval.golden import load_golden
-from scripts.rag_eval.report import GEN_CORE, diff_runs, format_report
+from scripts.rag_eval.report import diff_runs, format_report
 from scripts.rag_eval.runner import run_retrieve, write_run
-
-
-def __getattr__(name: str):
-    # 懒导入 run_generation:它顶部拉 epictrace.agent.*(经 langchain_core 牵出 transformers 等重库)。
-    # 模块级懒解析让 `import cli` 保持轻量(纯路由/报表路径不拉重依赖);CLI 测试照常
-    # monkeypatch.setattr(cli, "run_generation", fake)——patch 写进模块 __dict__ 后即遮蔽本 __getattr__。
-    if name == "run_generation":
-        from scripts.rag_eval.runner_generation import run_generation
-        return run_generation
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 _RUNS = Path(__file__).parent / "runs"
 
@@ -45,16 +39,6 @@ def _build_meta(cfg, golden_path: str, *, judge_model=None, gen_model=None) -> d
     if gen_model:
         meta["gen_model"] = gen_model
     return meta
-
-
-def _active_model_name():
-    """被测生成器(DeepSeek)的活动 profile 模型名;读不到 → None(不挡归档)。"""
-    try:
-        from epictrace.config import AppConfig
-        from epictrace.services.settings import SettingsService
-        return (SettingsService(AppConfig()).get_active_profile() or {}).get("model")
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _cmd_report(ns) -> int:
@@ -100,47 +84,6 @@ def _cmd_retrieve(ns) -> int:
     out = write_run(res, _RUNS, meta=_build_meta(cfg, ns.golden))
     print(format_report({k: res[k] for k in ("config_hash", "n", "by_slice", "overall")}))
     print(f"\n[rag-eval] run written to {out}", file=sys.stderr)
-    return 0
-
-
-def _cmd_run(ns) -> int:
-    # 测量点 ②③ 外循环:载 golden → 装配 retriever+judge+chat_model+llm+cache → 跑生成 → 落盘 + 报表。
-    # 重组件装配走 wiring(懒导入真件);CLI 测试 monkeypatch 掉 wiring.* 与 cli.run_generation。
-    from scripts.rag_eval import wiring
-    from scripts.rag_eval.judge_cache import JudgeCache
-    # 经模块属性取 run_generation:未 patch 时走本模块 __getattr__ 懒导入;CLI 测试 patch 后取假件。
-    _run_generation = getattr(sys.modules[__name__], "run_generation")
-    golden = load_golden(ns.golden)
-    cfg = EvalConfig(k=ns.k, dense_n=ns.dense_n, fuse_m=ns.fuse_m, label=ns.label or "")
-    cache = JudgeCache(_RUNS / "judge_cache.jsonl")
-    judge = wiring.build_judge()
-    res = _run_generation(golden, build_chat_model=wiring.build_chat_model_factory(),
-                         llm=wiring.build_llm(), retriever=wiring.build_retriever(ns.project_id),
-                         judge=judge, cache=cache, project_id=ns.project_id, config=cfg)
-    judge_model = getattr(getattr(judge, "_cfg", None), "model", None)
-    out = write_run(res, _RUNS, meta=_build_meta(cfg, ns.golden, judge_model=judge_model,
-                                                 gen_model=_active_model_name()))
-    print(format_report({k: res[k] for k in ("config_hash", "n", "by_slice", "overall")}, metrics=GEN_CORE))
-    print(f"\n[rag-eval] run written to {out}", file=sys.stderr)
-    return 0
-
-
-def _cmd_latency(ns) -> int:
-    # eval-only agent 链路时延分解:**不调 judge**(零 opus 成本),generator 用当前活动 profile。
-    # 重件装配走 wiring(懒导入真件);CLI 测试 monkeypatch 掉 wiring.* 与 latency.run_latency_profile。
-    from scripts.rag_eval import latency, wiring
-    golden = load_golden(ns.golden)
-    cfg = EvalConfig(label=ns.label or "")
-    res = latency.run_latency_profile(
-        golden, build_chat_model=wiring.build_chat_model_factory(),
-        llm=wiring.build_llm(), retriever=wiring.build_retriever(ns.project_id),
-        project_id=ns.project_id, sample=ns.sample)
-    meta = _build_meta(cfg, ns.golden, gen_model=_active_model_name())
-    meta["mode"] = "latency"
-    meta["sample"] = ns.sample
-    out = latency.write_latency_run(res, _RUNS, label=ns.label or "run", meta=meta)
-    print(latency.format_latency_table(res["aggregate"]))
-    print(f"\n[rag-eval] latency run written to {out}", file=sys.stderr)
     return 0
 
 
@@ -205,15 +148,6 @@ def main(argv: list[str] | None = None) -> int:
 
     bc = sub.add_parser("build-corpus"); bc.set_defaults(fn=_cmd_build_corpus)
     bc.add_argument("--spec", required=True); bc.add_argument("--dest", required=True); bc.add_argument("--corpus-version", dest="corpus_version", default="v1")
-
-    rn = sub.add_parser("run"); rn.set_defaults(fn=_cmd_run)
-    rn.add_argument("--golden", required=True); rn.add_argument("--project-id", dest="project_id", type=int, required=True)
-    rn.add_argument("--k", type=int, default=6); rn.add_argument("--dense-n", dest="dense_n", type=int, default=30)
-    rn.add_argument("--fuse-m", dest="fuse_m", type=int, default=20); rn.add_argument("--label", default="")
-
-    lt = sub.add_parser("latency"); lt.set_defaults(fn=_cmd_latency)
-    lt.add_argument("--golden", required=True); lt.add_argument("--project-id", dest="project_id", type=int, required=True)
-    lt.add_argument("--sample", type=int, default=None); lt.add_argument("--label", default="")
 
     rg = sub.add_parser("review-golden"); rg.set_defaults(fn=_cmd_review_golden)
     rg.add_argument("--candidates", required=True); rg.add_argument("--out", required=True)
