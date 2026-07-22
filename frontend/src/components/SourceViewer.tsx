@@ -36,6 +36,7 @@ export function SourceViewer({
 
   useEffect(() => {
     if (!citation) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 换 citation 时先清旧来源,避免展示上一条的内容
     setSource(null);
     setError(null);
     setLoading(true);

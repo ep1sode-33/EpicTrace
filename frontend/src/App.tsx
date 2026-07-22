@@ -12,7 +12,7 @@ export default function App() {
   // 设置作为整页视图替换主内容区(非弹窗);点任一顶部 Tab 即离开设置。
   const [inSettings, setInSettings] = useState(false);
   // 对话模型是否已配置(settings.configured,与是否有 key 解耦——无密钥的本地端点保存后也算已配置)。
-  // 决定 Composer 是否解禁;启动时拉一次,保存后刷新。
+  // 传给「项目与对话」(预留意:cowork 会话当前不在前端做配置门禁);启动时拉一次,保存后刷新。
   const [llmConfigured, setLlmConfigured] = useState(false);
   // 「重建索引」跨页签跳转用:由项目页触发后,记下要在「信息处理和入库」里聚焦的项目 id;
   // 自增 focusKey 让 ProcessIngestView 即便已挂载也能重新响应同一项目的再次重建。
@@ -33,7 +33,7 @@ export default function App() {
       .getSettings()
       .then((s) => setLlmConfigured(s.configured))
       .catch(() => {
-        /* 设置拉取失败时保持未配置态:Composer 禁用并提示去设置,仍可重试。 */
+        /* 设置拉取失败时保持未配置态,仍可重试。 */
       });
   }, []);
 

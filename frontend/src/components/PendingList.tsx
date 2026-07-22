@@ -59,6 +59,7 @@ export function PendingList({
   // expandSignal 自增即重新展开(支持同一项目被多次重建)。
   useEffect(() => {
     if (expandProjectId == null) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 响应跨页跳转信号:同步展开被聚焦的项目
     setExpanded((prev) => {
       if (prev.has(expandProjectId)) return prev;
       const next = new Set(prev);
@@ -69,6 +70,7 @@ export function PendingList({
 
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 换项目集时先清旧分组,避免展示过期进度
     setGroups(null);
     setError(null);
 

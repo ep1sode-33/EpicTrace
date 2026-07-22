@@ -17,6 +17,7 @@ export function FileList({
 
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 换 key 时先清旧数据,避免展示上个项目的文件
     setFiles(null);
     setError(null);
     api

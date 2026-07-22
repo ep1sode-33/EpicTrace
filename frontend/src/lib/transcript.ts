@@ -45,7 +45,9 @@ function gapSeconds(aTs: string, bTs: string): number {
 }
 
 /** CJK 字符(含中日韩标点/假名/全角):判断衔接处是否中文,决定拼接时是否插空格。 */
-const CJK = /[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]/;
+// 用 \u 转义书写(首段 U+3000 全角空格若写字面量会触发 no-irregular-whitespace)。
+const CJK =
+  /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
 
 /**
  * 拼接同段落的相邻转写片段:中文片段**直连**(中文本无词间空格,用空格连接会把连贯中文切成

@@ -9,7 +9,6 @@ export interface ScanResult { added: number; missing: number; }
 export interface IndexStatus {
   project_id: number; total: number; done: number; status: string; errors: string[];
 }
-export interface Conversation { id: number; project_id: number; title: string; created_at: string; }
 export interface Citation {
   n: number; ingest_record_id: number; char_start: number; char_end: number; snippet: string; source_type: string;
   source_kind?: "project" | "attachment";
@@ -19,9 +18,6 @@ export interface Citation {
   /** 引用对应的墙钟时刻(naive-UTC ISO 秒级,无时区后缀);与 capture_session_id 配对用于跳回。 */
   ts?: string | null;
 }
-export interface ChatMessage {
-  id: number; role: "user" | "assistant"; content: string; citations_json: string | null; created_at: string;
-}
 export interface SourceText { filename: string; path: string; text: string; }
 /** 一个命名的 OpenAI-Compatible 端点。本地单机:api_key 明文回传,允许查看/编辑/复制。 */
 export interface LLMProfile {
@@ -29,7 +25,7 @@ export interface LLMProfile {
   context_window: number;
 }
 export interface ConversationReference {
-  id: number; conversation_id: number; kind: "external" | "internal";
+  id: number; session_id: number; kind: "external" | "internal";
   display_name: string; source_path: string | null; ingest_record_id: number | null;
   mode: "fulltext" | "focus" | "indexed" | "deferred"; text_chars: number; detached: boolean; created_at: string;
 }
@@ -55,6 +51,35 @@ export interface ExtractionSettings {
   engine: "pypdf" | "mineru";
   effort: "high" | "medium";
   model_source: "modelscope" | "huggingface" | "local";
+}
+
+/** Embedding provider 设置(需求 8):local = 本地 BGE-M3;remote = OpenAI 兼容 /v1/embeddings。 */
+export interface EmbeddingSettings {
+  provider: "local" | "remote";
+  base_url: string;
+  api_key: string;
+  model: string;
+  dimensions: number;
+}
+
+/** Agent 循环设置:最大轮数 / 单轮超时 / 注入 system prompt 的用户自定义指令。 */
+export interface AgentSettings {
+  max_turns: number;
+  turn_timeout_sec: number;
+  user_instructions: string;
+}
+
+/** 沙箱设置(需求 5):内存/CPU 上限与网络档位(none=完全断网)。 */
+export interface SandboxSettings {
+  memory_mb: number;
+  cpu_sec: number;
+  network: "none" | "unrestricted";
+}
+
+/** 权限默认模式与工具级覆盖(需求 7)。 */
+export interface PermissionSettings {
+  mode: string;
+  tool_overrides: Record<string, string>;
 }
 
 /** ASR 模型大小:large-v3 / medium / small(distil-large-v3 是英语专用,不入中文管线)。 */
@@ -110,24 +135,126 @@ export type CaptureSessionDetail = CaptureSession & {
   retranscribing?: boolean;
 };
 
-/** 一次知识库检索步骤(透明对话「活动时间线」用):工具名 + 查询词 + 命中段数。 */
-export interface ToolStep {
-  tool: string;
-  query: string;
-  count: number;
+/** 一个 Cowork 会话(agent/chat)。status: idle|thinking|executing|waiting_approval|done|error。 */
+export interface CoworkSession {
+  id: number;
+  type: string;
+  parent_id: number | null;
+  /** 绑定的项目 id(出现在「项目与对话」对应项目下);null = Cowork 自由会话。 */
+  project_id: number | null;
+  name: string | null;
+  status: string;
+  permission_mode: string;
+  created_at: string;
+  updated_at: string;
 }
+/** Cowork 会话内的一条消息。role: user|assistant|tool;tool 消息的 name 是工具名。 */
+export interface CoworkMessage {
+  id: number;
+  session_id: number;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  name: string | null;
+  tool_call_id: string | null;
+  /** assistant 消息的引用链 JSON(与旧对话 citations_json 同契约);无引用为 null。 */
+  citations_json: string | null;
+  created_at: string;
+}
+/** Cowork 的一个工具步骤(活动时间线用):started(带参数)→ done(带结果预览)。 */
+export interface CoworkToolStep {
+  tool: string;
+  args?: string;
+  status: "started" | "done";
+  preview?: string;
+}
+/** 一条待审批的工具调用(approval_request 事件 / GET /api/cowork/approvals 的元素同形)。 */
+export interface CoworkApproval {
+  approval_id: string;
+  session_id: number;
+  tool: string;
+  /** JSON 字符串形式的工具参数(如 "{\"project_id\":1,\"path\":\"a.txt\"}")。 */
+  args: string;
+  /** false 时禁止「本次会话都允许」(删除/派发类工具),前端据此隐藏 session 选项。 */
+  allow_session_option: boolean;
+  /** permission=工具权限确认;question=ask_user 的自由文本提问(弹窗给文本框)。 */
+  kind: "permission" | "question";
+  /** kind=question 时 agent 的提问文本。 */
+  prompt: string;
+}
+/** 审批决策:仅此一次 | 本次会话都允许 | 拒绝;kind=question 时是用户的回答文本。 */
+export type CoworkApprovalDecision = "once" | "session" | "deny" | (string & {});
 
-/** sendMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
-export interface StreamHandlers {
+/** sendCoworkMessage 的流式回调。每个回调都是可选的;onError 兜底网络/解析/HTTP 错误。 */
+export interface CoworkStreamHandlers {
+  /** 中文字符串状态文案(如「思考中」)。 */
   onStatus?: (status: string) => void;
-  onToken?: (token: string) => void;
-  /** 推理模型的思考过程 token(逐块累积,前端折叠展示)。 */
+  /** 会话状态机变化:thinking|executing|idle|error。 */
+  onSessionState?: (status: string) => void;
+  /** 模型推理文本(可能没有;逐块累积,前端折叠展示)。 */
   onThinking?: (token: string) => void;
-  /** 一次知识库检索步骤(工具/查询/命中数)。 */
-  onToolStep?: (step: ToolStep) => void;
+  /** 工具调用步骤(started/done 各一条,同一工具的 done 是 started 的完成回执)。 */
+  onToolStep?: (step: CoworkToolStep) => void;
+  /** 工具调用待人工确认:agent 循环挂起(session 转 waiting_approval),直到 decideCoworkApproval。 */
+  onApprovalRequest?: (approval: CoworkApproval) => void;
+  /** 审批已决策(本端或其他端):循环恢复;前端据此兜底关闭确认弹窗。 */
+  onApprovalResolved?: (approvalId: string, decision: CoworkApprovalDecision) => void;
+  /** 引用链:答案中的 [n] 映射回检索 chunk(最终答复后、done 前发出一次)。 */
   onCitations?: (citations: Citation[]) => void;
+  /** 首轮自动标题完成:服务端已改名,data 是新标题;父级据此刷新会话列表。 */
+  onSessionRenamed?: (name: string) => void;
+  /** assistant 最终答复——Phase 1 为全文一次性(非增量)。 */
+  onToken?: (fullText: string) => void;
   onDone?: () => void;
   onError?: (error: Error) => void;
+}
+
+/** Cowork SSE 流公共实现:send / regenerate / edit 三个入口同一事件协议。 */
+function _coworkStream(url: string, h: CoworkStreamHandlers, init: RequestInit): () => void {
+  const ctrl = new AbortController();
+  // 解析失败 / HTTP / 网络错误统一经 onError 兜底(consumeSSE 抛出);abort 时静默。
+  void consumeSSE(
+    url,
+    { ...init, signal: ctrl.signal },
+    (event, data) => {
+      switch (event) {
+        case "status": h.onStatus?.(data); break;
+        case "session_state":
+          try { h.onSessionState?.((JSON.parse(data) as { status: string }).status); }
+          catch { /* 状态解析失败不致命:列表轮询会校正徽标 */ }
+          break;
+        case "thinking": h.onThinking?.(data); break;
+        case "tool_step":
+          try { h.onToolStep?.(JSON.parse(data) as CoworkToolStep); }
+          catch { /* 步骤解析失败不致命:不影响最终答复 */ }
+          break;
+        case "approval_request":
+          try { h.onApprovalRequest?.(JSON.parse(data) as CoworkApproval); }
+          catch { /* 审批解析失败不致命:挂起的审批仍可由 listCoworkApprovals 恢复 */ }
+          break;
+        case "approval_resolved":
+          try {
+            const r = JSON.parse(data) as { approval_id: string; decision: CoworkApprovalDecision };
+            h.onApprovalResolved?.(r.approval_id, r.decision);
+          }
+          catch { /* 解析失败不致命:弹窗会在用户操作或下次恢复时关闭 */ }
+          break;
+        case "token": h.onToken?.(data); break;
+        case "citations":
+          try { h.onCitations?.(JSON.parse(data) as Citation[]); }
+          catch { /* 引用解析失败不致命:正文已到,只是没有可点引用 */ }
+          break;
+        case "session_renamed":
+          try { h.onSessionRenamed?.((JSON.parse(data) as { name: string }).name); }
+          catch { /* 标题解析失败不致命:列表轮询/刷新会校正 */ }
+          break;
+        case "error": h.onError?.(new Error(data || "服务端错误")); break;
+        case "done": h.onDone?.(); break;
+      }
+    },
+  ).catch((e) => {
+    if (!ctrl.signal.aborted) h.onError?.(e instanceof Error ? e : new Error(String(e)));
+  });
+  return () => ctrl.abort();
 }
 
 async function j<T>(r: Response): Promise<T> {
@@ -163,48 +290,29 @@ export const api = {
       { method: "DELETE" },
     ).then(j<{ deleted: boolean; project_id: number; folder_path: string | null }>),
 
-  listConversations: (projectId: number) =>
-    fetch(`${BASE}/api/projects/${projectId}/conversations`).then(j<Conversation[]>),
-  createConversation: (projectId: number, title?: string) =>
-    fetch(`${BASE}/api/projects/${projectId}/conversations`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: title ?? null }),
-    }).then(j<Conversation>),
-  deleteConversation: (cid: number) =>
-    fetch(`${BASE}/api/conversations/${cid}`, { method: "DELETE" }).then((r) => {
-      // 后端在缺失时返回 404;视为「已不在」,与删除成功同样处理。
-      if (!r.ok && r.status !== 404) throw new Error(`${r.status}: ${r.statusText}`);
-    }),
-  renameConversation: (cid: number, title: string) =>
-    fetch(`${BASE}/api/conversations/${cid}`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
-    }).then(j<Conversation>),
   renameProject: (id: number, title: string) =>
     fetch(`${BASE}/api/projects/${id}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
     }).then(j<Project>),
-  listMessages: (cid: number) =>
-    fetch(`${BASE}/api/conversations/${cid}/messages`).then(j<ChatMessage[]>),
   getSource: (recordId: number) =>
     fetch(`${BASE}/api/source/${recordId}`).then(j<SourceText>),
   getAttachmentSource: (referenceId: number) =>
     fetch(`${BASE}/api/attachment-source/${referenceId}`).then(j<SourceText>),
-  listReferences: (cid: number) =>
-    fetch(`${BASE}/api/conversations/${cid}/references`).then(j<ConversationReference[]>),
-  addExternalReference: (cid: number, source_path: string) =>
-    fetch(`${BASE}/api/conversations/${cid}/references`, {
+  listReferences: (sid: number) =>
+    fetch(`${BASE}/api/cowork/sessions/${sid}/references`).then(j<ConversationReference[]>),
+  addExternalReference: (sid: number, source_path: string) =>
+    fetch(`${BASE}/api/cowork/sessions/${sid}/references`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind: "external", source_path }),
     }).then(j<ConversationReference>),
-  addInternalReference: (cid: number, ingest_record_id: number) =>
-    fetch(`${BASE}/api/conversations/${cid}/references`, {
+  addInternalReference: (sid: number, ingest_record_id: number) =>
+    fetch(`${BASE}/api/cowork/sessions/${sid}/references`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind: "internal", ingest_record_id }),
     }).then(j<ConversationReference>),
-  detachReference: (cid: number, rid: number) =>
-    fetch(`${BASE}/api/conversations/${cid}/references/${rid}`, { method: "DELETE" }).then((r) => {
+  detachReference: (sid: number, rid: number) =>
+    fetch(`${BASE}/api/cowork/sessions/${sid}/references/${rid}`, { method: "DELETE" }).then((r) => {
       if (!r.ok && r.status !== 404) throw new Error(`${r.status}: ${r.statusText}`);
     }),
   getSettings: () => fetch(`${BASE}/api/settings`).then(j<Settings>),
@@ -247,6 +355,36 @@ export const api = {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }).then(j<ExtractionSettings>),
+
+  getEmbeddingSettings: () =>
+    fetch(`${BASE}/api/settings/embedding`).then(j<EmbeddingSettings>),
+  putEmbeddingSettings: (payload: Partial<EmbeddingSettings>) =>
+    fetch(`${BASE}/api/settings/embedding`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(j<EmbeddingSettings>),
+
+  getAgentSettings: () =>
+    fetch(`${BASE}/api/settings/agent`).then(j<AgentSettings>),
+  putAgentSettings: (payload: Partial<AgentSettings>) =>
+    fetch(`${BASE}/api/settings/agent`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(j<AgentSettings>),
+  getSandboxSettings: () =>
+    fetch(`${BASE}/api/settings/sandbox`).then(j<SandboxSettings>),
+  putSandboxSettings: (payload: Partial<SandboxSettings>) =>
+    fetch(`${BASE}/api/settings/sandbox`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(j<SandboxSettings>),
+  getPermissionSettings: () =>
+    fetch(`${BASE}/api/settings/permissions`).then(j<PermissionSettings>),
+  putPermissionSettings: (payload: Partial<PermissionSettings>) =>
+    fetch(`${BASE}/api/settings/permissions`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(j<PermissionSettings>),
   downloadModels: () =>
     fetch(`${BASE}/api/extraction/download-models`, { method: "POST" }).then(j<ExtractionStatus>),
 
@@ -295,38 +433,76 @@ export const api = {
   organizeSession: (sid: number, projectId: number) =>
     fetch(`${BASE}/api/capture/sessions/${sid}/organize`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId }) }).then(j<IndexStatus>),
 
+  // 会话列表过滤:project_id → 该项目绑定会话(「项目与对话」);free_only → 仅自由会话(Cowork tab);皆空 → 全部。
+  listCoworkSessions: (filter?: { project_id?: number; free_only?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (filter?.project_id != null) qs.set("project_id", String(filter.project_id));
+    if (filter?.free_only) qs.set("free_only", "true");
+    const suffix = qs.size ? `?${qs.toString()}` : "";
+    return fetch(`${BASE}/api/cowork/sessions${suffix}`).then(j<CoworkSession[]>);
+  },
+  createCoworkSession: (payload?: { type?: string; name?: string; permission_mode?: string; project_id?: number }) =>
+    fetch(`${BASE}/api/cowork/sessions`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload ?? {}),
+    }).then(j<CoworkSession>),
+  updateCoworkSession: (sid: number, patch: { name?: string; permission_mode?: string }) =>
+    fetch(`${BASE}/api/cowork/sessions/${sid}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }).then(j<CoworkSession>),
+  getCoworkSession: (sid: number) =>
+    fetch(`${BASE}/api/cowork/sessions/${sid}`).then(j<CoworkSession>),
+  deleteCoworkSession: (sid: number) =>
+    fetch(`${BASE}/api/cowork/sessions/${sid}`, { method: "DELETE" }).then((r) => {
+      // 后端在缺失时返回 404;视为「已不在」,与删除成功同样处理。
+      if (!r.ok && r.status !== 404) throw new Error(`${r.status}: ${r.statusText}`);
+    }),
+  /** 停止当前运行的 agent 循环(后端取消;幂等)。 */
+  stopCoworkSession: (sid: number) =>
+    fetch(`${BASE}/api/cowork/sessions/${sid}/stop`, { method: "POST" }).then((r) => {
+      if (!r.ok && r.status !== 404) throw new Error(`${r.status}: ${r.statusText}`);
+    }),
+  listCoworkMessages: (sid: number) =>
+    fetch(`${BASE}/api/cowork/sessions/${sid}/messages`).then(j<CoworkMessage[]>),
+  // 当前待审批的工具调用列表:视图挂载/切换会话后拉一次,用于恢复确认弹窗。
+  listCoworkApprovals: () =>
+    fetch(`${BASE}/api/cowork/approvals`).then(j<CoworkApproval[]>),
+  // 提交审批决策(once/session/deny);404 表示已决策/不存在——视为已处理,与成功同样静默。
+  decideCoworkApproval: (approvalId: string, decision: CoworkApprovalDecision) =>
+    fetch(`${BASE}/api/cowork/approvals/${encodeURIComponent(approvalId)}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision }),
+    }).then((r) => {
+      if (!r.ok && r.status !== 404) throw new Error(`${r.status}: ${r.statusText}`);
+    }),
+
   /**
-   * 发消息并流式接收回答。后端是 SSE(events: status/token/citations/done);
-   * 因为要 POST,不能用 EventSource——改用 fetch + ReadableStream 手解析 `event:`/`data:` 行。
-   * 返回一个 abort 函数:调用即取消本次流(切换会话/卸载时用)。
+   * 向 Cowork 会话发消息并流式接收执行过程。后端是 SSE
+   * (events: status/session_state/thinking/tool_step/approval_request/approval_resolved/token/citations/session_renamed/error/done);
+   * 因为要 POST,不能用 EventSource——复用 consumeSSE 手解析 `event:`/`data:` 行。
+   * token 是最终答复全文一次性到达(Phase 1 不做增量流式)。
+   * 返回一个 abort 函数:调用即取消本次流(切换会话/停止/卸载时用)。
    */
-  sendMessage(cid: number, content: string, h: StreamHandlers): () => void {
-    return streamSSE(`${BASE}/api/conversations/${cid}/messages`, h, {
+  sendCoworkMessage(sid: number, content: string, h: CoworkStreamHandlers): () => void {
+    return _coworkStream(`${BASE}/api/cowork/sessions/${sid}/messages`, h, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
       body: JSON.stringify({ content }),
     });
   },
 
-  /**
-   * 重新生成最后一轮回答(用户无需重输)。后端删掉最后一条 user 消息之后的消息、
-   * 对同一提问重跑同一流水线;事件流与 sendMessage 一致(status/token/citations/done,失败发 error)。
-   * 返回一个 abort 函数。
-   */
-  regenerate(cid: number, h: StreamHandlers): () => void {
-    return streamSSE(`${BASE}/api/conversations/${cid}/regenerate`, h, {
+  /** 重生成最后一轮(后端删最后 user 消息之后的消息并重跑);事件协议同 sendCoworkMessage。 */
+  regenerateCowork(sid: number, h: CoworkStreamHandlers): () => void {
+    return _coworkStream(`${BASE}/api/cowork/sessions/${sid}/regenerate`, h, {
       method: "POST",
       headers: { Accept: "text/event-stream" },
     });
   },
 
-  /**
-   * 编辑某条 user 消息并就地重生成。后端把该消息内容改为 content、删它之后的全部消息、
-   * 以它之前的消息作历史对新内容重跑流水线;事件流与 sendMessage 一致
-   * (status/token/citations/done,失败发 error)。返回一个 abort 函数。
-   */
-  editMessage(cid: number, mid: number, content: string, h: StreamHandlers): () => void {
-    return streamSSE(`${BASE}/api/conversations/${cid}/messages/${mid}/edit`, h, {
+  /** 编辑某条 user 消息并就地重生成;事件协议同 sendCoworkMessage。 */
+  editCoworkMessage(sid: number, mid: number, content: string, h: CoworkStreamHandlers): () => void {
+    return _coworkStream(`${BASE}/api/cowork/sessions/${sid}/messages/${mid}/edit`, h, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
       body: JSON.stringify({ content }),
@@ -337,11 +513,11 @@ export const api = {
    * 附加外部文件(MinerU 解析),流式回报进度。后端 SSE 事件:
    * status(多次,实时进度文案)/ done(成功,data 是 ReferenceOut JSON)/ error(失败,nothing persisted)。
    * 阻塞直到 done/error:附件在 done 之前不可用——这里只是把仍在「等」的过程可视化。
-   * 复用 sendMessage 同款 SSE 解析(fetch + ReadableStream 手解析 event:/data: 行)。
+   * 复用 consumeSSE 同一套 SSE 解析(fetch + ReadableStream 手解析 event:/data: 行)。
    * 返回的 Promise 在流结束(done/error/网络错误处理完)后 resolve。
    */
   attachExternalStream(
-    cid: number,
+    sid: number,
     sourcePath: string,
     cb: {
       onStatus?: (text: string) => void;
@@ -350,7 +526,7 @@ export const api = {
     },
   ): Promise<void> {
     return consumeSSE(
-      `${BASE}/api/conversations/${cid}/references/stream`,
+      `${BASE}/api/cowork/sessions/${sid}/references/stream`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
@@ -378,38 +554,8 @@ export const api = {
 };
 
 /**
- * POST 一个 SSE 端点并流式分发其事件(status/token/citations/done/error)。
- * sendMessage / regenerate 共用;底层 fetch + ReadableStream 解析复用 consumeSSE。
- * 返回一个 abort 函数:调用即取消本次流(切换会话/卸载时用)。
- */
-function streamSSE(url: string, h: StreamHandlers, init: RequestInit): () => void {
-  const ctrl = new AbortController();
-  // 解析失败 / HTTP / 网络错误统一经 onError 兜底(consumeSSE 抛出);abort 时静默。
-  void consumeSSE(url, { ...init, signal: ctrl.signal }, (event, data) => {
-    switch (event) {
-      case "status": h.onStatus?.(data); break;
-      case "token": h.onToken?.(data); break;
-      case "thinking": h.onThinking?.(data); break;
-      case "tool_step":
-        try { h.onToolStep?.(JSON.parse(data) as ToolStep); }
-        catch { /* 步骤解析失败不致命:不影响答案与引用 */ }
-        break;
-      case "citations":
-        try { h.onCitations?.(JSON.parse(data) as Citation[]); }
-        catch { /* 引用解析失败不致命:答案正文已经流式呈现 */ }
-        break;
-      case "error": h.onError?.(new Error(data || "服务端错误")); break;
-      case "done": h.onDone?.(); break;
-    }
-  }).catch((e) => {
-    if (!ctrl.signal.aborted) h.onError?.(e instanceof Error ? e : new Error(String(e)));
-  });
-  return () => ctrl.abort();
-}
-
-/**
  * fetch 一个 SSE 端点,手解析 `event:`/`data:` 行,对每个事件调用 onEvent(event, data)。
- * sendMessage(经 streamSSE)与 attachExternalStream 共用同一套解析逻辑——不另起一套机制。
+ * _coworkStream 与 attachExternalStream 共用同一套解析逻辑——不另起一套机制。
  * 流正常结束时 resolve;HTTP/网络/解析层错误 reject(由调用方决定如何上报)。
  */
 async function consumeSSE(

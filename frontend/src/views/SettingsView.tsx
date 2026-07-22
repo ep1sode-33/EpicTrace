@@ -14,17 +14,22 @@ import {
 
 import {
   api,
+  type AgentSettings,
   type AsrDevice,
   type AsrSettings,
   type AsrStatus,
+  type EmbeddingSettings,
   type ExtractionSettings,
   type ExtractionStatus,
   type LLMProfile,
+  type PermissionSettings,
+  type SandboxSettings,
   type Settings,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 
 type FormState = { name: string; base_url: string; api_key: string; model: string; context_window: string };
 const BLANK: FormState = { name: "", base_url: "", api_key: "", model: "", context_window: "32768" };
@@ -36,7 +41,7 @@ const BLANK: FormState = { name: "", base_url: "", api_key: "", model: "", conte
 export function SettingsView({
   onSaved,
 }: {
-  /** 任一变更成功后回调,携带最新公开设置(configured 已更新),供父级解禁 Composer。 */
+  /** 任一变更成功后回调,携带最新公开设置(configured 已更新),供父级刷新配置门禁状态。 */
   onSaved?: (settings: Settings) => void;
 }) {
   const [profiles, setProfiles] = useState<LLMProfile[]>([]);
@@ -260,11 +265,180 @@ export function SettingsView({
         </section>
 
         <ExtractionSection />
+        <EmbeddingSection />
+        <AgentSection />
         <AsrSection />
       </div>
     </div>
   );
 }
+
+const EMBEDDING_PROVIDER_LABEL: Record<EmbeddingSettings["provider"], string> = {
+  local: "本地 BGE-M3(默认,离线可用)",
+  remote: "远程端点(OpenAI 兼容 /v1/embeddings)",
+};
+
+/**
+ * Embedding provider 设置区(需求 8):本地 BGE-M3 ↔ 远程 OpenAI 兼容端点切换。
+ * 表单态编辑 + 保存一次性 PUT;api_key 留空 = 保留既有密钥(与 Profile 更新同约定)。
+ * 切换 provider/维度后向量索引需重建(Milvus schema 自愈会清空旧向量),在说明里明示。
+ */
+function EmbeddingSection() {
+  const [settings, setSettings] = useState<EmbeddingSettings | null>(null);
+  const [form, setForm] = useState<EmbeddingSettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [savedTick, setSavedTick] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getEmbeddingSettings()
+      .then((s) => {
+        if (cancelled) return;
+        setSettings(s);
+        setForm(s);
+      })
+      .catch((e) => !cancelled && setErr(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const dirty =
+    settings !== null &&
+    form !== null &&
+    (form.provider !== settings.provider ||
+      form.base_url !== settings.base_url ||
+      form.api_key !== "" || // api_key 输入过即视为有改动(留空 = 保留)
+      form.model !== settings.model ||
+      form.dimensions !== settings.dimensions);
+
+  const canSubmit =
+    form !== null &&
+    !saving &&
+    dirty &&
+    (form.provider === "local" ||
+      (form.base_url.trim() !== "" && form.model.trim() !== ""));
+
+  const save = async () => {
+    if (!form || !canSubmit) return;
+    setSaving(true);
+    setErr(null);
+    setSavedTick(false);
+    try {
+      const patch: Partial<EmbeddingSettings> = {
+        provider: form.provider,
+        base_url: form.base_url,
+        model: form.model,
+        dimensions: form.dimensions,
+      };
+      if (form.api_key !== "") {
+        patch.api_key = form.api_key; // 留空 = 保留既有密钥,不下发
+      }
+      const next = await api.putEmbeddingSettings(patch);
+      setSettings(next);
+      setForm(next);
+      setSavedTick(true);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="mt-10 flex flex-col gap-3 border-t border-border/60 pt-8">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-sm font-semibold text-foreground">向量检索模型(Embedding)</h2>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          语义检索用的向量模型。切换 provider 或维度后,已有向量索引会清空重建,需在项目里重新索引。
+        </p>
+      </div>
+
+      {form && (
+        <>
+          <Field id="emb-provider" label="Provider">
+            <select
+              id="emb-provider"
+              value={form.provider}
+              disabled={saving}
+              onChange={(e) =>
+                setForm({ ...form, provider: e.target.value as EmbeddingSettings["provider"] })
+              }
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              {(["local", "remote"] as const).map((v) => (
+                <option key={v} value={v}>{EMBEDDING_PROVIDER_LABEL[v]}</option>
+              ))}
+            </select>
+          </Field>
+
+          {form.provider === "remote" && (
+            <>
+              <Field id="emb-base-url" label="Base URL">
+                <Input
+                  id="emb-base-url"
+                  value={form.base_url}
+                  placeholder="https://api.siliconflow.cn/v1"
+                  onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                />
+              </Field>
+              <Field id="emb-api-key" label="API Key">
+                <Input
+                  id="emb-api-key"
+                  type="password"
+                  value={form.api_key}
+                  placeholder={settings?.api_key ? "已保存,留空保持不变" : "输入密钥"}
+                  onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                />
+              </Field>
+              <Field id="emb-model" label="模型">
+                <Input
+                  id="emb-model"
+                  value={form.model}
+                  placeholder="BAAI/bge-m3"
+                  onChange={(e) => setForm({ ...form, model: e.target.value })}
+                />
+              </Field>
+              <Field id="emb-dimensions" label="向量维度">
+                <Input
+                  id="emb-dimensions"
+                  type="number"
+                  min={64}
+                  max={8192}
+                  value={form.dimensions}
+                  onChange={(e) =>
+                    setForm({ ...form, dimensions: Number(e.target.value) || form.dimensions })
+                  }
+                />
+              </Field>
+            </>
+          )}
+
+          <div className="flex items-center gap-3">
+            <Button type="button" disabled={!canSubmit} onClick={() => void save()}>
+              {saving && <Loader2 className="size-4 animate-spin" />}
+              保存
+            </Button>
+            {savedTick && !dirty && (
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                <Check className="size-3.5" aria-hidden />
+                已保存
+              </span>
+            )}
+          </div>
+        </>
+      )}
+
+      {err && (
+        <p className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
+          {err}
+        </p>
+      )}
+    </section>
+  );
+}
+
 
 const ASR_STATE_LABEL: Record<AsrStatus["state"], string> = {
   not_downloaded: "未下载",
@@ -273,6 +447,208 @@ const ASR_STATE_LABEL: Record<AsrStatus["state"], string> = {
   failed: "失败",
 };
 
+
+/**
+ * Agent 设置区(需求 1/5/7):权限默认模式 + 循环参数(轮数/超时/自定义指令)+ 沙箱。
+ * 三块各自独立保存(API 也是三个端点);follow_a_plan 行为目前等同 ask,不暴露以免误导。
+ */
+function AgentSection() {
+  const [perm, setPerm] = useState<PermissionSettings | null>(null);
+  const [agent, setAgent] = useState<AgentSettings | null>(null);
+  const [sandbox, setSandbox] = useState<SandboxSettings | null>(null);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      api.getPermissionSettings(),
+      api.getAgentSettings(),
+      api.getSandboxSettings(),
+    ])
+      .then(([p, a, s]) => {
+        if (cancelled) return;
+        setPerm(p);
+        setAgent(a);
+        setSandbox(s);
+      })
+      .catch((e) => !cancelled && setErr(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const savePerm = async (mode: string) => {
+    if (!perm) return;
+    const prev = perm;
+    setPerm({ ...perm, mode });
+    setSaving("perm");
+    setErr(null);
+    try {
+      setPerm(await api.putPermissionSettings({ mode }));
+    } catch (e) {
+      setPerm(prev);
+      setErr(String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const saveAgent = async () => {
+    if (!agent) return;
+    setSaving("agent");
+    setErr(null);
+    try {
+      setAgent(await api.putAgentSettings(agent));
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const saveSandbox = async () => {
+    if (!sandbox) return;
+    setSaving("sandbox");
+    setErr(null);
+    try {
+      setSandbox(await api.putSandboxSettings(sandbox));
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <section className="mt-10 flex flex-col gap-4 border-t border-border/60 pt-8">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-sm font-semibold text-foreground">Agent</h2>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          「项目与对话」的 agent 行为:权限确认方式、循环上限、自定义指令与沙箱执行。
+        </p>
+      </div>
+
+      {perm && (
+        <Field id="perm-mode" label="新会话的默认权限模式">
+          <select
+            id="perm-mode"
+            value={perm.mode === "skip_all" ? "skip_all" : "ask"}
+            disabled={saving !== null}
+            onChange={(e) => void savePerm(e.target.value)}
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+          >
+            <option value="ask">手动确认(每次工具调用都需确认)</option>
+            <option value="skip_all">自动执行(跳过确认,高风险)</option>
+          </select>
+        </Field>
+      )}
+
+      {agent && (
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-3">
+            <Field id="agent-max-turns" label="最大轮数">
+              <Input
+                id="agent-max-turns"
+                type="number"
+                min={1}
+                max={200}
+                value={agent.max_turns}
+                onChange={(e) =>
+                  setAgent({ ...agent, max_turns: Number(e.target.value) || agent.max_turns })
+                }
+              />
+            </Field>
+            <Field id="agent-timeout" label="单轮超时(秒)">
+              <Input
+                id="agent-timeout"
+                type="number"
+                min={10}
+                max={3600}
+                value={agent.turn_timeout_sec}
+                onChange={(e) =>
+                  setAgent({ ...agent, turn_timeout_sec: Number(e.target.value) || agent.turn_timeout_sec })
+                }
+              />
+            </Field>
+          </div>
+          <Field id="agent-instructions" label="自定义指令(注入每个会话的 system prompt)">
+            <Textarea
+              id="agent-instructions"
+              rows={3}
+              value={agent.user_instructions}
+              placeholder="例:总是用简体中文回答;回答控制在 300 字以内"
+              onChange={(e) => setAgent({ ...agent, user_instructions: e.target.value })}
+            />
+          </Field>
+          <div>
+            <Button type="button" size="sm" disabled={saving !== null} onClick={() => void saveAgent()}>
+              {saving === "agent" && <Loader2 className="size-4 animate-spin" />}
+              保存循环参数
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {sandbox && (
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-3 gap-3">
+            <Field id="sb-mem" label="沙箱内存(MB)">
+              <Input
+                id="sb-mem"
+                type="number"
+                min={64}
+                max={8192}
+                value={sandbox.memory_mb}
+                onChange={(e) =>
+                  setSandbox({ ...sandbox, memory_mb: Number(e.target.value) || sandbox.memory_mb })
+                }
+              />
+            </Field>
+            <Field id="sb-cpu" label="CPU 上限(秒)">
+              <Input
+                id="sb-cpu"
+                type="number"
+                min={5}
+                max={600}
+                value={sandbox.cpu_sec}
+                onChange={(e) =>
+                  setSandbox({ ...sandbox, cpu_sec: Number(e.target.value) || sandbox.cpu_sec })
+                }
+              />
+            </Field>
+            <Field id="sb-net" label="网络">
+              <select
+                id="sb-net"
+                value={sandbox.network}
+                disabled={saving !== null}
+                onChange={(e) =>
+                  setSandbox({ ...sandbox, network: e.target.value as SandboxSettings["network"] })
+                }
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="none">完全断网(默认)</option>
+                <option value="unrestricted">不限制</option>
+              </select>
+            </Field>
+          </div>
+          <div>
+            <Button type="button" size="sm" disabled={saving !== null} onClick={() => void saveSandbox()}>
+              {saving === "sandbox" && <Loader2 className="size-4 animate-spin" />}
+              保存沙箱
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {err && (
+        <p className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
+          {err}
+        </p>
+      )}
+    </section>
+  );
+}
 
 /**
  * ASR(语音转写)设置区:语音模型(固定完整 large-v3)+ 下载/进度/状态 + 输入设备。面向普通用户,

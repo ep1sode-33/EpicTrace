@@ -41,6 +41,7 @@ export function CreateProjectModal({
   // Reset transient state whenever the dialog is (re)opened.
   useEffect(() => {
     if (open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- 打开对话框时重置表单瞬态
       setTitle("");
       setFolderPath("");
       setBusy(false);

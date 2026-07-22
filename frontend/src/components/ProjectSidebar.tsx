@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import {
   ChevronRight,
   FolderClosed,
@@ -10,7 +10,8 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { type Conversation, type Project } from "@/lib/api";
+import { type CoworkSession, type Project } from "@/lib/api";
+import { sessionTitle } from "@/lib/coworkMeta";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -87,7 +88,6 @@ export function ProjectSidebar({
   projects,
   selectedProjectId,
   selectedConversationId,
-  draftProjectId,
   expandedIds,
   conversationsByProject,
   loadingProjectIds,
@@ -105,23 +105,21 @@ export function ProjectSidebar({
   projects: Project[];
   selectedProjectId: number | null;
   selectedConversationId: number | null;
-  /** 正在撰写草稿(尚未落库的新对话)的项目 id;用于在树内显示一个瞬态指示。 */
-  draftProjectId: number | null;
   /** 当前展开的项目 id 集合。 */
   expandedIds: ReadonlySet<number>;
-  /** 已加载的对话缓存:project id → 该项目的对话列表。 */
-  conversationsByProject: Readonly<Record<number, Conversation[]>>;
+  /** 已加载的对话缓存:project id → 该项目的 cowork 会话列表。 */
+  conversationsByProject: Readonly<Record<number, CoworkSession[]>>;
   /** 正在懒加载对话的项目 id 集合。 */
   loadingProjectIds: ReadonlySet<number>;
   /** 点项目名/行:选中并展开该项目。 */
   onSelectProject: (project: Project) => void;
   /** 点 chevron:仅切换展开/折叠(不改变选中)。 */
   onToggleExpand: (project: Project) => void;
-  onSelectConversation: (conversation: Conversation) => void;
-  /** 新建对话:开一段草稿(不调后端);首次发送时才落库。 */
+  onSelectConversation: (conversation: CoworkSession) => void;
+  /** 新建对话:立即创建 cowork 会话(创建即落库,首轮自动标题)。 */
   onCreateConversation: (project: Project) => void;
   /** 用户在某个对话行选择「删除」时调用,由父级打开确认对话框。 */
-  onDeleteConversation: (conversation: Conversation) => void;
+  onDeleteConversation: (conversation: CoworkSession) => void;
   onCreateProject: () => void;
   /** 用户在某个项目行选择「删除项目」时调用,由父级打开确认对话框。 */
   onDeleteProject: (project: Project) => void;
@@ -130,7 +128,7 @@ export function ProjectSidebar({
   /** 重命名项目(仅显示名):行内编辑提交时调用。 */
   onRenameProject: (project: Project, title: string) => void;
   /** 重命名对话:行内编辑提交时调用。 */
-  onRenameConversation: (conversation: Conversation, title: string) => void;
+  onRenameConversation: (conversation: CoworkSession, title: string) => void;
 }) {
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-border/70 bg-sidebar">
@@ -170,7 +168,6 @@ export function ProjectSidebar({
                 project={p}
                 selected={p.id === selectedProjectId}
                 expanded={expandedIds.has(p.id)}
-                hasDraft={p.id === draftProjectId}
                 conversations={conversationsByProject[p.id]}
                 conversationsLoading={loadingProjectIds.has(p.id)}
                 selectedConversationId={selectedConversationId}
@@ -221,7 +218,6 @@ function ProjectNode({
   project,
   selected,
   expanded,
-  hasDraft,
   conversations,
   conversationsLoading,
   selectedConversationId,
@@ -238,19 +234,18 @@ function ProjectNode({
   project: Project;
   selected: boolean;
   expanded: boolean;
-  hasDraft: boolean;
-  conversations: Conversation[] | undefined;
+  conversations: CoworkSession[] | undefined;
   conversationsLoading: boolean;
   selectedConversationId: number | null;
   onSelectProject: (project: Project) => void;
   onToggleExpand: (project: Project) => void;
-  onSelectConversation: (conversation: Conversation) => void;
+  onSelectConversation: (conversation: CoworkSession) => void;
   onCreateConversation: (project: Project) => void;
-  onDeleteConversation: (conversation: Conversation) => void;
+  onDeleteConversation: (conversation: CoworkSession) => void;
   onDeleteProject: (project: Project) => void;
   onReindexProject: (project: Project) => void;
   onRenameProject: (project: Project, title: string) => void;
-  onRenameConversation: (conversation: Conversation, title: string) => void;
+  onRenameConversation: (conversation: CoworkSession, title: string) => void;
 }) {
   // 菜单打开时让行内操作保持可见(否则鼠标移开行后会随 hover 消失)。
   const [menuOpen, setMenuOpen] = useState(false);
@@ -378,7 +373,6 @@ function ProjectNode({
           <ChatChildren
             conversations={conversations}
             loading={conversationsLoading}
-            hasDraft={hasDraft}
             selectedConversationId={selectedConversationId}
             onSelectConversation={onSelectConversation}
             onDeleteConversation={onDeleteConversation}
@@ -392,25 +386,22 @@ function ProjectNode({
 
 /**
  * 展开后的对话子列表:加载骨架 / 空态「暂无对话」/ 对话行(每行带 hover 删除菜单)。
- * 顶部可能出现一个瞬态的「新对话」草稿指示(未落库,纯前端状态)。
  * 不再提供底部「+ 新对话」入口——新建对话只走项目行 hover 的 + 按钮。
  */
 function ChatChildren({
   conversations,
   loading,
-  hasDraft,
   selectedConversationId,
   onSelectConversation,
   onDeleteConversation,
   onRenameConversation,
 }: {
-  conversations: Conversation[] | undefined;
+  conversations: CoworkSession[] | undefined;
   loading: boolean;
-  hasDraft: boolean;
   selectedConversationId: number | null;
-  onSelectConversation: (conversation: Conversation) => void;
-  onDeleteConversation: (conversation: Conversation) => void;
-  onRenameConversation: (conversation: Conversation, title: string) => void;
+  onSelectConversation: (conversation: CoworkSession) => void;
+  onDeleteConversation: (conversation: CoworkSession) => void;
+  onRenameConversation: (conversation: CoworkSession, title: string) => void;
 }) {
   // 首次展开尚未拉到数据(且在加载):骨架。
   if (loading && conversations === undefined) {
@@ -426,54 +417,108 @@ function ChatChildren({
   }
 
   const items = conversations ?? [];
+  // 子 agent(dispatch_child)嵌在父会话行下,父行显示「子任务 N/M」(需求:进度在项目树可见)。
+  const tops = items.filter((c) => c.parent_id == null);
+  const childrenOf = new Map<number, CoworkSession[]>();
+  for (const c of items) {
+    if (c.parent_id != null) {
+      const arr = childrenOf.get(c.parent_id) ?? [];
+      arr.push(c);
+      childrenOf.set(c.parent_id, arr);
+    }
+  }
 
   return (
     <ul className="flex flex-col gap-0.5">
-      {/* 瞬态草稿指示:正在为该项目撰写一段尚未落库的新对话。 */}
-      {hasDraft && (
-        <li
-          className="flex items-center gap-1.5 rounded-lg bg-muted px-2.5 py-1.5 text-sm text-foreground"
-          aria-current="true"
-        >
-          <PenLine className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="truncate italic text-muted-foreground">新对话…</span>
-        </li>
-      )}
-
-      {items.length === 0 && !hasDraft ? (
+      {tops.length === 0 ? (
         <li className="px-2.5 py-1.5 text-xs text-muted-foreground">暂无对话</li>
       ) : (
-        items.map((c) => (
-          <ChatRow
-            key={c.id}
-            conversation={c}
-            active={c.id === selectedConversationId}
-            onSelect={onSelectConversation}
-            onDelete={onDeleteConversation}
-            onRename={onRenameConversation}
-          />
-        ))
+        tops.map((c) => {
+          const kids = childrenOf.get(c.id) ?? [];
+          const kidsDone = kids.filter(
+            (k) => k.status === "done" || k.status === "error",
+          ).length;
+          return (
+            <Fragment key={c.id}>
+              <ChatRow
+                conversation={c}
+                active={c.id === selectedConversationId}
+                progress={kids.length > 0 ? `${kidsDone}/${kids.length}` : null}
+                onSelect={onSelectConversation}
+                onDelete={onDeleteConversation}
+                onRename={onRenameConversation}
+              />
+              {kids.map((k) => (
+                <ChatRow
+                  key={k.id}
+                  conversation={k}
+                  child
+                  active={k.id === selectedConversationId}
+                  onSelect={onSelectConversation}
+                  onDelete={onDeleteConversation}
+                  onRename={onRenameConversation}
+                />
+              ))}
+            </Fragment>
+          );
+        })
       )}
     </ul>
   );
 }
 
-/** 单个对话行:主点击区选中;hover/聚焦/菜单打开时右侧显现 … 菜单(删除)。 */
+/** 会话状态点:运行中琥珀脉冲 / 待确认琥珀 / 错误红;其余状态不占位(保持树行干净)。 */
+function SessionStatusDot({ status }: { status: string }) {
+  if (status === "thinking" || status === "executing") {
+    return (
+      <span className="relative mr-1.5 flex size-1.5 shrink-0" title="运行中">
+        <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-500/60" />
+        <span className="relative inline-flex size-1.5 rounded-full bg-amber-500" />
+      </span>
+    );
+  }
+  if (status === "waiting_approval") {
+    return (
+      <span
+        className="mr-1.5 inline-flex size-1.5 shrink-0 rounded-full bg-amber-600"
+        title="待确认"
+      />
+    );
+  }
+  if (status === "error") {
+    return (
+      <span
+        className="mr-1.5 inline-flex size-1.5 shrink-0 rounded-full bg-destructive"
+        title="错误"
+      />
+    );
+  }
+  return null;
+}
+
+/** 单个对话行:主点击区选中;hover/聚焦/菜单打开时右侧显现 … 菜单(删除)。
+ * child=true 渲染为子 agent 行(缩进 + 更弱字号);progress 非空时标题旁显示子任务进度。 */
 function ChatRow({
   conversation,
   active,
+  child = false,
+  progress = null,
   onSelect,
   onDelete,
   onRename,
 }: {
-  conversation: Conversation;
+  conversation: CoworkSession;
   active: boolean;
-  onSelect: (conversation: Conversation) => void;
-  onDelete: (conversation: Conversation) => void;
-  onRename: (conversation: Conversation, title: string) => void;
+  child?: boolean;
+  /** 子任务进度文本(如 "2/3");仅父会话行传。 */
+  progress?: string | null;
+  onSelect: (conversation: CoworkSession) => void;
+  onDelete: (conversation: CoworkSession) => void;
+  onRename: (conversation: CoworkSession, title: string) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
+  const title = sessionTitle(conversation);
 
   return (
     <li>
@@ -486,7 +531,7 @@ function ChatRow({
         {editing ? (
           <div className="flex min-w-0 flex-1 items-center px-2.5 py-1.5 pr-8">
             <InlineRename
-              initial={conversation.title}
+              initial={title}
               onSubmit={(v) => {
                 setEditing(false);
                 onRename(conversation, v);
@@ -500,9 +545,19 @@ function ChatRow({
             aria-current={active ? "true" : undefined}
             onClick={() => onSelect(conversation)}
             onDoubleClick={() => setEditing(true)}
-            className="flex min-w-0 flex-1 items-center px-2.5 py-1.5 pr-8 text-left outline-none"
+            className={cn(
+              "flex min-w-0 flex-1 items-center px-2.5 py-1.5 pr-8 text-left outline-none",
+              child && "pl-6",
+            )}
           >
-            <span className="truncate">{conversation.title}</span>
+            {child && <span className="mr-1 shrink-0 text-muted-foreground/60">└</span>}
+            <SessionStatusDot status={conversation.status} />
+            <span className={cn("truncate", child && "text-muted-foreground")}>{title}</span>
+            {progress && (
+              <span className="ml-1.5 shrink-0 text-[10px] text-muted-foreground/70">
+                子任务 {progress}
+              </span>
+            )}
           </button>
         )}
 
@@ -510,7 +565,7 @@ function ChatRow({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              aria-label={`对话「${conversation.title}」的操作`}
+              aria-label={`对话「${title}」的操作`}
               className={cn(
                 "absolute top-1/2 right-1 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground outline-none transition-[opacity,color,background-color]",
                 "hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50",

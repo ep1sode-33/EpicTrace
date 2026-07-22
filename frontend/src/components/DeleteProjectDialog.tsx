@@ -34,6 +34,7 @@ export function DeleteProjectDialog({
   // 每次打开都把瞬时状态归零(尤其是 deleteFolder 必须回到未勾选)。
   useEffect(() => {
     if (open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- 打开对话框时重置瞬态(deleteFolder 必须回到未勾选)
       setDeleteFolder(false);
       setBusy(false);
       setError(null);

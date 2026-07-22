@@ -44,4 +44,5 @@ function Badge({
   )
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- shadcn 惯例:variants 与组件同文件导出
 export { Badge, badgeVariants }
