@@ -26,8 +26,10 @@ def get_embedder(request: Request):
     cfg = (SettingsService(config).get_embedding_settings()
            if config is not None and hasattr(config, "data_dir") else None)
     key = (cfg["provider"], cfg["base_url"], cfg["api_key"], cfg["model"], cfg["dimensions"]) if cfg else ("local",)
-    if request.app.state.embedder is not None and getattr(
-            request.app.state, "embedder_key", None) == key:
+    # 注入的测试假件没有签名轨迹(tracked=None)→ 原样返回,不参与选路/重建
+    # (曾把注入的 FakeEmbedder 误判为过期,CI 上真去下载 BGE-M3 卡死索引测试)
+    tracked = getattr(request.app.state, "embedder_key", None)
+    if request.app.state.embedder is not None and (tracked is None or tracked == key):
         return request.app.state.embedder
     if cfg is not None and cfg["provider"] == "remote" and cfg["base_url"] and cfg["model"]:
         from epictrace.embedding.openai_compat import OpenAICompatEmbedder
