@@ -19,9 +19,9 @@ dependencies = [
   "openai",
   "jieba",
   "rank_bm25",
-  "langgraph",
-  "langchain-openai",
   "sse-starlette",
+  # 子 agent 定义文件(cowork/agent_defs/*.yaml 与 ~/.epictrace/agents/*.yaml)的解析。
+  "pyyaml",
   # ASR(Plan 9):faster-whisper(带 CTranslate2)在隔离子进程里流式转写;sounddevice
   # 采 mic(需系统 PortAudio);soundfile 把原始 PCM 落 wav。这些只在 ASR 子进程运行期用,
   # 测试套件用 fake / importorskip 不硬依赖它们。
@@ -53,3 +53,4 @@ include = ["epictrace*"]
 
 [tool.setuptools.package-data]
 "epictrace.shell" = ["native/*.swift", "native/build.sh"]
+"epictrace.cowork" = ["agent_defs/*.yaml", "skills_bundle/*/SKILL.md"]

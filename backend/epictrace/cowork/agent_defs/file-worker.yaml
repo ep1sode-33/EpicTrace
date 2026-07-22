@@ -1,0 +1,8 @@
+name: file-worker
+description: 读取与检索项目文件,完成受限的独立子任务(通读文档、总结要点、检索取证)。适合批量文档处理时并行派发。
+tools: [list_projects, list_files, read_file, search_text, search_vector, search_hybrid, get_timestamp_citation]
+disallowed_tools: [delete_file]
+skills: [pdf-reading, docx, pptx]
+model: ""
+permission_mode: skip_all
+max_turns: 15
